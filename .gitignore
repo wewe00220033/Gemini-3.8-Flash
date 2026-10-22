@@ -1,0 +1,14 @@
+# Secret Keys & Environment Variables (DO NOT COMMIT)
+keys.txt
+.env
+*.env
+
+# Python Cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.log
+
+# OS generated files
+.DS_Store
+Thumbs.db
