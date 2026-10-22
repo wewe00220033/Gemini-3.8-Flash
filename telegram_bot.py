@@ -1,13 +1,17 @@
 # -*- coding: utf-8 -*-
 """
-بوت تليجرام للتفريغ الصوتي الفوري عبر Gemini 3.8 Flash مع تدوير المفاتيح (Key Pool)
+بوت تليجرام للتفريغ الصوتي الذكي وإدارة المفاتيح 360° (@Zizo00ZIZO_bot)
+- استقبال الفويس نوت والتفريغ الفوري بكود بلوك قابل للنسخ
+- كشف المفاتيح التلقائي وإضافتها للـ Key Pool بمجرد إرسالها نصياً في الشات
+- أوامر الفحص السريع: /status لعرض الرصيد وحالة المفاتيح
 """
 
 import sys
-import os
 import time
-import base64
 import requests
+from config import Config
+from key_manager import key_manager
+from transcriber import transcribe_audio_bytes
 
 if sys.platform == "win32":
     try:
@@ -16,117 +20,32 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-KEYS_FILE = os.path.join(SCRIPT_DIR, "keys.txt")
-ENV_FILE = os.path.join(SCRIPT_DIR, ".env")
-
-def load_keys():
-    keys = {}
-    
-    # 1. قراءة من ملف .env إن وجد
-    if os.path.exists(ENV_FILE):
-        with open(ENV_FILE, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith("#") and "=" in line:
-                    k, v = line.split("=", 1)
-                    keys[k.strip()] = v.strip()
-
-    # 2. قراءة من ملف keys.txt المحلي إن وجد
-    if os.path.exists(KEYS_FILE):
-        with open(KEYS_FILE, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith("#") and "=" in line:
-                    k, v = line.split("=", 1)
-                    keys[k.strip()] = v.strip()
-
-    # 3. متغيرات البيئة من نظام التشغيل أو لوحة الاستضافة (Hosting Environment Variables) - أعلى أولوية
-    for env_var in ["GEMINI_API_KEYS", "GEMINI_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_BOT_USERNAME", "TELEGRAM_CHAT_ID", "RECORDINGS_DIR"]:
-        val = os.environ.get(env_var)
-        if val:
-            keys[env_var] = val.strip()
-
-    return keys
-
-def get_api_keys_list(keys_dict):
-    keys_str = keys_dict.get("GEMINI_API_KEYS") or keys_dict.get("GEMINI_API_KEY", "")
-    return [k.strip() for k in keys_str.split(",") if k.strip()]
-
-def transcribe_audio_bytes(audio_bytes, mime_type, api_keys):
-    b64_data = base64.b64encode(audio_bytes).decode("utf-8")
-    prompt = (
-        "أنت مفرغ صوتي محترف فائق الدقة والذكاء. فرغ هذا التسجيل الصوتي بدقة متناهية كلمة بكلمة إلى نص عربي سليم.\n"
-        "القواعد الصارمة الإلزامية:\n"
-        "1. المصطلحات التقنية والبرمجية وأسماء الأدوات والخدمات تكتب باللغة الإنجليزية بأحرفها اللاتينية الأصلية القياسية (مثل GitHub, AI, Gist, IP, API, Python, Windows, Groq).\n"
-        "2. اكتب الكلمات العربية بضبط إملائي ونحوي سليم دون إسقاط أي حرف أو كلمة ودون أي تخمين زائد.\n"
-        "3. أخرج النص المفرغ فقط، دون أي مقدمات أو خاتمة أو شروحات."
-    )
+def send_telegram_message(token, chat_id, text, reply_to_id=None, parse_mode="Markdown"):
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
     payload = {
-        "contents": [
-            {
-                "parts": [
-                    {
-                        "inline_data": {
-                            "mime_type": mime_type,
-                            "data": b64_data
-                        }
-                    },
-                    {
-                        "text": prompt
-                    }
-                ]
-            }
-        ]
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": parse_mode
     }
-
-    # تجربة الموديلات الذكية (3.8 ثم 3.6 ثم 3.5 Transcribe المتخصص) عبر المفاتيح
-    for model in ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-transcribe"]:
-        for key in api_keys:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
-            try:
-                resp = requests.post(url, json=payload, timeout=60)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    part = data["candidates"][0]["content"]["parts"][0]
-                    if "text" in part:
-                        return part["text"].strip()
-                    elif "audioTranscription" in part:
-                        return part["audioTranscription"].get("text", "").strip()
-                elif resp.status_code == 429:
-                    continue
-            except Exception:
-                continue
-
-    # لو خلصت الـ 20 في كل المفاتيح، نرجع لـ 3.5 Flash Lite
-    for key in api_keys:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key={key}"
-        try:
-            resp = requests.post(url, json=payload, timeout=60)
-            if resp.status_code == 200:
-                data = resp.json()
-                return data["candidates"][0]["content"]["parts"][0]["text"].strip()
-        except Exception:
-            continue
-
-    raise RuntimeError("فشلت المحاولات عبر جميع المفاتيح المتاحة.")
+    if reply_to_id:
+        payload["reply_to_message_id"] = reply_to_id
+    try:
+        requests.post(url, json=payload, timeout=15)
+    except Exception as e:
+        print(f"⚠️ فشل إرسال رسالة لتليجرام: {e}")
 
 def main():
-    keys = load_keys()
-    bot_token = keys.get("TELEGRAM_BOT_TOKEN")
-    api_keys = get_api_keys_list(keys)
-    allowed_chat_id = keys.get("TELEGRAM_CHAT_ID", "1124247595")
+    bot_token, bot_user, allowed_chat_id = key_manager.get_telegram_config()
 
-    if not bot_token or not api_keys:
-        print("❌ خطأ: تأكد من وجود TELEGRAM_BOT_TOKEN و GEMINI_API_KEYS في ملف keys.txt")
-        sys.exit(1)
+    if not bot_token:
+        print("❌ خطأ: لم يتم العثور على TELEGRAM_BOT_TOKEN في keys.json أو متغيرات البيئة!")
+        return
 
-    print("=" * 60)
+    print("=" * 65)
     print("🤖 جاري تشغيل بوت التليجرام للتفريغ الصوتي الفوري...")
-    print(f"👤 البوت: {keys.get('TELEGRAM_BOT_USERNAME')}")
-    print(f"🔑 عدد مفاتيح الـ Pool: {len(api_keys)}")
+    print(f"👤 البوت: {bot_user}")
     print(f"🔒 مخصص للمستخدم: {allowed_chat_id}")
-    print("=" * 60)
+    print("=" * 65)
 
     offset = None
     while True:
@@ -149,14 +68,23 @@ def main():
                     continue
 
                 chat_id = str(msg["chat"]["id"])
+
+                # التحقق الأمني من الـ Chat ID
                 if allowed_chat_id and chat_id != str(allowed_chat_id):
+                    print(f"⛔ رسالة محجوبة من مستخدم غير مصرح له: {chat_id}")
                     continue
 
+                msg_text = msg.get("text", "")
                 voice = msg.get("voice") or msg.get("audio") or msg.get("document")
+
+                # ==============================================================
+                # 1. معالجة التسجيلات الصوتية (Voice / Audio)
+                # ==============================================================
                 if voice:
                     file_id = voice["file_id"]
                     mime_type = voice.get("mime_type", "audio/ogg")
 
+                    # إشعار الكتابة (Typing Action)
                     requests.post(
                         f"https://api.telegram.org/bot{bot_token}/sendChatAction",
                         json={"chat_id": chat_id, "action": "typing"}
@@ -164,6 +92,7 @@ def main():
 
                     print(f"🎙️ تم استلام تسجيل صوتي من {chat_id}...")
 
+                    # تحميل الملف الصوتي
                     f_info = requests.get(f"https://api.telegram.org/bot{bot_token}/getFile?file_id={file_id}").json()
                     file_path = f_info.get("result", {}).get("file_path")
                     if not file_path:
@@ -172,35 +101,54 @@ def main():
                     download_url = f"https://api.telegram.org/file/bot{bot_token}/{file_path}"
                     audio_bytes = requests.get(download_url).content
 
+                    # التفريغ بالثلاثي الفائز
                     try:
-                        text = transcribe_audio_bytes(audio_bytes, mime_type, api_keys)
-                        print(f"✅ تم التفريغ: {text[:50]}...")
-                        reply_text = f"```text\n{text}\n```"
-                        requests.post(
-                            f"https://api.telegram.org/bot{bot_token}/sendMessage",
-                            json={
-                                "chat_id": chat_id,
-                                "text": reply_text,
-                                "parse_mode": "MarkdownV2",
-                                "reply_to_message_id": msg["message_id"]
-                            }
-                        )
+                        text, model, key_name = transcribe_audio_bytes(audio_bytes, mime_type)
+                        print(f"✅ تم التفريغ عبر [{model}] بالمفتاح [{key_name}]: {text[:40]}...")
+
+                        # الإرسال في كود بلوك للنسخ بلمسة واحدة في تليجرام
+                        reply = f"```text\n{text}\n```\n⚡ *الموديل:* `{model}` | 🔑 `{key_name}`"
+                        send_telegram_message(bot_token, chat_id, reply, reply_to_id=msg["message_id"])
+
                     except Exception as e:
-                        print(f"❌ خطأ: {e}")
-                        requests.post(
-                            f"https://api.telegram.org/bot{bot_token}/sendMessage",
-                            json={"chat_id": chat_id, "text": f"❌ عذراً حدث خطأ: {e}"}
+                        print(f"❌ خطأ تفريغ: {e}")
+                        send_telegram_message(bot_token, chat_id, f"❌ عذراً، فشل التفريغ: {e}", reply_to_id=msg["message_id"])
+
+                # ==============================================================
+                # 2. معالجة النصوص والمفاتيح والأوامر (Text & Dynamic Key Detection)
+                # ==============================================================
+                elif msg_text:
+                    # فحص إذا كان المستخدم يرسل مفتاح Gemini جديد
+                    extracted_key, extracted_name = key_manager.extract_key_from_text(msg_text)
+                    if extracted_key:
+                        entry, is_new = key_manager.add_key(extracted_key, extracted_name)
+                        status_str = "إضافة مفتاح جديد" if is_new else "تحديث المفتاح"
+                        reply = (
+                            f"🎉 *تم بنجاح {status_str} لمصفوفة المفاتيح (Key Pool)!*\n\n"
+                            f"📌 *اسم المشروع:* `{entry.get('name')}`\n"
+                            f"🔑 *المفتاح:* `{extracted_key[:8]}...{extracted_key[-4:]}`\n"
+                            f"🟢 *الحالة:* `نشط جاهز للاستخدام`\n"
+                            f"⚡ *رصيدك اليومي زاد بمعدل 65 ريكورد إضافي!* 🚀"
                         )
-                elif msg.get("text") == "/start":
-                    welcome = (
-                        "أهلاً بك يا بطل! 🎙️⚡\n\n"
-                        "أنا بوت التفريغ الصوتي الفوري عبر Gemini 3.8 Flash.\n"
-                        "ابعتلي أي فويس نوت في أي وقت، وهفرغهولك فوراً بنص جاهز للنسخ بلمسة واحدة! 🚀"
-                    )
-                    requests.post(
-                        f"https://api.telegram.org/bot{bot_token}/sendMessage",
-                        json={"chat_id": chat_id, "text": welcome}
-                    )
+                        send_telegram_message(bot_token, chat_id, reply, reply_to_id=msg["message_id"])
+                        continue
+
+                    # الأوامر النصية
+                    cmd = msg_text.strip().lower()
+                    if cmd in ["/status", "/keys", "حالة", "المفاتيح"]:
+                        summary = key_manager.get_status_summary()
+                        send_telegram_message(bot_token, chat_id, summary, reply_to_id=msg["message_id"])
+
+                    elif cmd in ["/start", "/help", "مساعدة"]:
+                        guide = (
+                            "👋 *أهلاً بك في منظومة التفريغ الصوتي الذكي 360°!* 🎙️⚡\n\n"
+                            "• **للتفريغ:** ابعتلي أي فويس نوت أو ملف صوتي، وهفرغهولك فوراً بنص جاهز للنسخ بلمسة واحدة.\n"
+                            "• **لإضافة مفتاح جديد:** ابعت مفتاح API هنا مباشرة (مع اسم أو بدونه) وهيتسجل في الـ Pool تلقائياً.\n"
+                            "• **لحالة المفاتيح والرصيد:** أرسل أمر `/status`.\n\n"
+                            "🛡️ *الموديلات النشطة:* `Gemini 3.8 Flash` ➔ `3.6 Flash` ➔ `3.5 Transcribe`\n"
+                            "❌ *موديل Lite مستبعد نهائياً لأعلى جودة ممكنة!*"
+                        )
+                        send_telegram_message(bot_token, chat_id, guide, reply_to_id=msg["message_id"])
 
         except Exception as e:
             time.sleep(3)

@@ -1,5 +1,6 @@
 # Secret Keys & Environment Variables (DO NOT COMMIT)
 keys.txt
+keys.json
 .env
 *.env
 
