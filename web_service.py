@@ -7,12 +7,13 @@
 - دعم كامل لسحب وإفلات الملفات وإدارة المفاتيح
 """
 
-import os
 import json
+import hmac
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse, parse_qs
 from config import Config
-from key_manager import key_manager
+from key_manager import key_manager, KeyManager
 from transcriber import transcribe_audio_bytes
 
 HTML_PAGE = """<!DOCTYPE html>
@@ -365,6 +366,24 @@ HTML_PAGE = """<!DOCTYPE html>
         let startTime;
         let timerInterval;
 
+        // مصادقة اختيارية: لو الخادم مضبوط بـ WEB_ACCESS_TOKEN يرد 401 فنطلب التوكن مرة ونحفظه
+        const TOKEN_KEY = 'web_access_token';
+        function getToken() { return localStorage.getItem(TOKEN_KEY) || ''; }
+        async function apiFetch(url, options = {}, retry = true) {
+            options.headers = Object.assign({}, options.headers || {});
+            const t = getToken();
+            if (t) options.headers['X-Access-Token'] = t;
+            const resp = await fetch(url, options);
+            if (resp.status === 401 && retry) {
+                const entered = prompt('🔐 هذه الواجهة محمية. أدخل توكن الوصول (WEB_ACCESS_TOKEN):');
+                if (entered) {
+                    localStorage.setItem(TOKEN_KEY, entered.trim());
+                    return apiFetch(url, options, false);
+                }
+            }
+            return resp;
+        }
+
         async function toggleRecording() {
             if (!isRecording) {
                 try {
@@ -412,7 +431,7 @@ HTML_PAGE = """<!DOCTYPE html>
             formData.append('audio', audioBlob, 'record.webm');
 
             try {
-                const resp = await fetch('/api/transcribe', {
+                const resp = await apiFetch('/api/transcribe', {
                     method: 'POST',
                     body: formData
                 });
@@ -435,7 +454,7 @@ HTML_PAGE = """<!DOCTYPE html>
             formData.append('audio', file, file.name);
 
             try {
-                const resp = await fetch('/api/transcribe', {
+                const resp = await apiFetch('/api/transcribe', {
                     method: 'POST',
                     body: formData
                 });
@@ -475,7 +494,7 @@ HTML_PAGE = """<!DOCTYPE html>
             const name = document.getElementById('newKeyName').value.trim();
             const key = document.getElementById('newKeyValue').value.trim();
 
-            const resp = await fetch('/api/add_key', {
+            const resp = await apiFetch('/api/add_key', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ key, name })
@@ -495,79 +514,133 @@ HTML_PAGE = """<!DOCTYPE html>
 """
 
 class WebRequestHandler(BaseHTTPRequestHandler):
+    # ------------------------------------------------------------------
+    # أدوات مساعدة
+    # ------------------------------------------------------------------
+    def _send_json(self, status, payload):
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+
+    def _is_local(self):
+        return bool(self.client_address) and self.client_address[0] in ("127.0.0.1", "::1")
+
+    def _authorized(self):
+        """
+        مصادقة اختيارية: لو WEB_ACCESS_TOKEN فاضي → مفتوح بالكامل (منظومة شخصية).
+        لو مضبوط → يُقبل من localhost دائماً، أو بالتوكن في Header `X-Access-Token` أو `?token=`.
+        """
+        token = Config.WEB_ACCESS_TOKEN
+        if not token or self._is_local():
+            return True
+        supplied = self.headers.get("X-Access-Token", "")
+        if not supplied:
+            qs = parse_qs(urlparse(self.path).query)
+            supplied = (qs.get("token") or [""])[0]
+        return hmac.compare_digest(supplied, token)
+
+    def _route(self):
+        return urlparse(self.path).path
+
+    @staticmethod
+    def parse_multipart(body, content_type):
+        """
+        يستخرج أول ملف من multipart/form-data. يرجع (bytes, mime_type) أو (None, None).
+        - يدعم boundary مقتبساً (RFC 2046).
+        - يقص CRLF واحداً فقط قبل الـ boundary التالي (لا يُفسد بيانات تنتهي بـ \\r\\n).
+        """
+        if "boundary=" not in content_type:
+            return None, None
+        boundary = content_type.split("boundary=", 1)[1].split(";", 1)[0].strip().strip('"')
+        if not boundary:
+            return None, None
+        delim = b"--" + boundary.encode()
+        for part in body.split(delim):
+            if b"filename=" not in part:
+                continue
+            header_end = part.find(b"\r\n\r\n")
+            if header_end == -1:
+                continue
+            headers_part = part[:header_end].decode("latin-1")
+            mime_type = "application/octet-stream"
+            for line in headers_part.split("\r\n"):
+                if line.lower().startswith("content-type:"):
+                    mime_type = line.split(":", 1)[1].strip()
+            data = part[header_end + 4:]
+            if data.endswith(b"\r\n"):
+                data = data[:-2]
+            return data, mime_type
+        return None, None
+
+    # ------------------------------------------------------------------
     def do_GET(self):
-        if self.path == "/" or self.path == "/index.html":
+        path = self._route()
+        if path in ("/", "/index.html"):
+            # الصفحة نفسها تُخدَم دائماً؛ الحماية على الـ API فقط (الواجهة تطلب التوكن عند 401)
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.end_headers()
             self.wfile.write(HTML_PAGE.encode("utf-8"))
-        elif self.path == "/api/status":
-            summary = key_manager.get_status_summary()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.end_headers()
-            self.wfile.write(json.dumps({"ok": True, "summary": summary}).encode("utf-8"))
-        else:
-            self.send_response(404)
-            self.end_headers()
+            return
+
+        if path == "/api/status":
+            if not self._authorized():
+                return self._send_json(401, {"ok": False, "error": "unauthorized", "need_token": True})
+            return self._send_json(200, {"ok": True, "summary": key_manager.get_status_summary()})
+
+        self.send_response(404)
+        self.end_headers()
 
     def do_POST(self):
-        if self.path == "/api/transcribe":
+        path = self._route()
+
+        if path not in ("/api/transcribe", "/api/add_key"):
+            return self._send_json(404, {"ok": False, "error": "not found"})
+
+        if not self._authorized():
+            return self._send_json(401, {"ok": False, "error": "unauthorized", "need_token": True})
+
+        if path == "/api/transcribe":
             try:
                 content_length = int(self.headers.get("Content-Length", 0))
+                max_bytes = Config.MAX_UPLOAD_MB * 1024 * 1024
+                if content_length > max_bytes:
+                    return self._send_json(413, {
+                        "ok": False,
+                        "error": f"الملف أكبر من الحد المسموح ({Config.MAX_UPLOAD_MB}MB)",
+                    })
                 body = self.rfile.read(content_length)
 
-                # استخراج ملف الصوت من multipart/form-data ببساطة
-                content_type = self.headers.get("Content-Type", "")
-                audio_bytes = body
-                mime_type = "audio/webm"
-
-                if "boundary=" in content_type:
-                    boundary = content_type.split("boundary=")[1].encode()
-                    parts = body.split(b"--" + boundary)
-                    for part in parts:
-                        if b"filename=" in part:
-                            header_end = part.find(b"\r\n\r\n")
-                            if header_end != -1:
-                                headers_part = part[:header_end].decode("latin-1")
-                                if "Content-Type:" in headers_part:
-                                    mime_type = headers_part.split("Content-Type:")[1].split("\r\n")[0].strip()
-                                audio_bytes = part[header_end + 4:].rstrip(b"\r\n")
-                                break
+                audio_bytes, mime_type = self.parse_multipart(body, self.headers.get("Content-Type", ""))
+                if audio_bytes is None:
+                    # جسم خام بدون multipart
+                    audio_bytes, mime_type = body, (self.headers.get("Content-Type") or "audio/webm")
 
                 text, model, key_name = transcribe_audio_bytes(audio_bytes, mime_type)
-                resp_data = {"ok": True, "text": text, "model": model, "key_name": key_name}
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.end_headers()
-                self.wfile.write(json.dumps(resp_data, ensure_ascii=False).encode("utf-8"))
-
+                self._send_json(200, {"ok": True, "text": text, "model": model, "key_name": key_name})
             except Exception as e:
-                self.send_response(500)
-                self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.end_headers()
-                self.wfile.write(json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False).encode("utf-8"))
+                self._send_json(500, {"ok": False, "error": str(e)})
 
-        elif self.path == "/api/add_key":
+        elif path == "/api/add_key":
             try:
                 content_length = int(self.headers.get("Content-Length", 0))
                 payload = json.loads(self.rfile.read(content_length).decode("utf-8"))
-                key = payload.get("key", "").strip()
-                name = payload.get("name", "").strip() or None
+                raw_key = (payload.get("key") or "").strip()
+                name = (payload.get("name") or "").strip() or None
 
-                if not key:
+                if not raw_key:
                     raise ValueError("المفتاح فارغ!")
 
+                # التحقق من صيغة مفتاح Google الحقيقية (نفس منطق البوت) — يمنع مفاتيح وهمية من دخول الـ Pool
+                key, _ = KeyManager.extract_key_from_text(raw_key)
+                if not key:
+                    raise ValueError("صيغة المفتاح غير صالحة — مفاتيح Google تبدأ بـ AIzaSy أو AQ.")
+
                 entry, is_new = key_manager.add_key(key, name)
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.end_headers()
-                self.wfile.write(json.dumps({"ok": True, "key": entry, "is_new": is_new}).encode("utf-8"))
+                self._send_json(200, {"ok": True, "key": entry, "is_new": is_new})
             except Exception as e:
-                self.send_response(400)
-                self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.end_headers()
-                self.wfile.write(json.dumps({"ok": False, "error": str(e)}).encode("utf-8"))
+                self._send_json(400, {"ok": False, "error": str(e)})
 
     def log_message(self, format, *args):
         # كتم سجلات الـ HTTP لعدم التشويش على الكونسول إلا في الأخطاء
