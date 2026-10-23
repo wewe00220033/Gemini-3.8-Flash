@@ -6,7 +6,6 @@
 - مهيأ للعمل محلياً أو على خوادم الاستضافة (24/7 Hosting)
 """
 
-import sys
 import time
 from config import Config
 from key_manager import key_manager

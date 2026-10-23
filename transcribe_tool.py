@@ -66,7 +66,7 @@ def main():
     print("=" * 65)
 
     try:
-        print(f"⏳ جاري قراءة ومعالجة الملف بالذكاء الاصطناعي...")
+        print("⏳ جاري قراءة ومعالجة الملف بالذكاء الاصطناعي...")
         text, model, key_name = transcribe_audio_file(target_file)
 
         # حفظ نسخة نصية بجانب الملف

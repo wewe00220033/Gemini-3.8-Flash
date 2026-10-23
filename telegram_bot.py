@@ -9,7 +9,6 @@
 import sys
 import time
 import requests
-from config import Config
 from key_manager import key_manager
 from transcriber import transcribe_audio_bytes
 
@@ -157,6 +156,8 @@ def main():
                         send_telegram_message(bot_token, chat_id, guide, reply_to_id=msg["message_id"])
 
         except Exception as e:
+            # لا نبتلع الخطأ بصمت — نطبعه حتى يظهر في كونسول الاستضافة (P12)
+            print(f"⚠️ خطأ في حلقة البوت: {type(e).__name__}: {e} — إعادة المحاولة بعد 3 ثوانٍ...")
             time.sleep(3)
 
 if __name__ == "__main__":

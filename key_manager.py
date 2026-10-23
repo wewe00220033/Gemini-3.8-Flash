@@ -303,7 +303,7 @@ class KeyManager:
             lines.append(f"• **{k.get('name')}**: `{key_masked}` | {status_icon}{extra} | عمليات: `{k.get('success_count', 0)}`")
 
         lines.append("─" * 32)
-        lines.append(f"🤖 **الموديلات النشطة:** `3.8 Flash` ➔ `3.6 Flash` ➔ `3.5 Transcribe`")
+        lines.append("🤖 **الموديلات النشطة:** `3.8 Flash` ➔ `3.6 Flash` ➔ `3.5 Transcribe`")
         return "\n".join(lines)
 
 # نسخة مفردة (Singleton)
