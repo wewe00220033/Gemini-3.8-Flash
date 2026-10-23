@@ -46,7 +46,7 @@ graph TD
         WD --> WEB[ThreadingHTTPServer: / /api/* /health]
         WD --> BOT[Telegram Long-Poll + ThreadPool + HTML safe send]
         WEB --> ENGINE
-        BOT --> ENGINE[transcriber: 3.8→3.6→3.5 لكل مفتاح, header auth]
+        BOT --> ENGINE[transcriber: 3.6→3.5 (3.8 معطّل), تصنيف أخطاء + قاطع دائرة, header auth]
         ENGINE --> KM[(KeyManager: Lock + atomic save + per-(key,model) cooldown + daily_usage)]
         KM --> JSON[DATA_DIR/keys.json chmod 600]
     end
