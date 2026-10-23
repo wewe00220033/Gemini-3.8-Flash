@@ -152,7 +152,7 @@ def _download_file(token, file_id):
         raise RuntimeError("تعذر الحصول على مسار الملف من تليجرام")
     resp = requests.get(
         f"https://api.telegram.org/file/bot{token}/{file_path}",
-        timeout=Config.REQUEST_TIMEOUT,
+        timeout=Config.TELEGRAM_DOWNLOAD_TIMEOUT,
     )
     resp.raise_for_status()
     return resp.content
@@ -186,7 +186,7 @@ def _help_text():
         "/rename <قديم> <جديد> — إعادة تسمية مفتاح\n"
         "/backup — إرسال نسخة احتياطية من keys.json لك هنا\n"
         "/help — هذه الرسالة\n\n"
-        "🛡️ الموديلات: Gemini 3.8 Flash ➔ 3.6 Flash ➔ 3.5 Transcribe (بدون Lite)"
+        f"🛡️ الموديلات: {key_manager.models_chain_text()}"
     )
 
 
@@ -221,7 +221,7 @@ def handle_text(token, chat_id, msg, msg_text):
             f"📌 اسم المشروع: {entry.get('name')}\n"
             f"🔑 المفتاح: {extracted_key[:8]}...{extracted_key[-4:]}\n"
             f"🟢 الحالة: نشط جاهز للاستخدام\n"
-            f"⚡ رصيدك اليومي زاد بمعدل {sum(Config.MODEL_DAILY_QUOTA.values())} ريكورد إضافي! 🚀"
+            f"⚡ رصيدك اليومي زاد بمعدل {sum(Config.MODEL_DAILY_QUOTA.get(m, 0) for m in Config.MODELS)} ريكورد إضافي! 🚀"
         )
         send_telegram_message(token, chat_id, reply, reply_to_id=msg["message_id"])
         return
