@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-بوت تليجرام للتفريغ الصوتي الذكي وإدارة المفاتيح 360° (@Zizo00ZIZO_bot)
+بوت تليجرام للتفريغ الصوتي الذكي وإدارة المفاتيح 360°
 - استقبال الفويس نوت والتفريغ الفوري بكود بلوك قابل للنسخ
 - كشف المفاتيح التلقائي وإضافتها للـ Key Pool بمجرد إرسالها نصياً في الشات
 - أوامر الفحص السريع: /status لعرض الرصيد وحالة المفاتيح
@@ -41,6 +41,12 @@ def main():
         print("❌ خطأ: لم يتم العثور على TELEGRAM_BOT_TOKEN في keys.json أو متغيرات البيئة!")
         return
 
+    allowed_chat_id = (allowed_chat_id or "").strip()
+    if not allowed_chat_id or allowed_chat_id == "None":
+        allowed_chat_id = ""
+        print("⚠️ تحذير: TELEGRAM_CHAT_ID غير مضبوط — البوت سيرفض جميع الرسائل حتى تضبطه في البيئة أو .env")
+        print("   (أرسل /start للبوت وسيُطبَع هنا Chat ID الخاص بك لتنسخه)")
+
     print("=" * 65)
     print("🤖 جاري تشغيل بوت التليجرام للتفريغ الصوتي الفوري...")
     print(f"👤 البوت: {bot_user}")
@@ -69,8 +75,8 @@ def main():
 
                 chat_id = str(msg["chat"]["id"])
 
-                # التحقق الأمني من الـ Chat ID
-                if allowed_chat_id and chat_id != str(allowed_chat_id):
+                # التحقق الأمني من الـ Chat ID (فاضي = رفض الجميع وطباعة الـ ID ليسهل ضبطه)
+                if not allowed_chat_id or chat_id != allowed_chat_id:
                     print(f"⛔ رسالة محجوبة من مستخدم غير مصرح له: {chat_id}")
                     continue
 

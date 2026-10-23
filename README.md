@@ -61,10 +61,11 @@ graph TD
 | المتغير (Variable) | القيمة | الوصف |
 | :--- | :--- | :--- |
 | **`GEMINI_API_KEYS`** | `AQ...Key1,AQ...Key2` | مفاتيح Google AI Studio مفصولة بفواصل |
-| **`TELEGRAM_BOT_TOKEN`** | `8158611188:AAGbrz...` | توكن البوت من `@BotFather` |
-| **`TELEGRAM_BOT_USERNAME`** | `@Zizo00ZIZO_bot` | يوزرنيم البوت |
-| **`TELEGRAM_CHAT_ID`** | `1124247595` | لحصر البوت عليك فقط ومنع التطفل |
-| **`PORT`** | `8080` | منفذ واجهة الويب |
+| **`TELEGRAM_BOT_TOKEN`** | `123456789:ABCdef...` | توكن البوت من `@BotFather` |
+| **`TELEGRAM_BOT_USERNAME`** | `@YourBot` | يوزرنيم البوت |
+| **`TELEGRAM_CHAT_ID`** | `123456789` | **مطلوب** — لحصر البوت عليك فقط (فاضي = يرفض الجميع) |
+| **`PORT`** | `8080` | منفذ واجهة الويب (أو `SERVER_PORT` تلقائياً على bot-hosting.net) |
+| **`WEB_ACCESS_TOKEN`** | *(اختياري)* | توكن لواجهة الويب — فاضي = مفتوح |
 
 ### 2. أمر التشغيل:
 ```bash

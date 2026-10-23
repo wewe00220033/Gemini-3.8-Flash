@@ -37,8 +37,16 @@ class Config:
     ENV_FILE = os.path.join(SCRIPT_DIR, ".env")
 
     # خادم الويب (Web UI)
+    # المنفذ: PORT (مضبوط يدوياً) ثم SERVER_PORT (تحقنه استضافات Pterodactyl مثل bot-hosting.net) ثم 8080
     WEB_HOST = os.environ.get("HOST", "0.0.0.0")
-    WEB_PORT = int(os.environ.get("PORT", "8080"))
+    WEB_PORT = int(os.environ.get("PORT") or os.environ.get("SERVER_PORT") or "8080")
+
+    # توكن وصول اختياري لواجهة الويب (المنظومة شخصية — فاضي = مفتوح بالكامل).
+    # لو ضبطته، الواجهة تطلبه مرة واحدة وتحفظه في المتصفح. localhost مفتوح دائماً.
+    WEB_ACCESS_TOKEN = os.environ.get("WEB_ACCESS_TOKEN", "").strip()
+
+    # الحد الأقصى لحجم الملف الصوتي المرفوع (Gemini inline_data حدها ~20MB)
+    MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "25"))
 
     # المهلة الزمنية لطلبات الشبكة
     REQUEST_TIMEOUT = 60
@@ -46,8 +54,9 @@ class Config:
     # فترة التهدئة للمفتاح الذي يصل للحد الأقصى 429 (بالثواني - ساعة واحدة تلقائياً)
     KEY_COOLDOWN_SECONDS = 3600
 
-    # المستخدم المصرح له في تليجرام (حماية البوت من التطفل)
-    DEFAULT_CHAT_ID = "1124247595"
+    # المستخدم المصرح له في تليجرام (حماية البوت من التطفل).
+    # فاضي = البوت يرفض الجميع حتى تضبط TELEGRAM_CHAT_ID في البيئة أو .env
+    DEFAULT_CHAT_ID = ""
 
     # مسار تسجيلات الصوت الافتراضي للكمبيوتر
     DEFAULT_RECORDINGS_DIR = r"C:\Users\USER\Documents\تسجيلات الصوت"
