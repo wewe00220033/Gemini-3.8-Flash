@@ -38,7 +38,8 @@ KEY_OUTCOMES = {KEY_EXHAUSTED_DAILY, KEY_RATE_LIMITED, KEY_INVALID}
 MODEL_OUTCOMES = {MODEL_DOWN, MODEL_SLOW, MODEL_NOT_FOUND}
 TRANSIENT_OUTCOMES = {MODEL_DOWN, MODEL_SLOW}   # تستحق جولة تانية بعد انتظار قصير
 
-_DAILY_HINTS = ("perday", "per day", "daily", "quota_exceeded", "generaterequestsperday")
+# 429 يومي: GenerateRequestsPerDay / generate_requests_per_day / "per day" / daily / quota_exceeded
+_DAILY_RE = re.compile(r"per[\s_]*day|daily|quota_exceeded", re.IGNORECASE)
 _KEY_HINTS = ("api key", "api_key", "apikey", "key not valid", "leaked", "permission_denied", "unauthenticated")
 
 _NETWORK_MSG = "🌐 السيرفر مش قادر يوصل لـ Google (مشكلة شبكة من جهة الاستضافة). جرّب بعد دقيقة."
@@ -220,7 +221,7 @@ def classify_response(resp):
 
     if status == 429:
         retry_after = _parse_retry_delay(resp, body)
-        if any(h in raw for h in _DAILY_HINTS):
+        if _DAILY_RE.search(raw):
             return Attempt(KEY_EXHAUSTED_DAILY, detail=msg[:150], retry_after=retry_after, status=429)
         return Attempt(KEY_RATE_LIMITED, detail=msg[:150], retry_after=retry_after, status=429)
 
