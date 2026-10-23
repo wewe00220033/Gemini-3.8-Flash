@@ -140,6 +140,11 @@ class Config:
     # مهلات تليجرام: طلبات قصيرة / تنزيل الملف الصوتي
     TELEGRAM_TIMEOUT = 30
     TELEGRAM_DOWNLOAD_TIMEOUT = 60
+
+    # شفافية تليجرام أثناء التفريغ: تجديد typing (تليجرام تعرضه 5 ث فقط) + رسالة "⏳ لسه شغّال"
+    # بعد PROGRESS_AFTER_SECONDS تُحذف تلقائياً عند وصول النتيجة. 0 = فوراً، رقم كبير = لا تُرسل.
+    TYPING_REFRESH_SECONDS = 4
+    PROGRESS_AFTER_SECONDS = 12
     # (للتوافق مع الكود القديم) أقصى مهلة طلب
     REQUEST_TIMEOUT = GEMINI_READ_TIMEOUT_MAX
 
