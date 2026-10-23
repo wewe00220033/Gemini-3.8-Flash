@@ -154,3 +154,22 @@ def test_daily_usage_recorded_on_success(engine, monkeypatch):
     engine.transcribe_audio_bytes(b"abc")
     k = engine.key_manager.data["keys"][0]
     assert sum(v.get("gemini-3.8-flash", 0) for v in k["daily_usage"].values()) == 1
+
+
+# ---------- المرحلة 3: payload اختياري ----------
+
+def test_default_payload_keeps_prompt_as_text_part(engine, monkeypatch):
+    monkeypatch.setattr(engine.Config, "USE_SYSTEM_INSTRUCTION", False)
+    monkeypatch.setattr(engine.Config, "TEMPERATURE", None)
+    p = engine._build_payload("QUJD", "audio/ogg")
+    assert "system_instruction" not in p and "generationConfig" not in p
+    assert p["contents"][0]["parts"][1]["text"] == engine.Config.SYSTEM_PROMPT
+
+
+def test_optional_system_instruction_and_temperature(engine, monkeypatch):
+    monkeypatch.setattr(engine.Config, "USE_SYSTEM_INSTRUCTION", True)
+    monkeypatch.setattr(engine.Config, "TEMPERATURE", 0.0)
+    p = engine._build_payload("QUJD", "audio/ogg")
+    assert p["system_instruction"]["parts"][0]["text"] == engine.Config.SYSTEM_PROMPT
+    assert p["generationConfig"] == {"temperature": 0.0}
+    assert p["contents"][0]["parts"][0]["inline_data"]["mime_type"] == "audio/ogg"

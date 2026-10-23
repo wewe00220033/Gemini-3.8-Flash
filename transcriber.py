@@ -22,23 +22,7 @@ def transcribe_audio_bytes(audio_bytes, mime_type="audio/mp4"):
 
     b64_data = base64.b64encode(audio_bytes).decode("utf-8")
 
-    payload = {
-        "contents": [
-            {
-                "parts": [
-                    {
-                        "inline_data": {
-                            "mime_type": mime_type,
-                            "data": b64_data
-                        }
-                    },
-                    {
-                        "text": Config.SYSTEM_PROMPT
-                    }
-                ]
-            }
-        ]
-    }
+    payload = _build_payload(b64_data, mime_type)
 
     last_error = None
 
@@ -87,6 +71,24 @@ def transcribe_audio_bytes(audio_bytes, mime_type="audio/mp4"):
             )
 
     raise RuntimeError(f"فشلت كافة المحاولات عبر جميع الموديلات والمفاتيح. آخر خطأ: {last_error}")
+
+
+def _build_payload(b64_data, mime_type):
+    """
+    الوضع الافتراضي (المجرَّب): القواعد كجزء نصي بجانب الصوت.
+    الوضع الاختياري (Config.USE_SYSTEM_INSTRUCTION): القواعد في system_instruction + temperature.
+    """
+    audio_part = {"inline_data": {"mime_type": mime_type, "data": b64_data}}
+    if Config.USE_SYSTEM_INSTRUCTION:
+        payload = {
+            "system_instruction": {"parts": [{"text": Config.SYSTEM_PROMPT}]},
+            "contents": [{"parts": [audio_part, {"text": "فرّغ هذا التسجيل الصوتي."}]}],
+        }
+    else:
+        payload = {"contents": [{"parts": [audio_part, {"text": Config.SYSTEM_PROMPT}]}]}
+    if Config.TEMPERATURE is not None:
+        payload["generationConfig"] = {"temperature": Config.TEMPERATURE}
+    return payload
 
 
 def _extract_text(data):

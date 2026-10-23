@@ -72,12 +72,21 @@ class Config:
         "4. أخرج النص المفرغ فقط، بدون أي مقدمات، أو اعتذارات، أو تعليقات جانبية."
     )
 
+    # (اختياري — مُعطّل افتراضياً) إرسال القواعد كـ system_instruction منفصل + temperature.
+    # جرّبه بمفاتيحك: USE_SYSTEM_INSTRUCTION=1 و TEMPERATURE=0 ثم قارن الجودة. لو أسوأ ارجع للافتراضي.
+    USE_SYSTEM_INSTRUCTION = os.environ.get("USE_SYSTEM_INSTRUCTION", "0") in ("1", "true", "True")
+    _t = os.environ.get("TEMPERATURE", "").strip()
+    TEMPERATURE = float(_t) if _t else None
+
     # ==============================================================
     # 3. إعدادات الشبكة والاستضافة (DevOps & Hosting)
     # ==============================================================
     SCRIPT_DIR = _SCRIPT_DIR
-    KEYS_JSON_FILE = os.path.join(SCRIPT_DIR, "keys.json")
-    KEYS_TXT_FILE = os.path.join(SCRIPT_DIR, "keys.txt")
+    # مجلد البيانات (keys.json). الافتراضي بجانب الكود. على الاستضافة يمكن توجيهه لمجلد
+    # لا يُستبدل عند إعادة رفع ZIP (مثل DATA_DIR=/home/container/data).
+    DATA_DIR = os.environ.get("DATA_DIR", "").strip() or SCRIPT_DIR
+    KEYS_JSON_FILE = os.path.join(DATA_DIR, "keys.json")
+    KEYS_TXT_FILE = os.path.join(DATA_DIR, "keys.txt")
     ENV_FILE = os.path.join(SCRIPT_DIR, ".env")
 
     # خادم الويب (Web UI)

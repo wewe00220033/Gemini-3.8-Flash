@@ -184,6 +184,7 @@ def _help_text():
         "/keys — قائمة المفاتيح مرتبة (المتاح أولاً)\n"
         "/remove <اسم> — حذف مفتاح بالاسم أو بأول 8 أحرف منه\n"
         "/rename <قديم> <جديد> — إعادة تسمية مفتاح\n"
+        "/backup — إرسال نسخة احتياطية من keys.json لك هنا\n"
         "/help — هذه الرسالة\n\n"
         "🛡️ الموديلات: Gemini 3.8 Flash ➔ 3.6 Flash ➔ 3.5 Transcribe (بدون Lite)"
     )
@@ -255,6 +256,22 @@ def handle_text(token, chat_id, msg, msg_text):
             send_telegram_message(token, chat_id, f"✏️ تمت إعادة التسمية إلى [{entry.get('name')}].", reply_to_id=msg["message_id"])
         else:
             send_telegram_message(token, chat_id, "لم أجد مفتاحاً بهذا الاسم. جرّب /keys.", reply_to_id=msg["message_id"])
+
+    elif cmd == "/backup":
+        # يرسل keys.json كمستند لشاتك المحمي (يحوي أسراراً — لا يُرسل إلا للـ chat_id المصرح به)
+        try:
+            with open(Config.KEYS_JSON_FILE, "rb") as f:
+                files = {"document": ("keys.json", f.read(), "application/json")}
+            resp = requests.post(
+                f"https://api.telegram.org/bot{token}/sendDocument",
+                data={"chat_id": chat_id, "caption": "🔐 نسخة احتياطية من keys.json — احتفظ بها في مكان آمن ولا تشاركها.",
+                      "reply_to_message_id": msg["message_id"]},
+                files=files, timeout=Config.TELEGRAM_TIMEOUT,
+            )
+            if resp.status_code != 200:
+                send_telegram_message(token, chat_id, f"⚠️ فشل إرسال النسخة الاحتياطية ({resp.status_code}).", reply_to_id=msg["message_id"])
+        except Exception as e:
+            send_telegram_message(token, chat_id, f"⚠️ تعذر إنشاء النسخة الاحتياطية: {e}", reply_to_id=msg["message_id"])
 
     elif cmd in ("/start", "/help", "مساعدة"):
         send_telegram_message(token, chat_id, _help_text(), reply_to_id=msg["message_id"])

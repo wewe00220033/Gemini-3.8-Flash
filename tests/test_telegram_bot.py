@@ -148,3 +148,22 @@ def test_help_lists_new_commands(bot):
     tb.handle_text("T", "1", {"message_id": 7}, "/help")
     t = _last_text(sent)
     assert "/remove" in t and "/rename" in t and "Lite" in t
+
+
+def test_backup_command_sends_keys_json_document(bot, fresh_env):
+    tb, sent = bot
+    tb.key_manager.add_key(VALID_A, "A")
+    captured = {}
+    def fake_post(url, json=None, timeout=None, data=None, files=None):
+        if "sendDocument" in url:
+            captured["data"] = data; captured["files"] = files
+        return FakeResp(200, payload={"ok": True})
+    import pytest as _p
+    mp = _p.MonkeyPatch(); mp.setattr(tb.requests, "post", fake_post)
+    try:
+        tb.handle_text("T", "1", {"message_id": 9}, "/backup")
+    finally:
+        mp.undo()
+    assert captured["data"]["chat_id"] == "1"
+    assert captured["files"]["document"][0] == "keys.json"
+    assert VALID_A.encode() in captured["files"]["document"][1]
