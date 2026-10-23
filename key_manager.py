@@ -371,7 +371,7 @@ class KeyManager:
         """
         text = text.strip()
         # نمط مفاتيح Google: تبدأ بـ AQ. أو AIzaSy بطول محدد
-        key_pattern = r"(AQ\.[a-zA-Z0-9_-]{40,65}|AIzaSy[a-zA-Z0-9_-]{33})"
+        key_pattern = r"(?<![A-Za-z0-9_-])(AQ\.[a-zA-Z0-9_-]{40,65}|AIzaSy[a-zA-Z0-9_-]{33})(?![A-Za-z0-9_-])"
         match = re.search(key_pattern, text)
         if not match:
             return None, None

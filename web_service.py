@@ -469,15 +469,16 @@ HTML_PAGE = """<!DOCTYPE html>
 
         function handleResult(data) {
             document.getElementById('spinner').style.display = 'none';
-            document.getElementById('statusText').innerText = "✅ تم التفريغ بنجاح! اضغط نسخ بالأعلى لاستخدامه.";
 
             if (data.ok) {
+                document.getElementById('statusText').innerText = "✅ تم التفريغ بنجاح! اضغط نسخ بالأعلى لاستخدامه.";
                 document.getElementById('transcriptionResult').innerText = data.text;
                 document.getElementById('modelUsed').innerText = `🤖 الموديل: ${data.model}`;
                 document.getElementById('keyUsed').innerText = `🔑 المفتاح: ${data.key_name}`;
                 // نسخ للحافظة تلقائياً
                 navigator.clipboard.writeText(data.text);
             } else {
+                document.getElementById('statusText').innerText = "❌ فشل التفريغ — راجع الرسالة بالأسفل.";
                 document.getElementById('transcriptionResult').innerText = "❌ خطأ: " + data.error;
             }
         }

@@ -6,6 +6,39 @@
 
 import os
 
+
+def _load_dotenv(path):
+    """
+    يقرأ ملف .env بسيط (KEY=VALUE، يدعم التعليقات وعلامات الاقتباس) بدون مكتبات خارجية.
+    لا يكتب فوق متغيرات البيئة الموجودة (لوحة الاستضافة لها الأولوية).
+    """
+    if not os.path.exists(path):
+        return 0
+    loaded = 0
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for raw in f:
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                if line.lower().startswith("export "):
+                    line = line[7:].lstrip()
+                key, value = line.split("=", 1)
+                key, value = key.strip(), value.strip()
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+                    value = value[1:-1]
+                if key and key not in os.environ:
+                    os.environ[key] = value
+                    loaded += 1
+    except Exception as e:
+        print(f"⚠️ تعذر قراءة .env: {e}")
+    return loaded
+
+
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_load_dotenv(os.path.join(_SCRIPT_DIR, ".env"))
+
+
 class Config:
     # ==============================================================
     # 1. قائمة الموديلات المعتمدة رسمياً (الثلاثي الفائز فقط - بدون Lite نهائياً)
@@ -42,7 +75,7 @@ class Config:
     # ==============================================================
     # 3. إعدادات الشبكة والاستضافة (DevOps & Hosting)
     # ==============================================================
-    SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+    SCRIPT_DIR = _SCRIPT_DIR
     KEYS_JSON_FILE = os.path.join(SCRIPT_DIR, "keys.json")
     KEYS_TXT_FILE = os.path.join(SCRIPT_DIR, "keys.txt")
     ENV_FILE = os.path.join(SCRIPT_DIR, ".env")

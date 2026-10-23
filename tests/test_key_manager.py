@@ -229,3 +229,35 @@ def test_status_summary_is_plain_and_shows_reset(km):
     s = km.get_status_summary()
     assert "**" not in s and "`" not in s          # لا Markdown — آمن للإرسال
     assert "تصفير الكوتا" in s and "3.8 Flash" in s
+
+
+# ---------- المرحلة 3 ----------
+
+def test_extract_key_requires_word_boundary(fresh_env):
+    """P27: مفتاح ملتصق بأحرف إضافية لا يُقتطع بصمت."""
+    glued = "AIzaSy" + "A" * 40           # أطول من 39 بـ 7 أحرف
+    assert fresh_env.KeyManager.extract_key_from_text(glued) == (None, None)
+    inside = f"prefix{VALID_AIZA}"
+    assert fresh_env.KeyManager.extract_key_from_text(inside) == (None, None)
+    spaced = f"key: {VALID_AIZA} ."
+    assert fresh_env.KeyManager.extract_key_from_text(spaced)[0] == VALID_AIZA
+
+
+def test_dotenv_loader(tmp_path, monkeypatch):
+    """3.3: .env يُقرأ بدون مكتبات ولا يكتب فوق البيئة الموجودة."""
+    import config
+    env = tmp_path / ".env"
+    env.write_text('# تعليق\nFOO_TEST=bar\nQUOTED_TEST="with space"\nexport EXP_TEST=1\nEXISTING_TEST=from_file\n', encoding="utf-8")
+    monkeypatch.delenv("FOO_TEST", raising=False)
+    monkeypatch.delenv("QUOTED_TEST", raising=False)
+    monkeypatch.delenv("EXP_TEST", raising=False)
+    monkeypatch.setenv("EXISTING_TEST", "from_env")
+    n = config._load_dotenv(str(env))
+    assert n == 3
+    import os as _os
+    assert _os.environ["FOO_TEST"] == "bar"
+    assert _os.environ["QUOTED_TEST"] == "with space"
+    assert _os.environ["EXP_TEST"] == "1"
+    assert _os.environ["EXISTING_TEST"] == "from_env"
+    for k in ("FOO_TEST", "QUOTED_TEST", "EXP_TEST"):
+        monkeypatch.delenv(k, raising=False)
