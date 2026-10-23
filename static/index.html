@@ -309,7 +309,7 @@
     <div class="container">
         <div class="header">
             <h1>🎙️ منظومة التفريغ الصوتي الذكي 360°</h1>
-            <p>تسجيل صوتي حقيقي مشفر (Real Audio) مدعوم بثلاثي Gemini الفائق (3.8 | 3.6 | 3.5 Transcribe)</p>
+            <p>تسجيل صوتي حقيقي مشفر (Real Audio) مدعوم بـ Gemini 3.6 Flash (أساسي) ➔ 3.5 Transcribe (احتياطي) — Failover فوري</p>
             <div class="badge-bar">
                 <span class="badge">⚡ Zero-Compacting Audio</span>
                 <span class="badge">🧠 فهم اللهجة العامية + إنجليزي سليم</span>
@@ -337,6 +337,7 @@
                 <div class="result-meta">
                     <span id="modelUsed">🤖 الموديل: في الانتظار</span>
                     <span id="keyUsed">🔑 المفتاح: -</span>
+                    <span id="timeUsed">⏱ -</span>
                 </div>
                 <button class="copy-btn" onclick="copyResult()">📋 نسخ النص</button>
             </div>
@@ -355,6 +356,8 @@
             <details style="margin-top:6px">
                 <summary style="cursor:pointer; color:var(--text-muted); font-size:0.9rem">📊 حالة المفاتيح والرصيد المتبقي اليوم</summary>
                 <pre id="keysStatus" style="white-space:pre-wrap; font-family:'Cairo',sans-serif; font-size:0.9rem; line-height:1.7; margin-top:10px; color:#e2e8f0">جاري التحميل...</pre>
+                <div id="modelsState" style="font-size:0.9rem; line-height:1.8; margin-top:6px; color:#e2e8f0"></div>
+                <button type="button" onclick="resetCircuits()" style="margin-top:6px; font-size:0.85rem">🔓 فتح قواطع الموديلات (/reset)</button>
             </details>
         </div>
         <div id="toast" class="toast"></div>
@@ -507,6 +510,9 @@
                 document.getElementById('transcriptionResult').innerText = data.text;
                 document.getElementById('modelUsed').innerText = `🤖 الموديل: ${data.model}`;
                 document.getElementById('keyUsed').innerText = `🔑 المفتاح: ${data.key_name}`;
+                let t = data.elapsed != null ? `⏱ ${data.elapsed} ث` : '⏱ -';
+                if (data.skipped && data.skipped.length) t += ` · ↪️ تم تخطّي: ${data.skipped.join(' · ')}`;
+                document.getElementById('timeUsed').innerText = t;
                 document.querySelector('.copy-btn').disabled = false;
                 copyText(data.text).then(ok => { if (ok) toast("📋 تم نسخ النص للحافظة تلقائياً", 'ok'); });
                 loadKeysStatus();
@@ -532,8 +538,39 @@
             try {
                 const resp = await apiFetch('/api/status');
                 const res = await resp.json();
-                if (res.ok) document.getElementById('keysStatus').textContent = res.summary;
+                if (res.ok) {
+                    document.getElementById('keysStatus').textContent = res.summary;
+                    renderModelsState(res.models_state || [], res.recent_attempts || []);
+                }
             } catch (e) {}
+        }
+
+        function renderModelsState(states, recent) {
+            const el = document.getElementById('modelsState');
+            if (!el) return;
+            const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+            let html = '<div>🚦 حالة الموديلات الآن:</div>';
+            for (const m of states) {
+                const name = esc(m.model.replace('gemini-', ''));
+                html += m.paused
+                    ? `<div>⛔ ${name}: متخطّى (${esc(m.reason)}) — يفتح ${esc(m.until)} (بعد ${m.remaining_s} ث)</div>`
+                    : `<div>🟢 ${name}: متاح</div>`;
+            }
+            if (recent.length) {
+                html += '<div style="margin-top:4px">🕓 آخر المحاولات:</div>';
+                for (const a of recent) {
+                    html += `<div style="color:var(--text-muted)">${esc(a.at)} ${esc(a.model.replace('gemini-', ''))} [${esc(a.key)}] ${esc(a.outcome)} ${a.elapsed_s} ث</div>`;
+                }
+            }
+            el.innerHTML = html;
+        }
+
+        async function resetCircuits() {
+            try {
+                const resp = await apiFetch('/api/reset');
+                const res = await resp.json();
+                if (res.ok) { toast(`🔓 تم فتح ${res.reset} قاطع`, 'ok'); loadKeysStatus(); }
+            } catch (e) { toast('تعذر الاتصال بالخادم'); }
         }
         document.addEventListener('DOMContentLoaded', loadKeysStatus);
 

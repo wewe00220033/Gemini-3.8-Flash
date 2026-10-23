@@ -31,6 +31,10 @@ def fresh_env(monkeypatch, tmp_path):
     monkeypatch.setattr(config.Config, "KEYS_TXT_FILE", str(tmp_path / "keys.txt"))
     import key_manager
     importlib.reload(key_manager)
+    # قاطع الموديلات singleton مشترك بين الوحدات — نبدأ كل اختبار بقواطع مفتوحة
+    import model_state
+    model_state.model_circuit.reset()
+    model_state.model_circuit._history.clear()
     return key_manager
 
 

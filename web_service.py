@@ -16,7 +16,8 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from config import Config
 from key_manager import key_manager, KeyManager
-from transcriber import transcribe_audio_bytes
+from transcriber import transcribe_audio_bytes_ex
+from model_state import model_circuit
 
 
 STATIC_DIR = os.path.join(Config.SCRIPT_DIR, "static")
@@ -111,7 +112,18 @@ class WebRequestHandler(BaseHTTPRequestHandler):
         if path == "/api/status":
             if not self._authorized():
                 return self._send_json(401, {"ok": False, "error": "unauthorized", "need_token": True})
-            return self._send_json(200, {"ok": True, "summary": key_manager.get_status_summary()})
+            return self._send_json(200, {
+                "ok": True,
+                "summary": key_manager.get_status_summary(),
+                "models": Config.MODELS,
+                "models_state": model_circuit.snapshot(Config.MODELS),
+                "recent_attempts": model_circuit.recent_attempts(5),
+            })
+
+        if path == "/api/reset":
+            if not self._authorized():
+                return self._send_json(401, {"ok": False, "error": "unauthorized", "need_token": True})
+            return self._send_json(200, {"ok": True, "reset": model_circuit.reset()})
 
         self.send_response(404)
         self.end_headers()
@@ -141,8 +153,9 @@ class WebRequestHandler(BaseHTTPRequestHandler):
                     # جسم خام بدون multipart
                     audio_bytes, mime_type = body, (self.headers.get("Content-Type") or "audio/webm")
 
-                text, model, key_name = transcribe_audio_bytes(audio_bytes, mime_type)
-                self._send_json(200, {"ok": True, "text": text, "model": model, "key_name": key_name})
+                text, model, key_name, info = transcribe_audio_bytes_ex(audio_bytes, mime_type)
+                self._send_json(200, {"ok": True, "text": text, "model": model, "key_name": key_name,
+                                      "elapsed": info.get("elapsed"), "skipped": info.get("skipped", [])})
             except Exception as e:
                 self._send_json(500, {"ok": False, "error": str(e)})
 
@@ -199,6 +212,7 @@ def build_health():
         "keys_available": keys_available,
         "uptime_s": int(now - WEB_STATE["started_at"]) if WEB_STATE["started_at"] else 0,
         "models": Config.MODELS,
+        "models_state": model_circuit.snapshot(Config.MODELS),
     }
 
 

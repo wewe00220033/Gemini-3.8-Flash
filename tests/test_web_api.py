@@ -32,8 +32,8 @@ def web(fresh_env, monkeypatch):
     import importlib
     import web_service
     importlib.reload(web_service)
-    monkeypatch.setattr(web_service, "transcribe_audio_bytes",
-                        lambda b, m="audio/webm": ("نص", "gemini-3.8-flash", "P1"))
+    monkeypatch.setattr(web_service, "transcribe_audio_bytes_ex",
+                        lambda b, m="audio/webm": ("نص", "gemini-3.6-flash", "P1", {"elapsed": 1.2, "skipped": []}))
     httpd, base = _start(web_service)
     yield base
     httpd.shutdown()
@@ -106,7 +106,7 @@ def test_transcribe_engine_error_is_json_error(web, monkeypatch):
     import web_service
     def boom(b, m="x"):
         raise ValueError("بيانات الصوت فارغة!")
-    monkeypatch.setattr(web_service, "transcribe_audio_bytes", boom)
+    monkeypatch.setattr(web_service, "transcribe_audio_bytes_ex", boom)
     req = urllib.request.Request(web + "/api/transcribe", data=b"",
                                  headers={"Content-Type": "application/octet-stream"})
     try:
@@ -145,8 +145,8 @@ def web_with_token(fresh_env, monkeypatch):
     if not hasattr(web_service.Config, "WEB_ACCESS_TOKEN"):
         pytest.skip("WEB_ACCESS_TOKEN not implemented yet (phase 1.5)")
     monkeypatch.setattr(web_service.Config, "WEB_ACCESS_TOKEN", "s3cret")
-    monkeypatch.setattr(web_service, "transcribe_audio_bytes",
-                        lambda b, m="audio/webm": ("نص", "m", "k"))
+    monkeypatch.setattr(web_service, "transcribe_audio_bytes_ex",
+                        lambda b, m="audio/webm": ("نص", "m", "k", {"elapsed": 0.1, "skipped": []}))
     # نحاكي عميلاً غير محلي حتى لا يُستثنى localhost
     monkeypatch.setattr(web_service.WebRequestHandler, "_is_local", lambda self: False)
     httpd, base = _start(web_service)
@@ -215,3 +215,25 @@ def test_index_fallback_when_static_missing(web, monkeypatch):
     monkeypatch.setattr(web_service, "_INDEX_FILE", "/nonexistent/index.html")
     status, body = _get(web + "/")
     assert status == 200 and "static/index.html" in body.decode()
+
+
+# ---------- حادثة 01: شفافية في الويب ----------
+def test_transcribe_response_includes_elapsed_and_skipped(web):
+    req = urllib.request.Request(web + "/api/transcribe", data=b"RIFF0000WAVE",
+                                 headers={"Content-Type": "audio/wav"})
+    data = json.loads(urllib.request.urlopen(req).read())
+    assert data["ok"] and data["elapsed"] == 1.2 and data["skipped"] == []
+
+
+def test_status_and_health_expose_models_state_and_reset(web):
+    import web_service
+    web_service.model_circuit.pause("gemini-3.6-flash", 120, "503")
+    st = json.loads(urllib.request.urlopen(web + "/api/status").read())
+    assert st["models"] == ["gemini-3.6-flash", "gemini-3.5-transcribe"]
+    assert st["models_state"][0]["paused"] and st["models_state"][0]["reason"] == "503"
+    assert st["models_state"][1]["paused"] is False
+    h = json.loads(urllib.request.urlopen(web + "/health").read())
+    assert h["models_state"][0]["paused"]
+    r = json.loads(urllib.request.urlopen(web + "/api/reset").read())
+    assert r == {"ok": True, "reset": 1}
+    assert not web_service.model_circuit.is_open("gemini-3.6-flash")

@@ -142,66 +142,66 @@ def test_status_summary_masks_keys(km):
 
 # ---------- المرحلة 2: تهدئة لكل (مفتاح، موديل) + عدّاد يومي ----------
 
-M38, M36, M35 = "gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-transcribe"
+# M1 = الأساسي (3.6)، M2 = الاحتياطي (3.5)، M_OFF = المعطّل (3.8) — يجب ألا يظهر في Config.MODELS
+M1, M2, M_OFF = "gemini-3.6-flash", "gemini-3.5-transcribe", "gemini-3.8-flash"
 
 
 def test_per_model_exhaustion_keeps_other_models_available(km):
-    """P15: 429 على 3.8 يجب ألا يقفل 3.6 و 3.5 على نفس المفتاح."""
+    """P15: 429 على الموديل الأساسي يجب ألا يقفل الاحتياطي على نفس المفتاح."""
     km.add_key(VALID_AIZA, "A")
-    km.mark_key_exhausted(VALID_AIZA, model=M38)
-    assert km.get_active_keys(model=M38) == []
-    assert [k["name"] for k in km.get_active_keys(model=M36)] == ["A"]
-    assert [k["name"] for k in km.get_active_keys(model=M35)] == ["A"]
+    km.mark_key_exhausted(VALID_AIZA, model=M1)
+    assert km.get_active_keys(model=M1) == []
+    assert [k["name"] for k in km.get_active_keys(model=M2)] == ["A"]
 
 
 def test_all_models_exhausted_marks_key_exhausted(km):
     km.add_key(VALID_AIZA, "A")
-    for m in (M38, M36, M35):
+    for m in (M1, M2):
         km.mark_key_exhausted(VALID_AIZA, model=m)
     assert km.data["keys"][0]["status"] == "exhausted"
-    assert km.get_active_keys(model=M38) == []
+    assert km.get_active_keys(model=M1) == []
 
 
 def test_all_exhausted_returns_empty_not_all(km):
     """P14 (بند 2.7): لا محاولة يائسة تجدد القفل — قائمة فاضية + وقت أقرب عودة."""
     km.add_key(VALID_AIZA, "A")
     km.mark_key_exhausted(VALID_AIZA)
-    assert km.get_active_keys(model=M38) == []
+    assert km.get_active_keys(model=M1) == []
     wait = km.earliest_availability()
     assert wait is not None and wait > 0
 
 
 def test_retry_after_overrides_default_cooldown(km, fresh_env):
     km.add_key(VALID_AIZA, "A")
-    km.mark_key_exhausted(VALID_AIZA, model=M38, retry_after=42)
-    until = km.data["keys"][0]["exhausted_models"][M38]
+    km.mark_key_exhausted(VALID_AIZA, model=M1, retry_after=42)
+    until = km.data["keys"][0]["exhausted_models"][M1]
     assert until - time.time() <= 43
     assert until - time.time() < fresh_env.Config.KEY_COOLDOWN_SECONDS
 
 
 def test_per_model_cooldown_expires(km):
     km.add_key(VALID_AIZA, "A")
-    km.mark_key_exhausted(VALID_AIZA, model=M38, retry_after=1)
-    km.data["keys"][0]["exhausted_models"][M38] = time.time() - 1
-    assert [k["name"] for k in km.get_active_keys(model=M38)] == ["A"]
-    assert M38 not in km.data["keys"][0].get("exhausted_models", {})
+    km.mark_key_exhausted(VALID_AIZA, model=M1, retry_after=1)
+    km.data["keys"][0]["exhausted_models"][M1] = time.time() - 1
+    assert [k["name"] for k in km.get_active_keys(model=M1)] == ["A"]
+    assert M1 not in km.data["keys"][0].get("exhausted_models", {})
 
 
 def test_daily_usage_counter_and_quota_block(km, fresh_env):
     """P32 (بند 2.15): عدّاد يومي لكل (مفتاح، موديل) يمنع الاستخدام بعد نفاد الكوتا."""
     km.add_key(VALID_AIZA, "A")
-    quota = fresh_env.Config.MODEL_DAILY_QUOTA[M38]
+    quota = fresh_env.Config.MODEL_DAILY_QUOTA[M1]
     for _ in range(quota):
-        km.record_success(VALID_AIZA, model=M38)
-    assert km.remaining_today(km.data["keys"][0])[M38] == 0
-    assert km.get_active_keys(model=M38) == []
-    assert km.get_active_keys(model=M36)            # الموديل الآخر لا يتأثر
+        km.record_success(VALID_AIZA, model=M1)
+    assert km.remaining_today(km.data["keys"][0])[M1] == 0
+    assert km.get_active_keys(model=M1) == []
+    assert km.get_active_keys(model=M2)            # الموديل الآخر لا يتأثر
 
 
 def test_daily_usage_keeps_only_today(km):
     km.add_key(VALID_AIZA, "A")
-    km.data["keys"][0]["daily_usage"] = {"2000-01-01": {M38: 5}}
-    km.record_success(VALID_AIZA, model=M38)
+    km.data["keys"][0]["daily_usage"] = {"2000-01-01": {M1: 5}}
+    km.record_success(VALID_AIZA, model=M1)
     usage = km.data["keys"][0]["daily_usage"]
     assert "2000-01-01" not in usage and len(usage) == 1
 
@@ -210,8 +210,8 @@ def test_legacy_keys_json_without_new_fields_still_works(km):
     """توافق خلفي: مفتاح بالبنية القديمة (بدون exhausted_models/daily_usage)."""
     km.data["keys"] = [{"id": 1, "key": VALID_AIZA, "name": "Legacy", "status": "active",
                         "exhausted_until": 0, "success_count": 3, "last_used": None}]
-    assert [k["name"] for k in km.get_active_keys(model=M38)] == ["Legacy"]
-    assert km.remaining_today(km.data["keys"][0])[M38] > 0
+    assert [k["name"] for k in km.get_active_keys(model=M1)] == ["Legacy"]
+    assert km.remaining_today(km.data["keys"][0])[M1] > 0
 
 
 def test_remove_and_rename_key(km):
@@ -261,3 +261,47 @@ def test_dotenv_loader(tmp_path, monkeypatch):
     assert _os.environ["EXISTING_TEST"] == "from_env"
     for k in ("FOO_TEST", "QUOTED_TEST", "EXP_TEST"):
         monkeypatch.delenv(k, raising=False)
+
+
+# ======================================================================
+# حادثة 01 — موديلات معطّلة، 429 يومي، مفاتيح مرفوضة
+# ======================================================================
+def test_disabled_model_not_in_models(fresh_env):
+    C = fresh_env.Config
+    assert M_OFF in C.DISABLED_MODELS
+    assert M_OFF not in C.MODELS
+    assert C.MODELS == [M1, M2]
+
+
+def test_daily_exhaustion_locks_until_pacific_reset(km):
+    km.add_key(VALID_AIZA, "A")
+    km.mark_key_exhausted(VALID_AIZA, model=M1, daily=True)
+    until = km.data["keys"][0]["exhausted_models"][M1]
+    expected = time.time() + km.seconds_until_quota_reset()
+    assert abs(until - expected) < 5
+    assert until - time.time() > 60
+
+
+def test_mark_key_invalid_blocks_all_models_and_flags(km):
+    km.add_key(VALID_AIZA, "A")
+    km.add_key("AIzaSy" + "B" * 33, "B")
+    km.mark_key_invalid(VALID_AIZA, reason="API key not valid")
+    k = km.data["keys"][0]
+    assert k["status"] == "invalid" and "API key" in k["invalid_reason"]
+    for m in (M1, M2):
+        assert [x["name"] for x in km.get_active_keys(model=m)] == ["B"]
+    assert "❌" in km.get_status_summary()
+
+
+def test_invalid_key_recovers_after_cooldown(km):
+    km.add_key(VALID_AIZA, "A")
+    km.mark_key_invalid(VALID_AIZA, reason="x")
+    km.data["keys"][0]["exhausted_until"] = time.time() - 1
+    assert [k["name"] for k in km.get_active_keys(model=M1)] == ["A"]
+    assert km.data["keys"][0]["status"] == "active" and "invalid_reason" not in km.data["keys"][0]
+
+
+def test_models_chain_text_generated_from_config(km):
+    txt = km.models_chain_text()
+    assert "3.6 Flash ➔ 3.5 Transcribe" in txt and "3.8" in txt and "Lite" in txt
+    assert "3.8 Flash ➔" not in txt

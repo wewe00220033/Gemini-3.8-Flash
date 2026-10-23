@@ -16,7 +16,8 @@ import requests
 from concurrent.futures import ThreadPoolExecutor
 from config import Config
 from key_manager import key_manager
-from transcriber import transcribe_audio_bytes
+from transcriber import transcribe_audio_bytes_ex
+from model_state import model_circuit
 
 if sys.platform == "win32":
     try:
@@ -93,18 +94,29 @@ def send_telegram_message(token, chat_id, text, reply_to_id=None, parse_mode=Non
     return ok_all
 
 
-def send_transcript(token, chat_id, text, model, key_name, reply_to_id=None):
+def _footer(model, key_name, info=None):
+    """تذييل الرد: الموديل | المفتاح | ⏱ الزمن (+ الموديلات المتخطاة إن وُجدت)."""
+    foot = f"⚡ <b>الموديل:</b> <code>{html.escape(model)}</code> | 🔑 <code>{html.escape(str(key_name))}</code>"
+    if info:
+        if info.get("elapsed") is not None:
+            foot += f" | ⏱ {info['elapsed']} ث"
+        if info.get("skipped"):
+            foot += "\n↪️ تم تخطّي: " + html.escape(" · ".join(info["skipped"]))
+    return foot
+
+
+def send_transcript(token, chat_id, text, model, key_name, reply_to_id=None, info=None):
     """
     يرسل نص التفريغ داخل <pre> (نسخ بلمسة) مع escape كامل، مقسماً لو طويل،
-    ثم سطر معلومات الموديل/المفتاح.
+    ثم سطر معلومات الموديل/المفتاح/الزمن.
     """
-    limit = Config.TELEGRAM_MAX_MSG - 100
+    limit = Config.TELEGRAM_MAX_MSG - 160
     parts = _chunk_text(text, limit)
     ok = True
     for i, part in enumerate(parts):
         body = f"<pre>{html.escape(part)}</pre>"
         if i == len(parts) - 1:
-            body += f"\n⚡ <b>الموديل:</b> <code>{html.escape(model)}</code> | 🔑 <code>{html.escape(str(key_name))}</code>"
+            body += "\n" + _footer(model, key_name, info)
             if len(parts) > 1:
                 body += f"\n📄 ({len(parts)} أجزاء)"
         ok = send_telegram_message(token, chat_id, body, reply_to_id if i == 0 else None, parse_mode="HTML") and ok
@@ -116,6 +128,68 @@ def send_chat_action(token, chat_id, action="typing"):
         _tg_post(token, "sendChatAction", {"chat_id": chat_id, "action": action}, timeout=10)
     except Exception:
         pass
+
+
+def delete_message(token, chat_id, message_id):
+    try:
+        _tg_post(token, "deleteMessage", {"chat_id": chat_id, "message_id": message_id}, timeout=10)
+    except Exception:
+        pass
+
+
+class ProgressKeeper:
+    """
+    أثناء التفريغ: يجدد typing كل TYPING_REFRESH_SECONDS (تليجرام تعرضه 5 ث فقط)،
+    وبعد PROGRESS_AFTER_SECONDS يبعت رسالة "⏳ لسه شغّال…" تُحذف تلقائياً عند الانتهاء (Q19-أ).
+    """
+
+    def __init__(self, token, chat_id, reply_to_id=None):
+        self.token, self.chat_id, self.reply_to_id = token, chat_id, reply_to_id
+        self._stop = threading.Event()
+        self._thread = None
+        self.progress_msg_id = None
+
+    def __enter__(self):
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=2)
+        if self.progress_msg_id:
+            delete_message(self.token, self.chat_id, self.progress_msg_id)
+        return False
+
+    def _run(self):
+        started = time.time()
+        send_chat_action(self.token, self.chat_id)
+        while not self._stop.wait(max(1, Config.TYPING_REFRESH_SECONDS)):
+            send_chat_action(self.token, self.chat_id)
+            if self.progress_msg_id is None and time.time() - started >= Config.PROGRESS_AFTER_SECONDS:
+                self.progress_msg_id = self._send_progress()
+
+    def _send_progress(self):
+        snap = model_circuit.snapshot(Config.MODELS)
+        paused = [f"{_short(x['model'])} ({x['reason']})" for x in snap if x["paused"]]
+        text = "⏳ لسه شغّال على التفريغ…"
+        if paused:
+            text += f"\n↪️ تم تخطّي: {', '.join(paused)}"
+        try:
+            payload = {"chat_id": self.chat_id, "text": text}
+            if self.reply_to_id:
+                payload["reply_to_message_id"] = self.reply_to_id
+            resp = _tg_post(self.token, "sendMessage", payload)
+            if resp.status_code == 200:
+                return resp.json().get("result", {}).get("message_id")
+        except Exception:
+            pass
+        return None
+
+
+def _short(m):
+    return m.replace("gemini-", "")
 
 
 # ======================================================================
@@ -152,7 +226,7 @@ def _download_file(token, file_id):
         raise RuntimeError("تعذر الحصول على مسار الملف من تليجرام")
     resp = requests.get(
         f"https://api.telegram.org/file/bot{token}/{file_path}",
-        timeout=Config.REQUEST_TIMEOUT,
+        timeout=Config.TELEGRAM_DOWNLOAD_TIMEOUT,
     )
     resp.raise_for_status()
     return resp.content
@@ -161,12 +235,12 @@ def _download_file(token, file_id):
 def handle_audio(token, chat_id, msg, file_id, mime_type, label):
     """يعمل داخل ThreadPool."""
     try:
-        send_chat_action(token, chat_id)
         print(f"🎙️ تم استلام تسجيل صوتي ({label}) من {chat_id}...")
-        audio_bytes = _download_file(token, file_id)
-        text, model, key_name = transcribe_audio_bytes(audio_bytes, mime_type)
-        print(f"✅ تم التفريغ عبر [{model}] بالمفتاح [{key_name}]: {text[:40]}...")
-        send_transcript(token, chat_id, text, model, key_name, reply_to_id=msg["message_id"])
+        with ProgressKeeper(token, chat_id, reply_to_id=msg["message_id"]):
+            audio_bytes = _download_file(token, file_id)
+            text, model, key_name, info = transcribe_audio_bytes_ex(audio_bytes, mime_type)
+        print(f"✅ تم التفريغ عبر [{model}] بالمفتاح [{key_name}] في {info.get('elapsed')} ث: {text[:40]}...")
+        send_transcript(token, chat_id, text, model, key_name, reply_to_id=msg["message_id"], info=info)
         STATE["processed"] += 1
     except Exception as e:
         print(f"❌ خطأ تفريغ: {e}")
@@ -185,8 +259,9 @@ def _help_text():
         "/remove <اسم> — حذف مفتاح بالاسم أو بأول 8 أحرف منه\n"
         "/rename <قديم> <جديد> — إعادة تسمية مفتاح\n"
         "/backup — إرسال نسخة احتياطية من keys.json لك هنا\n"
+        "/reset — فتح قواطع الموديلات المقفولة مؤقتاً (لو عايز تجرّب حالاً)\n"
         "/help — هذه الرسالة\n\n"
-        "🛡️ الموديلات: Gemini 3.8 Flash ➔ 3.6 Flash ➔ 3.5 Transcribe (بدون Lite)"
+        f"🛡️ الموديلات: {key_manager.models_chain_text()}"
     )
 
 
@@ -210,6 +285,22 @@ def _keys_list_text():
     return "\n".join(lines)
 
 
+def _models_state_text():
+    """حالة قواطع الموديلات + آخر المحاولات (للشفافية في /status)."""
+    lines = ["─" * 30, "🚦 حالة الموديلات الآن:"]
+    for x in model_circuit.snapshot(Config.MODELS):
+        if x["paused"]:
+            lines.append(f"  ⛔ {_short(x['model'])}: متخطّى ({x['reason']}) — يفتح {x['until']} (بعد {x['remaining_s']} ث)")
+        else:
+            lines.append(f"  🟢 {_short(x['model'])}: متاح")
+    recent = model_circuit.recent_attempts(5)
+    if recent:
+        lines.append("🕓 آخر المحاولات:")
+        for a in recent:
+            lines.append(f"  {a['at']} {_short(a['model'])} [{a['key']}] {a['outcome']} {a['elapsed_s']} ث")
+    return "\n".join(lines)
+
+
 def handle_text(token, chat_id, msg, msg_text):
     # 1) مفتاح Gemini جديد؟
     extracted_key, extracted_name = key_manager.extract_key_from_text(msg_text)
@@ -221,7 +312,7 @@ def handle_text(token, chat_id, msg, msg_text):
             f"📌 اسم المشروع: {entry.get('name')}\n"
             f"🔑 المفتاح: {extracted_key[:8]}...{extracted_key[-4:]}\n"
             f"🟢 الحالة: نشط جاهز للاستخدام\n"
-            f"⚡ رصيدك اليومي زاد بمعدل {sum(Config.MODEL_DAILY_QUOTA.values())} ريكورد إضافي! 🚀"
+            f"⚡ رصيدك اليومي زاد بمعدل {sum(Config.MODEL_DAILY_QUOTA.get(m, 0) for m in Config.MODELS)} ريكورد إضافي! 🚀"
         )
         send_telegram_message(token, chat_id, reply, reply_to_id=msg["message_id"])
         return
@@ -232,7 +323,11 @@ def handle_text(token, chat_id, msg, msg_text):
     args = parts[1:]
 
     if cmd in ("/status", "حالة", "المفاتيح"):
-        send_telegram_message(token, chat_id, key_manager.get_status_summary(), reply_to_id=msg["message_id"])
+        send_telegram_message(token, chat_id, key_manager.get_status_summary() + "\n" + _models_state_text(), reply_to_id=msg["message_id"])
+
+    elif cmd == "/reset":
+        n = model_circuit.reset()
+        send_telegram_message(token, chat_id, f"🔓 تم فتح {n} قاطع. الموديلات كلها هتتجرّب من جديد في الطلب الجاي.", reply_to_id=msg["message_id"])
 
     elif cmd == "/keys":
         send_telegram_message(token, chat_id, _keys_list_text(), reply_to_id=msg["message_id"])

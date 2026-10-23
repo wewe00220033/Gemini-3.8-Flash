@@ -167,3 +167,93 @@ def test_backup_command_sends_keys_json_document(bot, fresh_env):
     assert captured["data"]["chat_id"] == "1"
     assert captured["files"]["document"][0] == "keys.json"
     assert VALID_A.encode() in captured["files"]["document"][1]
+
+
+# ======================================================================
+# حادثة 01 — الشفافية: تذييل ⏱، رسالة التقدّم، /reset، /status بحالة الموديلات
+# ======================================================================
+def _msg(text="", mid=7):
+    return {"message_id": mid, "chat": {"id": 1}, "text": text}
+
+
+def test_footer_includes_latency_and_skipped(bot):
+    tb, sent = bot
+    info = {"elapsed": 7.9, "skipped": ["3.6-flash: 503 (يفتح بعد 2 د)"]}
+    assert tb.send_transcript("T", "1", "نص", "gemini-3.5-transcribe", "P1", reply_to_id=5, info=info)
+    body = sent[-1]["payload"]["text"]
+    assert "⏱ 7.9 ث" in body and "تم تخطّي" in body and "3.6-flash" in body
+    assert sent[-1]["payload"]["parse_mode"] == "HTML"
+
+
+def test_footer_without_info_still_works(bot):
+    tb, sent = bot
+    assert tb.send_transcript("T", "1", "نص", "gemini-3.6-flash", "P1")
+    assert "⏱" not in sent[-1]["payload"]["text"]
+
+
+def test_reset_command_opens_circuits(bot):
+    tb, sent = bot
+    tb.model_circuit.pause("gemini-3.6-flash", 100, "503")
+    tb.handle_text("T", "1", _msg("/reset"), "/reset")
+    assert "تم فتح 1 قاطع" in sent[-1]["payload"]["text"]
+    assert not tb.model_circuit.is_open("gemini-3.6-flash")
+
+
+def test_status_shows_circuit_state_and_recent_attempts(bot):
+    tb, sent = bot
+    tb.key_manager.add_key(VALID_A, "A")
+    tb.model_circuit.pause("gemini-3.6-flash", 100, "timeout")
+    tb.model_circuit.record_attempt("gemini-3.6-flash", "A", "MODEL_SLOW", 21.3)
+    tb.handle_text("T", "1", _msg("/status"), "/status")
+    txt = sent[-1]["payload"]["text"]
+    assert "⛔ 3.6-flash" in txt and "timeout" in txt and "🟢 3.5-transcribe" in txt
+    assert "MODEL_SLOW" in txt and "21.3" in txt
+
+
+def test_help_mentions_reset_and_generated_models(bot):
+    tb, _ = bot
+    h = tb._help_text()
+    assert "/reset" in h and "3.6 Flash ➔ 3.5 Transcribe" in h and "3.8 Flash ➔" not in h
+
+
+def test_progress_keeper_sends_and_deletes_progress_message(bot, monkeypatch):
+    tb, sent = bot
+    monkeypatch.setattr(tb.Config, "TYPING_REFRESH_SECONDS", 1)
+    monkeypatch.setattr(tb.Config, "PROGRESS_AFTER_SECONDS", 0)
+
+    def fake_post(url, json=None, timeout=None):
+        sent.append({"url": url, "payload": json})
+        if "sendMessage" in url:
+            return FakeResp(200, payload={"ok": True, "result": {"message_id": 99}})
+        return FakeResp(200, payload={"ok": True})
+    monkeypatch.setattr(tb.requests, "post", fake_post)
+
+    import time as _t
+    with tb.ProgressKeeper("T", "1", reply_to_id=5) as pk:
+        _t.sleep(1.6)
+        assert pk.progress_msg_id == 99
+    urls = [x["url"].rsplit("/", 1)[-1] for x in sent]
+    assert urls.count("sendChatAction") >= 2
+    assert "sendMessage" in urls and urls[-1] == "deleteMessage"
+    assert sent[-1]["payload"] == {"chat_id": "1", "message_id": 99}
+    assert "لسه شغّال" in [x for x in sent if x["url"].endswith("sendMessage")][0]["payload"]["text"]
+
+
+def test_progress_keeper_no_message_when_fast(bot, monkeypatch):
+    tb, sent = bot
+    monkeypatch.setattr(tb.Config, "TYPING_REFRESH_SECONDS", 1)
+    monkeypatch.setattr(tb.Config, "PROGRESS_AFTER_SECONDS", 60)
+    with tb.ProgressKeeper("T", "1") as pk:
+        pass
+    assert pk.progress_msg_id is None
+    assert not any(x["url"].endswith("deleteMessage") for x in sent)
+
+
+def test_handle_audio_uses_ex_and_footer(bot, monkeypatch):
+    tb, sent = bot
+    monkeypatch.setattr(tb, "_download_file", lambda t, f: b"abc")
+    monkeypatch.setattr(tb, "transcribe_audio_bytes_ex",
+                        lambda b, m: ("النص", "gemini-3.6-flash", "A", {"elapsed": 6.4, "skipped": []}))
+    tb.handle_audio("T", "1", _msg(), "fid", "audio/ogg", "voice")
+    body = sent[-1]["payload"]["text"]
+    assert "النص" in body and "⏱ 6.4 ث" in body and tb.STATE["processed"] >= 1

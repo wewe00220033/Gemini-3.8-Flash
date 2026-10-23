@@ -2,7 +2,7 @@
 """
 أداة التفريغ الصوتي المحلية للكمبيوتر (Desktop One-Click Transcriber)
 - تفرغ أحدث تسجيل تلقائياً أو أي ملف يُسحب عليها
-- تستخدم محرك Transcriber الموحد (3.8 Flash ➔ 3.6 Flash ➔ 3.5 Transcribe)
+- تستخدم محرك Transcriber الموحد (3.6 Flash ➔ 3.5 Transcribe — 3.8 معطّل)
 - تنسخ النص تلقائياً إلى الحافظة (Windows Clipboard)
 - تحفظ نسخة نصية بجانب الملف
 """

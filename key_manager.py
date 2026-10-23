@@ -199,7 +199,7 @@ class KeyManager:
     def _model_blocked_until(self, key_entry, model):
         """متى يفك الموديل على هذا المفتاح (0 = متاح). يراعي الحقول القديمة أيضاً."""
         until = 0
-        if key_entry.get("status") == "exhausted":
+        if key_entry.get("status") in ("exhausted", "invalid"):
             until = max(until, key_entry.get("exhausted_until", 0) or 0)
         until = max(until, (key_entry.get("exhausted_models") or {}).get(model, 0) or 0)
         return until
@@ -221,9 +221,10 @@ class KeyManager:
         """يفك أي تهدئة انتهت (قديمة أو لكل موديل). يرجع True لو تغيّر شيء."""
         changed = False
         for k in self.data.get("keys", []):
-            if k.get("status") == "exhausted" and now >= (k.get("exhausted_until", 0) or 0):
+            if k.get("status") in ("exhausted", "invalid") and now >= (k.get("exhausted_until", 0) or 0):
                 k["status"] = "active"
                 k["exhausted_until"] = 0
+                k.pop("invalid_reason", None)
                 changed = True
                 print(f"🔄 تم إعادة تنشيط المفتاح [{k.get('name')}] تلقائياً بعد انتهاء فترة التهدئة.")
             em = k.get("exhausted_models") or {}
@@ -279,15 +280,21 @@ class KeyManager:
                     best = wait if best is None else min(best, wait)
             return int(best) if best is not None else None
 
-    def mark_key_exhausted(self, key_str, model=None, retry_after=None):
+    def mark_key_exhausted(self, key_str, model=None, retry_after=None, daily=False):
         """
         يقفل المفتاح. لو مُرر model يُقفل هذا الموديل فقط على هذا المفتاح
         (الموديلات الأخرى تبقى متاحة — كل موديل له كوتا مستقلة).
         retry_after: ثوانٍ من رد Google (retryDelay) إن وُجدت، وإلا الافتراضي من Config.
+        daily=True: الكوتا اليومية (RPD) خلصت → القفل حتى تصفير Google (منتصف الليل Pacific).
         """
         with self._lock:
             now = time.time()
-            cooldown = retry_after if (retry_after and retry_after > 0) else Config.KEY_COOLDOWN_SECONDS
+            if daily:
+                cooldown = max(60, self.seconds_until_quota_reset())
+            elif retry_after and retry_after > 0:
+                cooldown = retry_after
+            else:
+                cooldown = Config.KEY_COOLDOWN_SECONDS
             until = now + cooldown
             for k in self.data.get("keys", []):
                 if k.get("key") != key_str:
@@ -306,6 +313,26 @@ class KeyManager:
                     k["exhausted_until"] = until
                     label = f"المفتاح [{k.get('name')}]"
                 print(f"🔒 تم قفل {label} حتى: {datetime.fromtimestamp(until).strftime('%H:%M:%S')} ({int(cooldown // 60)} د)")
+                self.save()
+                break
+
+    def mark_key_invalid(self, key_str, reason=""):
+        """
+        Google رفضت المفتاح نفسه (400 API key not valid / 401 / 403 مسرّب أو بلا صلاحية).
+        يُقفل المفتاح كله (كل الموديلات) لمدة INVALID_KEY_COOLDOWN_SECONDS ويُعلَّم status="invalid"
+        حتى يظهر في /keys بعلامة ❌. لا يُحذف تلقائياً — القرار للمالك (/remove).
+        """
+        with self._lock:
+            now = time.time()
+            until = now + Config.INVALID_KEY_COOLDOWN_SECONDS
+            for k in self.data.get("keys", []):
+                if k.get("key") != key_str:
+                    continue
+                k["status"] = "invalid"
+                k["exhausted_until"] = until
+                k["invalid_reason"] = (reason or "")[:120]
+                k["exhausted_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                print(f"❌ Google رفضت المفتاح [{k.get('name')}] ({reason[:60] if reason else 'invalid'}) — مقفول 24 ساعة. احذفه بـ /remove لو مش هيرجع.")
                 self.save()
                 break
 
@@ -457,7 +484,8 @@ class KeyManager:
 
             for k in keys:
                 key_masked = k.get("key", "")[:8] + "..." + k.get("key", "")[-4:]
-                lines.append(f"• {k.get('name')}  [{key_masked}]  عمليات: {k.get('success_count', 0)}")
+                flag = "  ❌ مرفوض من Google" if k.get("status") == "invalid" else ""
+                lines.append(f"• {k.get('name')}  [{key_masked}]  عمليات: {k.get('success_count', 0)}{flag}")
                 rem = self.remaining_today(k)
                 for m in Config.MODELS:
                     until = self._model_blocked_until(k, m)
@@ -477,8 +505,19 @@ class KeyManager:
                 lines.append(f"⏱ أقرب مفتاح يعود للعمل بعد: {wait // 60} د")
 
             lines.append("─" * 30)
-            lines.append("🤖 الموديلات: 3.8 Flash ➔ 3.6 Flash ➔ 3.5 Transcribe (بدون Lite)")
+            lines.append(f"🤖 الموديلات: {self.models_chain_text()}")
             return "\n".join(lines)
+
+    @classmethod
+    def models_chain_text(cls):
+        """نص الموديلات بالترتيب يتولد من Config (مثال: 3.6 Flash ➔ 3.5 Transcribe) + المعطّلة."""
+        chain = " ➔ ".join(cls._short_model(m) for m in Config.MODELS)
+        disabled = sorted(getattr(Config, "DISABLED_MODELS", set()) or [])
+        if disabled:
+            chain += f" (معطّل: {', '.join(cls._short_model(m) for m in disabled)} — بدون Lite)"
+        else:
+            chain += " (بدون Lite)"
+        return chain
 
 # نسخة مفردة (Singleton)
 key_manager = KeyManager()
