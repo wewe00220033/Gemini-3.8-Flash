@@ -195,3 +195,23 @@ def test_server_is_threading(fresh_env):
     import inspect
     assert "ThreadingHTTPServer" in inspect.getsource(web_service.run_web_server)
     assert ThreadingHTTPServer  # متاح في stdlib
+
+
+# ---------- المرحلة 3: الواجهة من static/index.html ----------
+
+def test_index_served_from_static_file(web):
+    import web_service
+    status, body = _get(web + "/")
+    assert status == 200
+    page = body.decode()
+    assert "isTypeSupported" in page           # 3.9 mimeType detection
+    assert "id=\"toast\"" in page               # 3.5 no alert()
+    assert "alert(" not in page.split("<script>")[1].replace("// شريط رسائل بدل alert()", "")
+    assert web_service._INDEX_FILE.endswith("static/index.html")
+
+
+def test_index_fallback_when_static_missing(web, monkeypatch):
+    import web_service
+    monkeypatch.setattr(web_service, "_INDEX_FILE", "/nonexistent/index.html")
+    status, body = _get(web + "/")
+    assert status == 200 and "static/index.html" in body.decode()
