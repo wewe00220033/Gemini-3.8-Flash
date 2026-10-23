@@ -12,6 +12,7 @@ class FakeResp:
         self.status_code = status
         self._payload = payload or {}
         self.text = text
+        self.headers = {}
 
     def json(self):
         return self._payload
@@ -75,7 +76,10 @@ def test_429_rotates_to_next_key(engine, monkeypatch):
                   lambda c: FakeResp(429) if _key_of(c) == VALID_A else ok_text("ok"))
     text, model, name = engine.transcribe_audio_bytes(b"abc")
     assert text == "ok" and name == "B"
-    assert engine.key_manager.data["keys"][0]["status"] == "exhausted"
+    # بعد المرحلة 2: يُقفل الموديل فقط على المفتاح A، والمفتاح يبقى نشطاً للموديلات الأخرى
+    k_a = engine.key_manager.data["keys"][0]
+    assert "gemini-3.8-flash" in k_a.get("exhausted_models", {})
+    assert k_a["status"] == "active"
 
 
 def test_no_keys_raises(engine):
@@ -104,3 +108,49 @@ def test_api_key_not_in_url(engine, monkeypatch):
     engine.transcribe_audio_bytes(b"abc")
     assert VALID_A not in calls[0]["url"], "API key leaked into URL query string"
     assert calls[0]["headers"].get("x-goog-api-key") == VALID_A
+
+
+# ---------- المرحلة 2 ----------
+
+def test_429_on_one_model_falls_through_to_next_model_same_key(engine, monkeypatch):
+    """P15: 429 على 3.8 → نفس المفتاح يُجرَّب على 3.6 بدل قفله بالكامل."""
+    engine.key_manager.add_key(VALID_A, "A")
+    def handler(c):
+        return FakeResp(429) if "gemini-3.8-flash" in c["url"] else ok_text("ok")
+    calls = _install_post(monkeypatch, engine, handler)
+    text, model, name = engine.transcribe_audio_bytes(b"abc")
+    assert (text, model, name) == ("ok", "gemini-3.6-flash", "A")
+    assert len(calls) == 2
+    k = engine.key_manager.data["keys"][0]
+    assert "gemini-3.8-flash" in k["exhausted_models"] and k["status"] == "active"
+
+
+def test_all_exhausted_gives_clear_message_without_requests(engine, monkeypatch):
+    """P14: لا طلبات شبكة لما كل المفاتيح مقفولة — رسالة واضحة بالوقت."""
+    engine.key_manager.add_key(VALID_A, "A")
+    engine.key_manager.mark_key_exhausted(VALID_A)
+    calls = _install_post(monkeypatch, engine, lambda c: ok_text("x"))
+    with pytest.raises(RuntimeError) as ei:
+        engine.transcribe_audio_bytes(b"abc")
+    assert calls == []
+    assert "دقيقة" in str(ei.value)
+
+
+def test_retry_delay_parsed_from_google_body(engine, monkeypatch):
+    engine.key_manager.add_key(VALID_A, "A")
+    body = {"error": {"details": [{"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "37s"}]}}
+    r429 = FakeResp(429, body)
+    r429.headers = {}
+    _install_post(monkeypatch, engine, lambda c: r429 if "3.8" in c["url"] else ok_text("ok"))
+    engine.transcribe_audio_bytes(b"abc")
+    until = engine.key_manager.data["keys"][0]["exhausted_models"]["gemini-3.8-flash"]
+    import time as _t
+    assert 0 < until - _t.time() <= 38
+
+
+def test_daily_usage_recorded_on_success(engine, monkeypatch):
+    engine.key_manager.add_key(VALID_A, "A")
+    _install_post(monkeypatch, engine, lambda c: ok_text("ok"))
+    engine.transcribe_audio_bytes(b"abc")
+    k = engine.key_manager.data["keys"][0]
+    assert sum(v.get("gemini-3.8-flash", 0) for v in k["daily_usage"].values()) == 1

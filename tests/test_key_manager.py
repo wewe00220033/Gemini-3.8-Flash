@@ -138,3 +138,94 @@ def test_status_summary_masks_keys(km):
     summary = km.get_status_summary()
     assert VALID_AIZA not in summary
     assert VALID_AIZA[:8] in summary and VALID_AIZA[-4:] in summary
+
+
+# ---------- المرحلة 2: تهدئة لكل (مفتاح، موديل) + عدّاد يومي ----------
+
+M38, M36, M35 = "gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-transcribe"
+
+
+def test_per_model_exhaustion_keeps_other_models_available(km):
+    """P15: 429 على 3.8 يجب ألا يقفل 3.6 و 3.5 على نفس المفتاح."""
+    km.add_key(VALID_AIZA, "A")
+    km.mark_key_exhausted(VALID_AIZA, model=M38)
+    assert km.get_active_keys(model=M38) == []
+    assert [k["name"] for k in km.get_active_keys(model=M36)] == ["A"]
+    assert [k["name"] for k in km.get_active_keys(model=M35)] == ["A"]
+
+
+def test_all_models_exhausted_marks_key_exhausted(km):
+    km.add_key(VALID_AIZA, "A")
+    for m in (M38, M36, M35):
+        km.mark_key_exhausted(VALID_AIZA, model=m)
+    assert km.data["keys"][0]["status"] == "exhausted"
+    assert km.get_active_keys(model=M38) == []
+
+
+def test_all_exhausted_returns_empty_not_all(km):
+    """P14 (بند 2.7): لا محاولة يائسة تجدد القفل — قائمة فاضية + وقت أقرب عودة."""
+    km.add_key(VALID_AIZA, "A")
+    km.mark_key_exhausted(VALID_AIZA)
+    assert km.get_active_keys(model=M38) == []
+    wait = km.earliest_availability()
+    assert wait is not None and wait > 0
+
+
+def test_retry_after_overrides_default_cooldown(km, fresh_env):
+    km.add_key(VALID_AIZA, "A")
+    km.mark_key_exhausted(VALID_AIZA, model=M38, retry_after=42)
+    until = km.data["keys"][0]["exhausted_models"][M38]
+    assert until - time.time() <= 43
+    assert until - time.time() < fresh_env.Config.KEY_COOLDOWN_SECONDS
+
+
+def test_per_model_cooldown_expires(km):
+    km.add_key(VALID_AIZA, "A")
+    km.mark_key_exhausted(VALID_AIZA, model=M38, retry_after=1)
+    km.data["keys"][0]["exhausted_models"][M38] = time.time() - 1
+    assert [k["name"] for k in km.get_active_keys(model=M38)] == ["A"]
+    assert M38 not in km.data["keys"][0].get("exhausted_models", {})
+
+
+def test_daily_usage_counter_and_quota_block(km, fresh_env):
+    """P32 (بند 2.15): عدّاد يومي لكل (مفتاح، موديل) يمنع الاستخدام بعد نفاد الكوتا."""
+    km.add_key(VALID_AIZA, "A")
+    quota = fresh_env.Config.MODEL_DAILY_QUOTA[M38]
+    for _ in range(quota):
+        km.record_success(VALID_AIZA, model=M38)
+    assert km.remaining_today(km.data["keys"][0])[M38] == 0
+    assert km.get_active_keys(model=M38) == []
+    assert km.get_active_keys(model=M36)            # الموديل الآخر لا يتأثر
+
+
+def test_daily_usage_keeps_only_today(km):
+    km.add_key(VALID_AIZA, "A")
+    km.data["keys"][0]["daily_usage"] = {"2000-01-01": {M38: 5}}
+    km.record_success(VALID_AIZA, model=M38)
+    usage = km.data["keys"][0]["daily_usage"]
+    assert "2000-01-01" not in usage and len(usage) == 1
+
+
+def test_legacy_keys_json_without_new_fields_still_works(km):
+    """توافق خلفي: مفتاح بالبنية القديمة (بدون exhausted_models/daily_usage)."""
+    km.data["keys"] = [{"id": 1, "key": VALID_AIZA, "name": "Legacy", "status": "active",
+                        "exhausted_until": 0, "success_count": 3, "last_used": None}]
+    assert [k["name"] for k in km.get_active_keys(model=M38)] == ["Legacy"]
+    assert km.remaining_today(km.data["keys"][0])[M38] > 0
+
+
+def test_remove_and_rename_key(km):
+    km.add_key(VALID_AIZA, "A")
+    km.add_key(VALID_AQ, "B")
+    assert km.rename_key("a", "Alpha")["name"] == "Alpha"
+    removed = km.remove_key("Alpha")
+    assert removed and removed["key"] == VALID_AIZA
+    assert km.remove_key("nope") is None
+    assert [k["name"] for k in km.data["keys"]] == ["B"]
+
+
+def test_status_summary_is_plain_and_shows_reset(km):
+    km.add_key(VALID_AIZA, "A")
+    s = km.get_status_summary()
+    assert "**" not in s and "`" not in s          # لا Markdown — آمن للإرسال
+    assert "تصفير الكوتا" in s and "3.8 Flash" in s
