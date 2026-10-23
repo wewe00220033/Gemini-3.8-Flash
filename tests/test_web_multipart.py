@@ -31,9 +31,9 @@ def web(fresh_env, monkeypatch):
     def fake_transcribe(audio_bytes, mime_type="audio/webm"):
         captured["bytes"] = audio_bytes
         captured["mime"] = mime_type
-        return "النص", "gemini-3.8-flash", "P1"
+        return "النص", "gemini-3.6-flash", "P1", {"elapsed": 0.5, "skipped": []}
 
-    monkeypatch.setattr(web_service, "transcribe_audio_bytes", fake_transcribe)
+    monkeypatch.setattr(web_service, "transcribe_audio_bytes_ex", fake_transcribe)
 
     port = _free_port()
     httpd = HTTPServer(("127.0.0.1", port), web_service.WebRequestHandler)
