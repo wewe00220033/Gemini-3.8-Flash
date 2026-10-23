@@ -52,11 +52,12 @@ def transcribe_audio_bytes(audio_bytes, mime_type="audio/mp4"):
         for key_entry in active_keys_entries:
             key_str = key_entry.get("key")
             key_name = key_entry.get("name", "Project")
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key_str}"
+            # المفتاح في Header (توصية Google) وليس في الـ URL حتى لا يتسرب للـ logs/proxies
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+            headers = {"x-goog-api-key": key_str, "Content-Type": "application/json"}
 
             try:
-                # print(f"🚀 إرسال لـ [{model}] عبر [{key_name}]...")
-                resp = requests.post(url, json=payload, timeout=Config.REQUEST_TIMEOUT)
+                resp = requests.post(url, json=payload, headers=headers, timeout=Config.REQUEST_TIMEOUT)
 
                 if resp.status_code == 200:
                     data = resp.json()

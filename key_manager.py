@@ -11,11 +11,15 @@ import os
 import re
 import json
 import time
+import tempfile
+import threading
 from datetime import datetime
 from config import Config
 
 class KeyManager:
     def __init__(self):
+        # قفل واحد يحمي keys.json من الكتابة المتزامنة (الويب والبوت في threads مختلفة)
+        self._lock = threading.RLock()
         self.data = {
             "keys": [],
             "telegram": {
@@ -28,25 +32,79 @@ class KeyManager:
         self.load()
 
     def load(self):
-        # 1. لو ملف keys.json موجود نقرأه مباشرة
+        # 1. لو keys.json موجود نقرأه ثم ندمج معه أي مفاتيح جديدة من متغيرات البيئة
+        #    (مهم على الاستضافة: تضيف مفتاح في اللوحة + Restart → يتضاف بدون مسح الحالة المحفوظة)
         if os.path.exists(Config.KEYS_JSON_FILE):
             try:
                 with open(Config.KEYS_JSON_FILE, "r", encoding="utf-8") as f:
                     self.data = json.load(f)
+                if self._merge_env_keys():
+                    self.save()
                 return
             except Exception as e:
                 print(f"⚠️ خطأ أثناء قراءة keys.json: {e}")
 
-        # 2. الهجرة التلقائية من keys.txt أو .env أو متغيرات البيئة إن لم يوجد keys.json
+        # 2. الهجرة التلقائية من keys.txt أو متغيرات البيئة إن لم يوجد keys.json
         self._bootstrap_from_legacy()
         self.save()
 
+    @staticmethod
+    def _env_keys():
+        env_keys = os.environ.get("GEMINI_API_KEYS") or os.environ.get("GEMINI_API_KEY") or ""
+        return [x.strip() for x in env_keys.split(",") if x.strip()]
+
+    def _merge_env_keys(self):
+        """يضيف مفاتيح البيئة غير الموجودة في keys.json. يرجع True لو أضاف شيئاً."""
+        keys_list = self.data.setdefault("keys", [])
+        existing = {k.get("key") for k in keys_list}
+        added = False
+        for k in self._env_keys():
+            if k in existing:
+                continue
+            new_id = len(keys_list) + 1
+            keys_list.append({
+                "id": new_id,
+                "key": k,
+                "name": f"Project {new_id}",
+                "status": "active",
+                "exhausted_until": 0,
+                "success_count": 0,
+                "last_used": None,
+                "added_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "source": "env",
+            })
+            existing.add(k)
+            added = True
+            print(f"➕ تم دمج مفتاح جديد من متغيرات البيئة: {k[:8]}...{k[-4:]}")
+        return added
+
     def save(self):
-        try:
-            with open(Config.KEYS_JSON_FILE, "w", encoding="utf-8") as f:
-                json.dump(self.data, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            print(f"❌ خطأ أثناء حفظ keys.json: {e}")
+        """
+        حفظ ذرّي (temp → rename) حتى لا يتلف الملف لو توقفت العملية أثناء الكتابة،
+        + صلاحيات 600 لأن الملف يحوي مفاتيح API وتوكن تليجرام.
+        """
+        with self._lock:
+            target = Config.KEYS_JSON_FILE
+            directory = os.path.dirname(target) or "."
+            tmp_path = None
+            try:
+                fd, tmp_path = tempfile.mkstemp(prefix=".keys-", suffix=".tmp", dir=directory)
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(self.data, f, ensure_ascii=False, indent=2)
+                    f.flush()
+                    os.fsync(f.fileno())
+                try:
+                    os.chmod(tmp_path, 0o600)
+                except OSError:
+                    pass  # Windows لا يدعم الصلاحيات بنفس الطريقة — غير حرج
+                os.replace(tmp_path, target)
+            except Exception as e:
+                print(f"❌ خطأ أثناء حفظ keys.json: {e}")
+                if tmp_path and os.path.exists(tmp_path):
+                    try:
+                        os.remove(tmp_path)
+                    except OSError:
+                        pass
 
     def _bootstrap_from_legacy(self):
         raw_keys = []
@@ -77,9 +135,7 @@ class KeyManager:
                             rec_dir = v
 
         # قراءة متغيرات البيئة
-        env_keys = os.environ.get("GEMINI_API_KEYS") or os.environ.get("GEMINI_API_KEY")
-        if env_keys:
-            raw_keys.extend([x.strip() for x in env_keys.split(",") if x.strip()])
+        raw_keys.extend(self._env_keys())
 
         # تنظيف والتخلص من التكرار
         seen = set()
@@ -139,24 +195,26 @@ class KeyManager:
         return active
 
     def mark_key_exhausted(self, key_str):
-        now = time.time()
-        cooldown_until = now + Config.KEY_COOLDOWN_SECONDS
-        for k in self.data.get("keys", []):
-            if k.get("key") == key_str:
-                k["status"] = "exhausted"
-                k["exhausted_until"] = cooldown_until
-                k["exhausted_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                print(f"🔒 تم قفل المفتاح [{k.get('name')}] حتى: {datetime.fromtimestamp(cooldown_until).strftime('%H:%M:%S')}")
-                self.save()
-                break
+        with self._lock:
+            now = time.time()
+            cooldown_until = now + Config.KEY_COOLDOWN_SECONDS
+            for k in self.data.get("keys", []):
+                if k.get("key") == key_str:
+                    k["status"] = "exhausted"
+                    k["exhausted_until"] = cooldown_until
+                    k["exhausted_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    print(f"🔒 تم قفل المفتاح [{k.get('name')}] حتى: {datetime.fromtimestamp(cooldown_until).strftime('%H:%M:%S')}")
+                    self.save()
+                    break
 
     def record_success(self, key_str):
-        for k in self.data.get("keys", []):
-            if k.get("key") == key_str:
-                k["success_count"] = k.get("success_count", 0) + 1
-                k["last_used"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                self.save()
-                break
+        with self._lock:
+            for k in self.data.get("keys", []):
+                if k.get("key") == key_str:
+                    k["success_count"] = k.get("success_count", 0) + 1
+                    k["last_used"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    self.save()
+                    break
 
     @staticmethod
     def extract_key_from_text(text):
@@ -184,34 +242,35 @@ class KeyManager:
         return api_key, name
 
     def add_key(self, api_key, name=None):
-        keys_list = self.data.get("keys", [])
-        
-        # التحقق إن كان موجوداً مسبقاً
-        for k in keys_list:
-            if k.get("key") == api_key:
-                if name:
-                    k["name"] = name
-                k["status"] = "active"
-                k["exhausted_until"] = 0
-                self.save()
-                return k, False
+        with self._lock:
+            keys_list = self.data.get("keys", [])
 
-        # إضافة مفتاح جديد
-        new_id = len(keys_list) + 1
-        key_entry = {
-            "id": new_id,
-            "key": api_key,
-            "name": name or f"Project {new_id}",
-            "status": "active",
-            "exhausted_until": 0,
-            "success_count": 0,
-            "last_used": None,
-            "added_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        }
-        keys_list.append(key_entry)
-        self.data["keys"] = keys_list
-        self.save()
-        return key_entry, True
+            # التحقق إن كان موجوداً مسبقاً
+            for k in keys_list:
+                if k.get("key") == api_key:
+                    if name:
+                        k["name"] = name
+                    k["status"] = "active"
+                    k["exhausted_until"] = 0
+                    self.save()
+                    return k, False
+
+            # إضافة مفتاح جديد
+            new_id = len(keys_list) + 1
+            key_entry = {
+                "id": new_id,
+                "key": api_key,
+                "name": name or f"Project {new_id}",
+                "status": "active",
+                "exhausted_until": 0,
+                "success_count": 0,
+                "last_used": None,
+                "added_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            }
+            keys_list.append(key_entry)
+            self.data["keys"] = keys_list
+            self.save()
+            return key_entry, True
 
     def get_status_summary(self):
         keys = self.data.get("keys", [])
