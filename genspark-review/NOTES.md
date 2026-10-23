@@ -147,3 +147,19 @@
 - **اعتراف:** اختبارات المرحلة 2 غطّت 429 فقط ولم تحاكِ Timeout/503 — نقص مني، مسجّل في 7.1 للسدّ.
 - **الناتج:** `INCIDENT-01-slow-failover.md` (11 قسم، 22 سيناريو، 8 قرارات Q16–Q23). لم يُعدَّل أي كود.
 - **التالي:** بانتظار قرارات المالك → PR #6 (core) ثم #7 (visibility) ثم #8 (docs).
+
+
+---
+
+## الجلسة 7 — 2026-10-23 — تنفيذ المرحلة 5 (Failover سريع)
+
+- **القرارات:** المالك اعتمد التوصيات كلها مع تعديل واحد: Q20-ج (بدون `thinkingLevel` — الافتراضي MEDIUM لأعلى دقة عامية). دمج #2–#6 قبل البدء → العمل فوق `main` نظيف.
+- **PR #7 (core):** `config.py` (`DISABLED_MODELS`، مهلات ديناميكية، قاطع، جولات، prompt)، `model_state.py` جديد، `transcriber.py` إعادة كتابة كاملة بتصنيف 10 نتائج، `key_manager.py` (`daily=True`، `mark_key_invalid`، `models_chain_text`). 116 اختبار.
+  - مشكلة اتحلت: comprehension داخل class body ما بيشوفش `DISABLED_MODELS` → حلقة عادية.
+  - مشكلة اتحلت: كشف 429 اليومي كان بيفوّت `generate_requests_per_day` → regex `per[\s_]*day|daily|quota_exceeded`.
+- **PR #8 (visibility):** تذييل ⏱ + skipped، `ProgressKeeper` (thread: typing كل 4 ث، رسالة بعد 12 ث، حذف تلقائي)، `/reset`، `/status` بحالة القاطع وآخر 5 محاولات، الويب (`elapsed/skipped/models_state`، لوحة، زر reset، `/api/reset`). 126 اختبار.
+  - مشكلة اتحلت: اختبار نجح لوحده وفشل في الـ suite → الـ singleton `model_circuit` مشترك → تصفير في `fresh_env`. اتشغّل مرتين بنجاح.
+- **PR #9 (docs):** README، الدليل (بانر تحديث + 3.8 كمرجع + 45/مشروع)، DEPLOY (قائمة فحص بعد التحديث + 3 أعراض جديدة)، PLAN، هذا الملف.
+- **ضاع مرتين بسبب reset الـ sandbox** (transcriber.py الجديد، تعديلات الويب) — أُعيد تطبيقه من الصفر، والدرس: commit+push بعد كل ملف.
+- **لم يُختبر:** أي شيء بمفاتيح Gemini/تليجرام حقيقية. قائمة الفحص للمالك في `DEPLOY.md` §4.
+- **ملاحظة للمستقبل:** لو Google صلّحت 3.8، إعادته = حذف سطر من `DISABLED_MODELS`؛ القاطع هيحمي تلقائياً لو رجع يقع.
