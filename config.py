@@ -115,7 +115,9 @@ class Config:
     # إشعار على تليجرام عند بدء التشغيل (يفيد لمعرفة إعادة تشغيل الاستضافة)
     NOTIFY_ON_START = os.environ.get("NOTIFY_ON_START", "1") not in ("0", "false", "False", "")
     # Watchdog: كل كم ثانية يفحص أن البوت والويب أحياء ويعيد تشغيلهما
-    WATCHDOG_INTERVAL = 30
+    WATCHDOG_INTERVAL = int(os.environ.get("WATCHDOG_INTERVAL", "30"))
+    # مستوى السجلات: DEBUG | INFO | WARNING
+    LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")
 
     # المستخدم المصرح له في تليجرام (حماية البوت من التطفل).
     # فاضي = البوت يرفض الجميع حتى تضبط TELEGRAM_CHAT_ID في البيئة أو .env

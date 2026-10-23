@@ -10,11 +10,48 @@
 
 import sys
 import time
+import logging
 import threading
 from config import Config
 from key_manager import key_manager
 import web_service
 import telegram_bot
+
+
+class _PrintToLog:
+    """يحوّل print() في كل الوحدات إلى سجلات بطابع زمني بدون تغيير الرسائل العربية الحالية."""
+    def __init__(self, logger, level):
+        self._logger, self._level, self._buf = logger, level, ""
+
+    def write(self, text):
+        self._buf += text
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            if line.strip():
+                self._logger.log(self._level, line)
+
+    def flush(self):
+        if self._buf.strip():
+            self._logger.log(self._level, self._buf)
+        self._buf = ""
+
+    def isatty(self):
+        return False
+
+
+def _setup_logging():
+    """
+    سجلات بطابع زمني ومستوى (LOG_LEVEL=DEBUG|INFO|WARNING)، تُكتب لـ stderr الأصلي.
+    print() في كل الملفات يمر عبرها تلقائياً — مفيد على الاستضافة لمعرفة متى حصل كل شيء.
+    """
+    level = getattr(logging, Config.LOG_LEVEL.upper(), logging.INFO)
+    handler = logging.StreamHandler(sys.__stderr__)
+    handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)-7s | %(message)s", "%Y-%m-%d %H:%M:%S"))
+    root = logging.getLogger()
+    root.handlers[:] = [handler]
+    root.setLevel(level)
+    sys.stdout = _PrintToLog(logging.getLogger("app"), logging.INFO)
+    sys.stderr = _PrintToLog(logging.getLogger("app"), logging.ERROR)
 
 
 def _bot_thread():
@@ -56,6 +93,7 @@ def main():
         sys.stderr.reconfigure(line_buffering=True, encoding="utf-8")
     except Exception:
         pass
+    _setup_logging()
 
     print("=" * 70)
     print("🚀 بدء تشغيل منظومة التفريغ الصوتي الذكي 360° (Gemini Multi-Model)")
