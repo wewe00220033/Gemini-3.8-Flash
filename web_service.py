@@ -9,8 +9,9 @@
 
 import json
 import hmac
+import time
 import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from config import Config
 from key_manager import key_manager, KeyManager
@@ -584,6 +585,10 @@ class WebRequestHandler(BaseHTTPRequestHandler):
             self.wfile.write(HTML_PAGE.encode("utf-8"))
             return
 
+        if path == "/health":
+            # فحص صحة عام (بدون توكن) لمراقبة خارجية مثل UptimeRobot — لا يكشف أسراراً
+            return self._send_json(200, build_health())
+
         if path == "/api/status":
             if not self._authorized():
                 return self._send_json(401, {"ok": False, "error": "unauthorized", "need_token": True})
@@ -646,13 +651,56 @@ class WebRequestHandler(BaseHTTPRequestHandler):
         # كتم سجلات الـ HTTP لعدم التشويش على الكونسول إلا في الأخطاء
         return
 
+WEB_STATE = {"started_at": None, "alive": False, "last_error": None}
+
+
+def build_health():
+    """تقرير صحة JSON يقرأه /health والـ watchdog."""
+    try:
+        import telegram_bot
+        bot_state = telegram_bot.STATE
+    except Exception:
+        bot_state = {}
+    now = time.time()
+    keys = key_manager.data.get("keys", [])
+    keys_available = sum(
+        1 for k in keys if any(key_manager.is_model_available(k, m, now) for m in Config.MODELS)
+    )
+    last_poll = bot_state.get("last_poll_ok")
+    bot_alive = bool(bot_state.get("alive")) and (last_poll is not None and now - last_poll < 120)
+    return {
+        "ok": True,
+        "web_alive": True,
+        "bot_alive": bot_alive,
+        "bot_configured": bool(key_manager.get_telegram_config()[0]),
+        "bot_last_poll_age_s": int(now - last_poll) if last_poll else None,
+        "bot_processed": bot_state.get("processed", 0),
+        "bot_last_error": bot_state.get("last_error"),
+        "keys_total": len(keys),
+        "keys_available": keys_available,
+        "uptime_s": int(now - WEB_STATE["started_at"]) if WEB_STATE["started_at"] else 0,
+        "models": Config.MODELS,
+    }
+
+
 def run_web_server():
     server_address = (Config.WEB_HOST, Config.WEB_PORT)
-    httpd = HTTPServer(server_address, WebRequestHandler)
+    # ThreadingHTTPServer: طلب تفريغ طويل لا يحجب الصفحة أو /health (P11)
+    httpd = ThreadingHTTPServer(server_address, WebRequestHandler)
+    httpd.daemon_threads = True
+    WEB_STATE["started_at"] = time.time()
+    WEB_STATE["alive"] = True
     print(f"🌐 واجهة الويب الصوتية الذكية تعمل على: http://{Config.WEB_HOST}:{Config.WEB_PORT}")
-    httpd.serve_forever()
+    try:
+        httpd.serve_forever()
+    except Exception as e:
+        WEB_STATE["last_error"] = str(e)
+        raise
+    finally:
+        WEB_STATE["alive"] = False
+
 
 def start_web_server_thread():
-    t = threading.Thread(target=run_web_server, daemon=True)
+    t = threading.Thread(target=run_web_server, daemon=True, name="web")
     t.start()
     return t

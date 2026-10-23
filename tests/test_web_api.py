@@ -173,3 +173,25 @@ def test_index_page_always_served(web_with_token):
     """الصفحة نفسها تُخدَم دائماً — الحماية على الـ API فقط."""
     status, _ = _get(web_with_token + "/")
     assert status == 200
+
+
+# ---------- المرحلة 2: /health و ThreadingHTTPServer ----------
+
+def test_health_endpoint_public_and_shape(web_with_token):
+    """2.12: /health عام (بدون توكن) ويرجع حقول المراقبة بدون أسرار."""
+    status, body = _get(web_with_token + "/health")
+    assert status == 200
+    h = json.loads(body)
+    for field in ("ok", "web_alive", "bot_alive", "keys_total", "keys_available", "uptime_s", "models"):
+        assert field in h
+    assert "AIzaSy" not in body.decode()
+
+
+def test_server_is_threading(fresh_env):
+    import importlib
+    import web_service
+    importlib.reload(web_service)
+    from http.server import ThreadingHTTPServer
+    import inspect
+    assert "ThreadingHTTPServer" in inspect.getsource(web_service.run_web_server)
+    assert ThreadingHTTPServer  # متاح في stdlib

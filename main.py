@@ -1,43 +1,111 @@
 # -*- coding: utf-8 -*-
 """
 نقطة الانطلاق الرئيسية الموحدة 360° (Master Unified Runner)
-- يشغل خادم الويب والواجهة الصوتية في الخلفية (Web Service)
-- يشغل بوت التليجرام الفوري في الواجهة الرئيسية (Telegram Bot)
+- يشغل خادم الويب والواجهة الصوتية في خيط خلفي (Web Service)
+- يشغل بوت التليجرام في خيط خلفي (Telegram Bot)
+- Watchdog: يراقب الاثنين ويعيد تشغيل أيهما يقع، ويبلغك على تليجرام
+- Startup Ping: رسالة على تليجرام عند الإقلاع (تعرف لو الاستضافة عملت Restart)
 - مهيأ للعمل محلياً أو على خوادم الاستضافة (24/7 Hosting)
 """
 
+import sys
 import time
+import threading
 from config import Config
 from key_manager import key_manager
-from web_service import start_web_server_thread
+import web_service
 import telegram_bot
 
+
+def _bot_thread():
+    t = threading.Thread(target=telegram_bot.main, daemon=True, name="telegram-bot")
+    t.start()
+    return t
+
+
+def _startup_ping(bot_token, chat_id):
+    """إشعار إقلاع مختصر على تليجرام."""
+    if not (Config.NOTIFY_ON_START and bot_token and chat_id):
+        return
+    try:
+        now = time.time()
+        keys = key_manager.data.get("keys", [])
+        available = sum(
+            1 for k in keys if any(key_manager.is_model_available(k, m, now) for m in Config.MODELS)
+        )
+        remaining = sum(
+            v for k in keys for m, v in key_manager.remaining_today(k).items()
+            if key_manager.is_model_available(k, m, now)
+        )
+        msg = (
+            "🚀 المنظومة اشتغلت الآن.\n"
+            f"🔑 مفاتيح: {len(keys)} (متاح: {available})\n"
+            f"⚡ رصيد متاح اليوم: {remaining} ريكورد\n"
+            f"🌐 الويب على المنفذ {Config.WEB_PORT}\n"
+            f"🕛 تصفير الكوتا: {key_manager.next_reset_display()} ({Config.DISPLAY_TZ})"
+        )
+        telegram_bot.send_telegram_message(bot_token, chat_id, msg)
+    except Exception as e:
+        print(f"⚠️ تعذر إرسال إشعار الإقلاع: {e}")
+
+
 def main():
+    # على الاستضافة stdout غالباً pipe → بدون line buffering لا يظهر شيء في الكونسول إلا عند الامتلاء
+    try:
+        sys.stdout.reconfigure(line_buffering=True, encoding="utf-8")
+        sys.stderr.reconfigure(line_buffering=True, encoding="utf-8")
+    except Exception:
+        pass
+
     print("=" * 70)
     print("🚀 بدء تشغيل منظومة التفريغ الصوتي الذكي 360° (Gemini Multi-Model)")
     print("=" * 70)
 
-    # 1. إطلاق خادم الويب الصوتي
+    bot_token, _, chat_id = key_manager.get_telegram_config()
+
+    # 1. خادم الويب
+    web_t = None
     try:
-        start_web_server_thread()
-        print(f"🌐 واجهة الويب جاهزة للاستخدام: http://{Config.WEB_HOST}:{Config.WEB_PORT}")
+        web_t = web_service.start_web_server_thread()
+        print(f"🌐 واجهة الويب جاهزة للاستخدام: http://{Config.WEB_HOST}:{Config.WEB_PORT}  (health: /health)")
     except Exception as e:
         print(f"⚠️ تحذير: تعذر تشغيل خادم الويب: {e}")
 
-    # 2. إطلاق بوت التليجرام
-    bot_token, _, _ = key_manager.get_telegram_config()
+    # 2. بوت تليجرام
+    bot_t = None
     if bot_token:
-        try:
-            telegram_bot.main()
-        except KeyboardInterrupt:
-            print("\n👋 تم إيقاف المنظومة بنجاح.")
+        bot_t = _bot_thread()
+        time.sleep(1.5)
+        _startup_ping(bot_token, chat_id)
     else:
         print("ℹ️ لم يتم العثور على توكن تليجرام، المنظومة تعمل في وضع الويب فقط.")
-        try:
-            while True:
-                time.sleep(1)
-        except KeyboardInterrupt:
-            print("\n👋 تم إيقاف المنظومة بنجاح.")
+
+    # 3. Watchdog
+    web_restarts = bot_restarts = 0
+    try:
+        while True:
+            time.sleep(Config.WATCHDOG_INTERVAL)
+
+            if web_t is not None and not web_t.is_alive():
+                web_restarts += 1
+                print(f"🩺 Watchdog: خادم الويب توقف — إعادة تشغيل (#{web_restarts})...")
+                try:
+                    web_t = web_service.start_web_server_thread()
+                except Exception as e:
+                    print(f"⚠️ فشل إعادة تشغيل الويب: {e}")
+
+            if bot_t is not None and not bot_t.is_alive():
+                bot_restarts += 1
+                print(f"🩺 Watchdog: بوت تليجرام توقف — إعادة تشغيل (#{bot_restarts})...")
+                bot_t = _bot_thread()
+                if bot_token and chat_id and Config.NOTIFY_ON_START:
+                    telegram_bot.send_telegram_message(
+                        bot_token, chat_id,
+                        f"🩺 Watchdog أعاد تشغيل البوت (#{bot_restarts}). آخر خطأ: {telegram_bot.STATE.get('last_error')}"
+                    )
+    except KeyboardInterrupt:
+        print("\n👋 تم إيقاف المنظومة بنجاح.")
+
 
 if __name__ == "__main__":
     main()
