@@ -6,7 +6,6 @@
 - install_signal_handlers: SIGTERM يضبط stop_event فقط.
 """
 import importlib
-import os
 import signal
 import threading
 import time
@@ -114,7 +113,7 @@ def test_signal_handler_sets_stop_event_only(env):
     try:
         installed = main.install_signal_handlers(ev)
         assert signal.SIGTERM in installed
-        os.kill(os.getpid(), signal.SIGTERM)
+        signal.raise_signal(signal.SIGTERM)   # عابر للمنصات: os.kill على Windows = TerminateProcess
         assert ev.wait(2)
     finally:
         for s, h in prev.items():
