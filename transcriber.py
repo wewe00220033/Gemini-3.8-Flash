@@ -473,8 +473,8 @@ def _final_message(reasons, last, tried_any):
     parts = [f"{_short(m)}: {r}" for m, r in reasons.items()]
     detail = " · ".join(parts) if parts else (last.detail if last else "")
 
-    if reasons and _all_models_blocked():
-        wait, m = model_circuit.earliest_open(Config.MODELS)
+    wait, m = model_circuit.earliest_open(Config.MODELS) if reasons and _all_models_blocked() else (0, None)
+    if wait and m:   # سباق نادر: القاطع انتهى بين الفحصين → نكمل للرسالة العامة بدل الانفجار
         return (
             f"{GEMINI_PREFIX}⏳ Google مزدحمة على كل الموديلات حالياً. أقرب فتح: {_short(m)} بعد {_fmt_wait(wait)}. "
             f"هأعيد المحاولة تلقائياً (أو اكتب /reset لتجاوز الانتظار).\n({detail})"
