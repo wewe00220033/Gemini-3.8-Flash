@@ -274,3 +274,21 @@ def test_health_deep_ok_when_bot_not_configured_even_without_beats(web):
     h = json.loads(body)
     assert status == 200 and h["ok"] is True and h["stale_threads"] == []
     assert h["bot_configured"] is False
+
+
+def test_start_web_server_thread_raises_in_caller_when_port_busy(fresh_env, monkeypatch):
+    """G27: المنفذ مشغول → OSError تصل للمستدعي فوراً (لا خيط يموت بصمت)."""
+    import importlib
+    import web_service
+    importlib.reload(web_service)
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    s.listen(1)
+    port = s.getsockname()[1]
+    try:
+        monkeypatch.setattr(web_service.Config, "WEB_HOST", "127.0.0.1")
+        monkeypatch.setattr(web_service.Config, "WEB_PORT", port)
+        with pytest.raises(OSError):
+            web_service.start_web_server_thread()
+    finally:
+        s.close()

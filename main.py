@@ -101,13 +101,15 @@ def main():
 
     bot_token, _, chat_id = key_manager.get_telegram_config()
 
-    # 1. خادم الويب
+    # 1. خادم الويب — الربط بالمنفذ يتم هنا (في الخيط الرئيسي) كي يُكتشف فشل المنفذ فوراً لا بصمت (G27)
     web_t = None
+    web_error = None
     try:
         web_t = web_service.start_web_server_thread()
         print(f"🌐 واجهة الويب جاهزة للاستخدام: http://{Config.WEB_HOST}:{Config.WEB_PORT}  (health: /health)")
     except Exception as e:
-        print(f"⚠️ تحذير: تعذر تشغيل خادم الويب: {e}")
+        web_error = f"{type(e).__name__}: {e}"
+        print(f"⚠️ تحذير: تعذر تشغيل خادم الويب على {Config.WEB_HOST}:{Config.WEB_PORT}: {web_error} — البوت يكمل بلا ويب.")
 
     # 2. بوت تليجرام
     bot_t = None
@@ -115,6 +117,15 @@ def main():
         bot_t = _bot_thread()
         time.sleep(1.5)
         _startup_ping(bot_token, chat_id)
+        if web_error and chat_id:
+            # G27: إشعار مرة واحدة فقط — المالك كان يظن أن الويب يعمل لأن اللوج وحده يعرف
+            try:
+                telegram_bot.send_telegram_message(
+                    bot_token, chat_id,
+                    f"⚠️ الويب لم يشتغل على المنفذ {Config.WEB_PORT}: {web_error}\nالبوت شغال طبيعي. /health غير متاح حتى يُصلح المنفذ."
+                )
+            except Exception as e:
+                print(f"⚠️ تعذر إرسال إشعار فشل الويب: {e}")
     else:
         print("ℹ️ لم يتم العثور على توكن تليجرام، المنظومة تعمل في وضع الويب فقط.")
 

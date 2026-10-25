@@ -18,6 +18,7 @@ from config import Config
 from key_manager import key_manager
 from transcriber import transcribe_audio_bytes_ex
 from model_state import model_circuit
+import heartbeat
 
 if sys.platform == "win32":
     try:
@@ -234,6 +235,7 @@ def _download_file(token, file_id):
 
 def handle_audio(token, chat_id, msg, file_id, mime_type, label):
     """يعمل داخل ThreadPool."""
+    heartbeat.beat("worker", note="job start")
     try:
         print(f"🎙️ تم استلام تسجيل صوتي ({label}) من {chat_id}...")
         with ProgressKeeper(token, chat_id, reply_to_id=msg["message_id"]):
@@ -412,6 +414,7 @@ def main(stop_event=None):
                     params=params,
                     timeout=40,
                 )
+                heartbeat.beat("poller", note=f"getUpdates {res.status_code}")
                 if res.status_code == 409:
                     print("⛔ 409 Conflict: نسخة أخرى من البوت تعمل بنفس التوكن (محلي + استضافة؟). أوقف إحداهما.")
                     STATE["last_error"] = "409 conflict: another instance is polling"
@@ -423,6 +426,7 @@ def main(stop_event=None):
                     continue
 
                 STATE["last_poll_ok"] = time.time()
+                heartbeat.beat("poller", note="getUpdates 200")
                 for up in res.json().get("result", []):
                     offset = up["update_id"] + 1          # نتقدم دائماً حتى لو فشلت معالجة الرسالة
                     msg = up.get("message")

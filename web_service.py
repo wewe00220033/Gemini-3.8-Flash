@@ -230,11 +230,17 @@ def build_health():
     }
 
 
-def run_web_server():
-    server_address = (Config.WEB_HOST, Config.WEB_PORT)
-    # ThreadingHTTPServer: طلب تفريغ طويل لا يحجب الصفحة أو /health (P11)
-    httpd = ThreadingHTTPServer(server_address, WebRequestHandler)
+def bind_web_server():
+    """
+    يربط المنفذ **في خيط المستدعي** ويعيد httpd. فشل الربط (منفذ مشغول/محجوز/بلا صلاحية) يرفع OSError هنا
+    فوراً — لا داخل خيط خلفي يموت بصمت (G27). ThreadingHTTPServer: طلب تفريغ طويل لا يحجب /health (P11).
+    """
+    httpd = ThreadingHTTPServer((Config.WEB_HOST, Config.WEB_PORT), WebRequestHandler)
     httpd.daemon_threads = True
+    return httpd
+
+
+def serve(httpd):
     WEB_STATE["started_at"] = time.time()
     WEB_STATE["alive"] = True
     print(f"🌐 واجهة الويب الصوتية الذكية تعمل على: http://{Config.WEB_HOST}:{Config.WEB_PORT}")
@@ -247,7 +253,16 @@ def run_web_server():
         WEB_STATE["alive"] = False
 
 
+def run_web_server():
+    """تشغيل مباشر (محلياً): ربط + خدمة في نفس الخيط. الخادم ThreadingHTTPServer (انظر bind_web_server)."""
+    httpd = bind_web_server()
+    assert isinstance(httpd, ThreadingHTTPServer)
+    serve(httpd)
+
+
 def start_web_server_thread():
-    t = threading.Thread(target=run_web_server, daemon=True, name="web")
+    """الربط هنا (قد يرفع OSError للمستدعي)، ثم الخدمة في خيط خلفي."""
+    httpd = bind_web_server()
+    t = threading.Thread(target=serve, args=(httpd,), daemon=True, name="web")
     t.start()
     return t
