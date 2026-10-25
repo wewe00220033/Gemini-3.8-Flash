@@ -126,7 +126,7 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
         session_name = _safe_session_name()
     result = {"raw": raw, "polished": None, "raw_msg_id": None, "polished_msg_id": None, "mode": mode,
               "archived": False, "polish_error": None, "role": role_id, "session": session_name, "title": None,
-              "session_written": False, "title_suggestion": None}
+              "session_written": False, "title_suggestion": None, "summary_updated": False}
 
     # 2) أرشفة قبل أي إرسال (outbox) — archive_entry=False للمكرر (dedup): سبق أرشفته
     if archive_entry:
@@ -166,8 +166,13 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
         if polish_fn is None:
             import text_assist
             polish_fn = text_assist.polish
+        # L2 (10 §2): ملخص الجلسة التراكمي → طبقة B فقط (لا يُمرَّر لطبقة A إطلاقاً)
+        l2 = sessions.summary() if session_name else None
         try:
-            polished, reason = polish_fn(raw, role_id, gl)
+            if l2 and polish_fn is text_assist_polish():
+                polished, reason = polish_fn(raw, role_id, gl, context_summary=l2)
+            else:
+                polished, reason = polish_fn(raw, role_id, gl)
         except Exception as e:  # pragma: no cover - دفاع: التنظيم لا يكسر الخام أبداً
             polished, reason = None, f"{type(e).__name__}: {e}"
         anchor = result["raw_msg_id"] or reply_to_id
@@ -191,7 +196,20 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
                                  result["raw_msg_id"], "HTML")
             else:
                 sender.send_text(f"⚠️ تعذر التنظيم الآن ({html.escape(str(reason or ''))}) — الخام فوق.", anchor, "HTML")
+
+    # 5) L2 (10 §2): كل SESSION_SUMMARY_EVERY فويسات → تحديث ملخص الجلسة (نداء lite نصي واحد) — للتنظيم القادم فقط
+    if archive_entry and session_name:
+        try:
+            result["summary_updated"] = bool(sessions.maybe_update_summary())
+        except Exception as e:  # pragma: no cover
+            print(f"⚠️ ملخص الجلسة L2: {e}")
     return result
+
+
+def text_assist_polish():
+    """مرجع دالة التنظيم الحقيقية (لتمييزها عن polish_fn المحقونة التي قد لا تقبل context_summary)."""
+    import text_assist
+    return text_assist.polish
 
 
 def _send_long(sender, html_text, plain_text, reply_to_id, filename_prefix, caption, head_html=""):

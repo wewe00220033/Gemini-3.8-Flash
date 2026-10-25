@@ -116,15 +116,19 @@ def generate(system_text, user_text, timeout=None):
     return None, last_reason
 
 
-def polish(raw_text, role_id=None, glossary=None):
+def polish(raw_text, role_id=None, glossary=None, context_summary=None):
     """
     يحوّل الخام إلى منظم (طبقة B). يرجع (polished, None) أو (None, reason). لا يلمس الخام ولا الصوت.
     القاموس (scope polished) يُطبَّق على الناتج.
+    context_summary (10 §2 L2): ملخص الجلسة التراكمي — يُضاف لنص النظام «للفهم فقط»؛ لا يُعاد كتابته ولا يُدمج في الناتج.
     """
     if not (raw_text or "").strip():
         return None, "نص فارغ"
     role_id = role_id or Config.DEFAULT_ROLE
     system_text = prompts.compose_prompt("polish", role_id)
+    if context_summary:
+        system_text += ("\n\nملخص الجلسة حتى الآن (للفهم فقط — لا تضفه ولا تعِد كتابته، نظّم النص الجديد فقط):\n"
+                        + str(context_summary)[:Config.SESSION_SUMMARY_MAX_CHARS])
     text, reason = generate(system_text, raw_text)
     if text is None:
         return None, reason

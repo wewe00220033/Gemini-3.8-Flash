@@ -146,6 +146,7 @@ def _rebuild_from_files():
                     "status": status, "started": meta.get("started") or "",
                     "ended": tail.get("ended"), "count": count, "last_ts": tail.get("last_ts") or meta.get("started") or "",
                     "role_override": None, "pending_title": None, "strikes": 0, "simple_left": 0,
+                    "summary": tail.get("summary"), "summary_at": tail.get("summary_at", 0),
                     "context_off": False})
     return out
 
@@ -188,6 +189,9 @@ def _scan_file(path):
                     tail["name"] = ln.split("«", 1)[1].rsplit("»", 1)[0]
                 elif ln.startswith("📦 دُمجت في"):
                     tail["merged"] = True
+                elif ln.startswith("🧾 ملخص: "):
+                    tail["summary"] = ln[len("🧾 ملخص: "):].strip()
+                    tail["summary_at"] = count
     except OSError:
         pass
     return count, tail
@@ -517,7 +521,7 @@ def _parse_block(block):
             cur = pol
         elif ln.startswith(_TITLE_MARK):
             cur = title
-        elif ln.startswith(("⏹️ ", "▶️ ", "✏️ ", "📛 ", "📦 ", "🎭 ")):
+        elif ln.startswith(("⏹️ ", "▶️ ", "✏️ ", "📛 ", "📦 ", "🎭 ", "🧾 ")):
             cur = None
         elif cur is not None:
             cur.append(ln)
@@ -791,6 +795,79 @@ def terms_hint(session_id=None):
 
 
 # ======================================================================
+# L2 (10 §2): ملخص الجلسة التراكمي — كل SESSION_SUMMARY_EVERY فويسات عبر flash-lite (نصياً)
+# يدخل طبقة B (التنظيم) فقط. لا يُحقن أبداً في طبقة A (التفريغ).
+# ======================================================================
+def summary(session_id=None):
+    """آخر ملخص تراكمي محفوظ للجلسة (أو None)."""
+    s = get(session_id) if session_id else current()
+    return (s or {}).get("summary") or None
+
+
+def summary_due(session_id=None):
+    """هل حان تحديث الملخص؟ (count وصل مضاعف SESSION_SUMMARY_EVERY ولم يُلخَّص عنده بعد)."""
+    every = int(Config.SESSION_SUMMARY_EVERY or 0)
+    if every <= 0:
+        return False
+    s = get(session_id) if session_id else current()
+    if not s:
+        return False
+    count = int(s.get("count") or 0)
+    return count > 0 and count % every == 0 and int(s.get("summary_at") or 0) < count
+
+
+def maybe_update_summary(session_id=None, generate_fn=None):
+    """
+    يحدّث الملخص إن حان وقته: يُغذّي flash-lite بالملخص السابق + آخر N نصوص خام (مقتطعة) ويطلب ملخصاً ≤ SESSION_SUMMARY_MAX_CHARS.
+    يُخزَّن في الفهرس ويُلحق بملف الجلسة كسطر «🧾 ملخص:» (append-only → يُستعاد عند إعادة البناء).
+    يرجع الملخص الجديد أو None (لا شيء حان/فشل). أي فشل صامت — لا يؤثر على الفويس.
+    """
+    with _lock:
+        sid = session_id or current_id()
+        s = _find(sid) if sid else None
+        if s is None:
+            return None
+        sid = s["id"]
+    if not summary_due(sid):
+        return None
+    every = int(Config.SESSION_SUMMARY_EVERY)
+    with _lock:
+        s = _find(sid)
+        prev = (s or {}).get("summary") or ""
+        count = int((s or {}).get("count") or 0)
+        ents = _entries_of(sid)[-every:]
+    if not ents:
+        return None
+    if generate_fn is None:
+        import text_assist
+        generate_fn = text_assist.generate
+    chunk = "\n---\n".join((e["raw"] or "")[:1200] for e in ents)
+    system = (f"أنت تلخّص جلسة تفريغ صوتي عربية تراكمياً. اكتب ملخصاً موجزاً (حتى {Config.SESSION_SUMMARY_MAX_CHARS} حرف) "
+              "يذكر الموضوع، الأسماء والمصطلحات التقنية كما وردت، والقرارات/النقاط المفتوحة. بلا مقدمات ولا عناوين. أخرج الملخص فقط.")
+    user = (f"الملخص السابق:\n{prev}\n\nالنصوص الجديدة:\n{chunk}" if prev else chunk)
+    try:
+        text, _reason = generate_fn(system, user)
+    except Exception:
+        text = None
+    text = " ".join((text or "").split())
+    if not text:
+        return None
+    text = text[:Config.SESSION_SUMMARY_MAX_CHARS]
+    with _lock:
+        s = _find(sid)
+        if s is None:
+            return None
+        s["summary"] = text
+        s["summary_at"] = count
+        _write_index()
+        try:
+            _append_file(session_file(sid), f"🧾 ملخص: {text}\n\n")
+        except OSError:  # pragma: no cover
+            pass
+    return text
+
+
+# ======================================================================
 # السياق (10 §2) + 2-strike (10 §3)
 # ======================================================================
 def session_terms(session_id=None, limit=None):
@@ -935,7 +1012,10 @@ def stats_text():
     lines = [f"📊 الجلسات: {len(items)} (نشطة: {len(active)}) · فويسات داخل جلسات: {total_voices}"]
     if cur:
         lines.append(f"🟢 النشطة: «{cur['name']}» — {cur.get('count', 0)} فويس · السياق: {context_mode()}"
-                     + (f" · ضربات: {cur.get('strikes', 0)}" if cur.get("strikes") else ""))
+                     + (f" · ضربات: {cur.get('strikes', 0)}" if cur.get("strikes") else "")
+                     + (f" · 🧾 ملخص L2 عند الفويس {cur.get('summary_at')}" if cur.get("summary") else ""))
+        if cur.get("summary"):
+            lines.append(f"🧾 {cur['summary'][:300]}{'…' if len(cur['summary']) > 300 else ''}")
     else:
         lines.append("لا جلسة نشطة (الفويسات تُؤرشف في ALL.md فقط).")
     return "\n".join(lines)
