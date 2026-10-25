@@ -65,6 +65,19 @@ class WebRequestHandler(BaseHTTPRequestHandler):
     def _route(self):
         return urlparse(self.path).path
 
+    def _drain_body(self, limit=1 << 20):
+        """يقرأ ويهمل body الطلب (حتى limit) كي لا يُقطع الاتصال قبل وصول الرد للعميل."""
+        try:
+            n = int(self.headers.get("Content-Length", 0) or 0)
+        except ValueError:
+            n = 0
+        remaining = min(n, limit)
+        while remaining > 0:
+            chunk = self.rfile.read(min(remaining, 65536))
+            if not chunk:
+                break
+            remaining -= len(chunk)
+
     @staticmethod
     def parse_multipart(body, content_type):
         """
@@ -135,6 +148,8 @@ class WebRequestHandler(BaseHTTPRequestHandler):
         path = self._route()
 
         if path not in ("/api/transcribe", "/api/add_key"):
+            # نستهلك الـ body قبل الرد: على Windows إغلاق السوكت وبه بيانات غير مقروءة يرسل RST (10054) بدل 404
+            self._drain_body()
             return self._send_json(404, {"ok": False, "error": "not found"})
 
         if not self._authorized():
