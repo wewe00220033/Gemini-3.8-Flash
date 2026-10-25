@@ -245,7 +245,8 @@ def test_503_on_primary_opens_circuit_and_next_request_skips_it(engine, monkeypa
     r503 = _err(503, "high demand", "UNAVAILABLE")
     calls = _install_post(monkeypatch, engine, lambda c: r503 if M1 in c["url"] else ok_text("ok"))
     engine.transcribe_audio_bytes(b"abc")
-    assert [M1 in c["url"] for c in calls] == [True, False]
+    # Failover v2 (04 §2.1): 503 على A → قفزة لـ B (مشروع مختلف) → الكل 503 → قفل الموديل → الموديل التالي
+    assert [M1 in c["url"] for c in calls] == [True, True, False]
     assert engine.model_circuit.is_open(M1)
     # الطلب التالي: لا يلمس 3.6 أصلاً
     calls.clear()
@@ -270,11 +271,14 @@ def test_all_models_down_bounded_rounds_then_clear_message(engine, monkeypatch):
     calls = _install_post(monkeypatch, engine, lambda c: _err(503, "busy", "UNAVAILABLE"))
     with pytest.raises(RuntimeError) as ei:
         engine.transcribe_audio_bytes(b"abc")
-    # الجولة الأولى: موديلان × مفتاح = طلبان. بعدها القواطع مقفولة → لا جولة إضافية تضرب الشبكة
+    # الجولة الأولى: موديلان × مفتاح = طلبان. بعدها القواطع مقفولة 20ث (أول درجة في السلم)
+    # Failover v2 (04 §2.3): انتظار ذكي = أقرب فتح قاطع (20) لا backoff أعمى (2)، ثم جولة ثانية تضرب الشبكة
+    # لأن sleep وهمي (القاطع لا يزال مقفولاً فعلياً → تُتخطّى كل الموديلات بلا طلبات) والميزانية تمنع المزيد
     assert len(calls) == 2
-    assert sleeps == [engine.Config.TRANSIENT_RETRY_BACKOFF[0]]
+    assert sleeps == [engine.Config.MODEL_PAUSE_LADDER_5XX[0]]
+    assert isinstance(ei.value, engine.DeferredError) and ei.value.kind == "model"
     msg = str(ei.value)
-    assert "مزدحمة" in msg and "/reset" in msg
+    assert "مزدحمة" in msg and "/reset" in msg and msg.startswith("🤖 Gemini:")
 
 
 def test_transient_retry_round_succeeds_when_circuit_cleared(engine, monkeypatch):

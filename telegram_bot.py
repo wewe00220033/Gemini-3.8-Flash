@@ -3,7 +3,7 @@
 بوت تليجرام للتفريغ الصوتي الذكي وإدارة المفاتيح 360°
 - استقبال الفويس نوت والتفريغ الفوري بكود بلوك قابل للنسخ
 - كشف المفاتيح التلقائي وإضافتها للـ Key Pool بمجرد إرسالها نصياً في الشات
-- أوامر: /status  /keys  /remove <اسم>  /rename <قديم> <جديد>  /help
+- أوامر: /status  /keys  /remove <اسم>  /rename <قديم> <جديد>  /project_group <مفتاح> <مجموعة>  /help
 - إرسال آمن: HTML + escape + تقسيم الرسائل الطويلة + fallback لنص خام (لا تضيع ردود)
 - تفريغ متوازٍ (ThreadPool) حتى لا يحجب فويس طويل باقي الرسائل
 """
@@ -555,6 +555,7 @@ def _help_text():
         "/keys — قائمة المفاتيح مرتبة (المتاح أولاً)\n"
         "/remove <اسم> — حذف مفتاح بالاسم أو بأول 8 أحرف منه\n"
         "/rename <قديم> <جديد> — إعادة تسمية مفتاح\n"
+        "/project_group <مفتاح> <مجموعة> — مفاتيح نفس مشروع Google تتشارك الحصة (والقفز عند 503 لمشروع آخر). اكتب - للإزالة\n"
         "/backup — نسخة احتياطية (أرشيف+جلسات+إعدادات) بلا أسرار\n"
         "/backup_secrets — نسخة keys.json بتأكيد صريح\n"
         "/version — رقم النسخة والبناء ومدة التشغيل\n"
@@ -671,6 +672,27 @@ def handle_text(token, chat_id, msg, msg_text):
             send_telegram_message(token, chat_id, f"✏️ تمت إعادة التسمية إلى [{entry.get('name')}].", reply_to_id=msg["message_id"])
         else:
             send_telegram_message(token, chat_id, "لم أجد مفتاحاً بهذا الاسم. جرّب /keys.", reply_to_id=msg["message_id"])
+
+    elif cmd in ("/project_group", "/group"):
+        # مرحلة 2 (04 §2.4): تثبيت مجموعة المشروع صراحةً في keys.json
+        if len(args) < 2:
+            groups = key_manager.groups_summary()
+            cur = ("\nالمجموعات الحالية: " + " | ".join(f"{g}: {', '.join(n)}" for g, n in groups)) if groups else "\nلا توجد مجموعات بعد (كل مفتاح مستقل)."
+            send_telegram_message(token, chat_id, "الاستخدام: /project_group <اسم المفتاح أو أول 8 أحرف> <اسم المجموعة>\n"
+                                                  "مثال: /project_group \"Project 2\" proj-A  —  أو - لإزالة المجموعة" + cur,
+                                  reply_to_id=msg["message_id"])
+            return
+        group = args[-1]
+        target = " ".join(args[:-1]).strip('"')
+        entry = key_manager.set_project_group(target, group)
+        if entry is None:
+            send_telegram_message(token, chat_id, "لم أجد مفتاحاً بهذا الاسم. جرّب /keys.", reply_to_id=msg["message_id"])
+        elif entry.get("project_group"):
+            sibs = [k.get("name") for k in key_manager.siblings(entry) if k is not entry]
+            extra = f" مع: {', '.join(sibs)}" if sibs else " (أول عضو — أضف شقيقاً بنفس الاسم)"
+            send_telegram_message(token, chat_id, f"🗂 [{entry.get('name')}] الآن في مجموعة [{entry['project_group']}]{extra}.", reply_to_id=msg["message_id"])
+        else:
+            send_telegram_message(token, chat_id, f"🗂 [{entry.get('name')}] أصبح مستقلاً (بلا مجموعة).", reply_to_id=msg["message_id"])
 
     elif cmd == "/backup":
         # نسخة عامة: الأرشيف + الجلسات + الحالة + القاموس/الإعدادات — **بلا keys.json أبداً** (13 S4)

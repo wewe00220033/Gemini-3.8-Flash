@@ -302,6 +302,16 @@ def main():
 
     bot_token, _, chat_id = key_manager.get_telegram_config()
 
+    # 0. مرحلة 2 (04 §2.5): قواطع الموديلات تستمر عبر إعادة التشغيل (state/circuit.json — المنتهي يُهمل)
+    try:
+        model_circuit.attach_store(Config.CIRCUIT_FILE)
+        active = [x for x in model_circuit.snapshot(Config.MODELS) if x["paused"]]
+        if active:
+            print("⚡ قواطع محمّلة من الجلسة السابقة: " + ", ".join(
+                f"{x['model']} ({x['reason']}، يفتح بعد {x['remaining_s']}ث)" for x in active))
+    except Exception as e:
+        print(f"⚠️ تعذر تحميل circuit.json: {e} — نكمل بقواطع في الذاكرة فقط.")
+
     # 1. خادم الويب — الربط بالمنفذ يتم هنا (في الخيط الرئيسي) كي يُكتشف فشل المنفذ فوراً لا بصمت (G27)
     web_t = None
     web_error = None

@@ -36,10 +36,14 @@ def fresh_env(monkeypatch, tmp_path):
     import voice_queue
     monkeypatch.setattr(jobs.Config, "JOBS_FILE", jobs_file)
     monkeypatch.setattr(voice_queue.Config, "JOBS_FILE", jobs_file)
+    # مرحلة 2: ملفا القاطع ومجموعات المفاتيح في المجلد المؤقت أيضاً (لا نلمس state/ الحقيقي)
+    monkeypatch.setattr(config.Config, "CIRCUIT_FILE", str(tmp_path / "state" / "circuit.json"))
+    monkeypatch.setattr(config.Config, "KEY_GROUPS_FILE", str(tmp_path / "state" / "key_groups.json"))
     import key_manager
     importlib.reload(key_manager)
-    # قاطع الموديلات singleton مشترك بين الوحدات — نبدأ كل اختبار بقواطع مفتوحة
+    # قاطع الموديلات singleton مشترك بين الوحدات — نبدأ كل اختبار بقواطع مفتوحة وبلا حفظ على القرص
     import model_state
+    model_state.model_circuit.detach_store()
     model_state.model_circuit.reset()
     model_state.model_circuit._history.clear()
     return key_manager
