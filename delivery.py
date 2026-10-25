@@ -78,7 +78,7 @@ def prepare_for_web(raw_text, model=None, key_name=None, info=None):
 
 
 def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn=None, glossary=None,
-            session_name=None, footer_html=""):
+            session_name=None, footer_html="", archive_entry=True):
     """
     ينفّذ خط الإنتاج كاملاً. يرجع قاموساً: {raw, polished, raw_msg_id, polished_msg_id, mode, archived, polish_error}.
     polish_fn(raw_text, role_id, glossary) -> (text|None, reason) — افتراضياً text_assist.polish (يُحقن في الاختبارات).
@@ -89,9 +89,10 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
     result = {"raw": raw, "polished": None, "raw_msg_id": None, "polished_msg_id": None, "mode": mode,
               "archived": False, "polish_error": None, "role": role_id}
 
-    # 2) أرشفة قبل أي إرسال (outbox)
-    result["archived"] = archive.append(raw, model=model, elapsed=(info or {}).get("elapsed"), key_name=key_name,
-                                        session_name=session_name)
+    # 2) أرشفة قبل أي إرسال (outbox) — archive_entry=False للمكرر (dedup): سبق أرشفته
+    if archive_entry:
+        result["archived"] = archive.append(raw, model=model, elapsed=(info or {}).get("elapsed"), key_name=key_name,
+                                            session_name=session_name)
 
     # 3) الخام
     if mode in ("dual", "raw_only"):
@@ -110,7 +111,8 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
         anchor = result["raw_msg_id"] or reply_to_id
         if polished:
             result["polished"] = polished
-            archive.append_polished(polished)
+            if archive_entry:
+                archive.append_polished(polished)
             result["polished_msg_id"] = _send_long(sender, polished_message_html(polished, role_id, session_name),
                                                    polished, anchor, filename_prefix="polished",
                                                    caption="📝 النسخة المنظمة (طويلة → ملف)")

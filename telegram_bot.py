@@ -391,14 +391,21 @@ def process_job(job):
     chat_id, reply_to = job.chat_id, job.message_id
     cached = jobs.find_recent_result(job.file_unique_id) if job.file_unique_id else None
     if cached:
+        # مراجعة م3: المكرر يمر على خط الإنتاج نفسه (بانر/وضع/قاموس) — بلا تنظيم جديد لو المنظم محفوظ، وبلا أرشفة ثانية
         print(f"♻️ نفس الملف فُرِّغ قبل قليل — إعادة إرسال النتيجة المحفوظة ({job.job_id})")
-        send_transcript(token, chat_id, cached["text"], cached.get("model") or "cache", cached.get("key") or "cache",
-                        reply_to_id=reply_to, info={"elapsed": cached.get("elapsed")})
+        c_model, c_key = cached.get("model") or "cache", cached.get("key") or "cache"
+        c_info = {"elapsed": cached.get("elapsed")}
+        cached_polished = cached.get("polished_text")
+        polish_fn = (lambda raw, role, gl: (cached_polished, None)) if cached_polished else None
+        res = delivery.deliver(cached["text"], c_model, c_key, c_info, make_sender(token, chat_id), reply_to_id=reply_to,
+                               polish_fn=polish_fn, footer_html=_footer(c_model, c_key, c_info) + " · ♻️ مكرر",
+                               archive_entry=False)
         jobs.record(job.job_id, "sent", dedup_of=cached.get("job_id"), text=cached["text"][:2000],
-                    model=cached.get("model"), key=cached.get("key"))
+                    model=cached.get("model"), key=cached.get("key"), mode=res["mode"],
+                    polished=bool(res["polished"]), polished_text=(res["polished"] or "")[:2000] or None)
         if QUEUE:
             QUEUE.stats["deduped"] += 1
-        return {"text": cached["text"], "dedup": True}
+        return {"text": cached["text"], "dedup": True, "polished": res["polished"]}
 
     print(f"🎙️ بدء تفريغ ({job.label}) من {chat_id} [{job.source}:{job.job_id}]...")
     with ProgressKeeper(token, chat_id, reply_to_id=reply_to):
@@ -414,7 +421,8 @@ def process_job(job):
     ok = bool(res["raw_msg_id"] or res["polished_msg_id"])
     if ok:
         jobs.record(job.job_id, "sent", model=model, key=str(key_name), elapsed=info.get("elapsed"), text=text[:2000],
-                    polished=bool(res["polished"]), mode=res["mode"])
+                    polished=bool(res["polished"]), mode=res["mode"],
+                    polished_text=(res["polished"] or "")[:2000] or None)   # للمكرر: لا نداء flash-lite ثانٍ
     else:
         jobs.record(job.job_id, "failed", error="send failed (archived — /last)", model=model)
     if res["polish_error"]:
@@ -887,10 +895,19 @@ def handle_text(token, chat_id, msg, msg_text):
             send_telegram_message(token, chat_id, "🔎 نتائج الأرشيف:\n" + "\n".join(f"• {h['meta']}\n  {h['line']}" for h in hits), reply_to_id=msg["message_id"])
 
     elif cmd == "/polish":
-        src = (msg.get("reply_to_message") or {}).get("text") or " ".join(args)
+        replied = msg.get("reply_to_message") or {}
+        src = replied.get("text") or " ".join(args)
+        doc = replied.get("document") or {}
+        if not src.strip() and doc.get("file_id"):
+            # مراجعة م3: الرد على تفريغ طويل أُرسل كملف .md → نحمّل الملف ونقرأ نصه
+            try:
+                src = _download_file(token, doc["file_id"]).decode("utf-8", errors="replace")
+            except Exception as e:
+                send_telegram_message(token, chat_id, f"⚠️ تعذر قراءة الملف المرفق ({e}).", reply_to_id=msg["message_id"])
+                return
         src = _strip_banner(src)
         if not src.strip():
-            send_telegram_message(token, chat_id, "رُدّ بـ /polish على رسالة تفريغ (أو اكتب النص بعد الأمر).", reply_to_id=msg["message_id"])
+            send_telegram_message(token, chat_id, "رُدّ بـ /polish على رسالة تفريغ أو ملف .md (أو اكتب النص بعد الأمر).", reply_to_id=msg["message_id"])
             return
         import text_assist
         polished, reason = text_assist.polish(src, settings.role(), glossary_mod.get_glossary())
