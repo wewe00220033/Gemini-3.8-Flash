@@ -273,10 +273,15 @@ def _build_payload(b64_data, mime_type, model=None):
 
 
 def dynamic_read_timeout(size_bytes):
-    """مهلة القراءة تتناسب مع حجم الملف: min(MAX, BASE + PER_MB × MB)."""
+    """
+    مهلة القراءة تتناسب مع حجم الملف: min(cap, BASE + PER_MB × MB).
+    سقفان (04 §2.5b، 22 U3): ≤ 8MB → MAX_SMALL=90 (اكتشاف تعليق سريع للفويسات العادية)؛
+    > 8MB → MAX_LARGE=180 (ملف 15MB يحتاج 135ث فعلاً — كان يُقصّ إلى 90 → timeout زائف).
+    """
     mb = max(0.0, float(size_bytes)) / (1024 * 1024)
     t = Config.GEMINI_READ_TIMEOUT_BASE + Config.GEMINI_READ_TIMEOUT_PER_MB * mb
-    return int(min(Config.GEMINI_READ_TIMEOUT_MAX, max(Config.GEMINI_READ_TIMEOUT_BASE, t)))
+    cap = Config.GEMINI_READ_TIMEOUT_MAX_LARGE if mb > Config.GEMINI_LARGE_FILE_MB else Config.GEMINI_READ_TIMEOUT_MAX_SMALL
+    return int(min(cap, max(Config.GEMINI_READ_TIMEOUT_BASE, t)))
 
 
 # ======================================================================

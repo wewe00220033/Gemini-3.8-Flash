@@ -370,7 +370,11 @@ def test_blocked_response_falls_to_next_model_then_clear_message(engine, monkeyp
 
 # ---------- المهلة الديناميكية ----------
 @pytest.mark.parametrize("size_bytes,expected", [
-    (0, 15), (770 * 1024, 21), (5 * 1024 * 1024, 55), (20 * 1024 * 1024, 90), (100 * 1024 * 1024, 90),
+    (0, 15), (770 * 1024, 21), (5 * 1024 * 1024, 55),
+    (8 * 1024 * 1024, 79),                 # على الحد: صغير → 15+64=79 < 90
+    (9 * 1024 * 1024, 87),                 # > 8MB: كبير لكن المعادلة أقل من 180
+    (15 * 1024 * 1024, 135),               # 22 U3: كان يُقصّ إلى 90 → timeout زائف
+    (20 * 1024 * 1024, 175), (100 * 1024 * 1024, 180),   # سقف الكبير 180
 ])
 def test_dynamic_read_timeout(engine, size_bytes, expected):
     assert engine.dynamic_read_timeout(size_bytes) == expected
