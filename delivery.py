@@ -120,13 +120,13 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
     session_name: لو None تُستخدم الجلسة النشطة تلقائياً (المرحلة 4 — كتابة مزدوجة ALL.md + session_<id>.md).
     """
     mode = settings.delivery_mode()
-    role_id = settings.role()
+    role_id = settings.effective_role()
     raw, gl = prepare_texts(raw_text, glossary)
     if session_name is None:
         session_name = _safe_session_name()
     result = {"raw": raw, "polished": None, "raw_msg_id": None, "polished_msg_id": None, "mode": mode,
               "archived": False, "polish_error": None, "role": role_id, "session": session_name, "title": None,
-              "session_written": False, "title_suggestion": None}
+              "session_written": False, "title_suggestion": None, "summary_updated": False}
 
     # 2) أرشفة قبل أي إرسال (outbox) — archive_entry=False للمكرر (dedup): سبق أرشفته
     if archive_entry:
@@ -148,7 +148,8 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
     if mode in ("dual", "raw_only"):
         result["raw_msg_id"] = _send_long(sender, raw_message_html(raw, footer_html, result["title"], session_name),
                                           raw, reply_to_id,
-                                          filename_prefix="transcript", caption="📄 التفريغ الخام (طويل → ملف)")
+                                          filename_prefix="transcript", caption="📄 التفريغ الخام (طويل → ملف)",
+                                          head_html=_entry_head_html(result["title"], session_name))
 
     # 3b) اقتراح اسم الجلسة (08 §2): أول فويس في جلسة باسمها المؤقت → اقتراح معلّق (قبول صامت عند الفويس التالي)
     if archive_entry and session_name:
@@ -165,8 +166,13 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
         if polish_fn is None:
             import text_assist
             polish_fn = text_assist.polish
+        # L2 (10 §2): ملخص الجلسة التراكمي → طبقة B فقط (لا يُمرَّر لطبقة A إطلاقاً)
+        l2 = sessions.summary() if session_name else None
         try:
-            polished, reason = polish_fn(raw, role_id, gl)
+            if l2 and _accepts_context_summary(polish_fn):
+                polished, reason = polish_fn(raw, role_id, gl, context_summary=l2)
+            else:
+                polished, reason = polish_fn(raw, role_id, gl)
         except Exception as e:  # pragma: no cover - دفاع: التنظيم لا يكسر الخام أبداً
             polished, reason = None, f"{type(e).__name__}: {e}"
         anchor = result["raw_msg_id"] or reply_to_id
@@ -178,7 +184,8 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
                     sessions.append_polished(polished)
             result["polished_msg_id"] = _send_long(sender, polished_message_html(polished, role_id, session_name),
                                                    polished, anchor, filename_prefix="polished",
-                                                   caption="📝 النسخة المنظمة (طويلة → ملف)")
+                                                   caption="📝 النسخة المنظمة (طويلة → ملف)",
+                                                   head_html=_entry_head_html(result["title"], session_name))
         else:
             result["polish_error"] = reason
             if mode == "polished_only":
@@ -189,14 +196,33 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
                                  result["raw_msg_id"], "HTML")
             else:
                 sender.send_text(f"⚠️ تعذر التنظيم الآن ({html.escape(str(reason or ''))}) — الخام فوق.", anchor, "HTML")
+
+    # 5) L2 (10 §2): كل SESSION_SUMMARY_EVERY فويسات → تحديث ملخص الجلسة (نداء lite نصي واحد) — للتنظيم القادم فقط
+    if archive_entry and session_name:
+        try:
+            result["summary_updated"] = bool(sessions.maybe_update_summary())
+        except Exception as e:  # pragma: no cover
+            print(f"⚠️ ملخص الجلسة L2: {e}")
     return result
 
 
-def _send_long(sender, html_text, plain_text, reply_to_id, filename_prefix, caption):
-    """نص > POLISH_FILE_THRESHOLD → ملف .md + معاينة؛ وإلا رسالة HTML عادية. يرجع message_id (أو None)."""
+def _accepts_context_summary(fn):
+    """هل تقبل دالة التنظيم وسيط context_summary؟ (polish_fn المحقونة في المسار المكرر/الاختبارات قد لا تقبله)."""
+    try:
+        import inspect
+        params = inspect.signature(fn).parameters
+        return "context_summary" in params or any(p.kind == p.VAR_KEYWORD for p in params.values())
+    except (TypeError, ValueError):
+        return False
+
+
+def _send_long(sender, html_text, plain_text, reply_to_id, filename_prefix, caption, head_html=""):
+    """نص > POLISH_FILE_THRESHOLD → ملف .md + معاينة (تحمل الترويسة 🏷️/📂 إن وُجدت — 08 §3)؛ وإلا رسالة HTML عادية.
+    يرجع message_id (أو None)."""
     if len(plain_text) > Config.POLISH_FILE_THRESHOLD and sender.send_document is not None:
         preview = plain_text[:500] + ("…" if len(plain_text) > 500 else "")
-        mid = sender.send_text(f"<pre>{html.escape(preview)}</pre>\n{caption}", reply_to_id, "HTML")
+        head = (head_html + "\n") if head_html else ""
+        mid = sender.send_text(f"{head}<pre>{html.escape(preview)}</pre>\n{caption}", reply_to_id, "HTML")
         try:
             sender.send_document(f"{filename_prefix}.md", plain_text.encode("utf-8"), "text/markdown", caption, mid or reply_to_id)
         except Exception as e:  # pragma: no cover

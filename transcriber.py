@@ -470,7 +470,14 @@ def transcription_prompt():
         import settings
         import glossary
         hints = glossary.get_glossary().hints_for_prompt()
-        return prompts.compose_prompt("transcribe", settings.role(), hints)
+        try:
+            import sessions
+            th = sessions.terms_hint()
+            if th:
+                hints = (hints + "\n" + th) if hints else th
+        except Exception:
+            pass
+        return prompts.compose_prompt("transcribe", settings.effective_role(), hints)
     except Exception as e:  # pragma: no cover
         print(f"⚠️ مركّب البرومبت: {e} — استخدام SYSTEM_PROMPT الأساسي")
         return Config.SYSTEM_PROMPT

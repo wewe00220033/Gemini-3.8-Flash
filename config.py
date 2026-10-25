@@ -189,6 +189,12 @@ class Config:
     CONTEXT_ECHO_RATIO = 0.60              # 10 §3: ≥60% من الناتج موجود حرفياً في L1 → "صدى السياق" = strike
     CONTEXT_STRIKES_TO_SIMPLE = 2          # بعد ضربتين → المحاولة التالية بسيطة (بلا L1)
     SIMPLE_MODE_COOLDOWN = 3               # 10 §3: بعد الوصول لضربتين تبدأ الفويسات التالية بسيطة لـ 3 فويسات
+    # تكميلي المرحلة 4 (08 §2 / 16 D27): بطاقة الاستئناف تعرض آخر 3 نصوص بلا LLM — RESUME_RECAP=0 لإخفائها
+    RESUME_RECAP = os.environ.get("RESUME_RECAP", "1") not in ("0", "false", "False", "")
+    TITLE_SUGGESTIONS_N = 3                # 08 §2: «🎲 3 اقتراحات» عند الطلب فقط (3 نداءات flash-lite نصية)
+    # 10 §2 L2: ملخص الجلسة التراكمي يُحدَّث كل N فويسات عبر flash-lite ويدخل طبقة B (التنظيم) فقط — أبداً في طبقة A
+    SESSION_SUMMARY_EVERY = 5
+    SESSION_SUMMARY_MAX_CHARS = 600
 
     # لو كل الموديلات وقعت في نفس اللحظة: جولات إضافية محدودة مع انتظار ذكي (min(أقرب فتح, الميزانية))
     TRANSIENT_RETRY_ROUNDS = 2           # إجمالي 3 جولات كحد أقصى

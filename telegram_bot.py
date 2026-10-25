@@ -384,7 +384,7 @@ def process_job(job):
         # مرحلة 3: الويب يمر بالقاموس (هدف الخام) ويُؤرشف في ALL.md مثل تليجرام — بلا تنظيم (توفير حصة flash-lite)
         text, archived = delivery.prepare_for_web(text, model=model, key_name=key_name, info=info)
         jobs.record(job.job_id, "sent", model=model, key=str(key_name), elapsed=info.get("elapsed"),
-                    text=text[:2000], archived=archived)
+                    text=text[:2000], archived=archived, **_session_fields())
         STATE["processed"] += 1
         return {"text": text, "model": model, "key_name": key_name, "info": info, "archived": archived}
 
@@ -403,7 +403,8 @@ def process_job(job):
                                archive_entry=False)
         jobs.record(job.job_id, "sent", dedup_of=cached.get("job_id"), text=cached["text"][:2000],
                     model=cached.get("model"), key=cached.get("key"), mode=res["mode"],
-                    polished=bool(res["polished"]), polished_text=(res["polished"] or "")[:2000] or None)
+                    polished=bool(res["polished"]), polished_text=(res["polished"] or "")[:2000] or None,
+                    **_session_fields())
         if QUEUE:
             QUEUE.stats["deduped"] += 1
         return {"text": cached["text"], "dedup": True, "polished": res["polished"]}
@@ -426,13 +427,14 @@ def process_job(job):
     if res.get("title_suggestion"):
         send_telegram_message(token, chat_id,
                               f"📛 اسم مقترح للجلسة: «{res['title_suggestion']}»\n"
-                              f"✅ يُعتمد تلقائياً مع الفويس القادم · ✏️ /rename_session <اسم> لتغييره · ❌ /reject_title لرفضه",
+                              f"✅ يُعتمد تلقائياً مع الفويس القادم · ✏️ /rename_session <اسم> لتغييره · 🎲 /suggest_titles لبدائل · ❌ /reject_title لرفضه",
                               reply_to_id=res.get("raw_msg_id") or reply_to)
     ok = bool(res["raw_msg_id"] or res["polished_msg_id"])
     if ok:
         jobs.record(job.job_id, "sent", model=model, key=str(key_name), elapsed=info.get("elapsed"), text=text[:2000],
                     polished=bool(res["polished"]), mode=res["mode"],
-                    polished_text=(res["polished"] or "")[:2000] or None)   # للمكرر: لا نداء flash-lite ثانٍ
+                    polished_text=(res["polished"] or "")[:2000] or None,   # للمكرر: لا نداء flash-lite ثانٍ
+                    **_session_fields())
     else:
         jobs.record(job.job_id, "failed", error="send failed (archived — /last)", model=model)
     if res["polish_error"]:
@@ -629,7 +631,7 @@ def _help_text():
         "/last — إعادة إرسال آخر تفريغ من الأرشيف · /find <كلمة> — بحث في الأرشيف · /polish (رد على تفريغ) — تنظيم عند الطلب\n"
         "/header [both|raw|polished|off] — بانر «تفريغ آلي» فوق النص\n"
         "/new_session [اسم] · /end · /sessions · /resume <id> · /rename_session <اسم> · /export [id] · /merge_sessions <id1> <id2> — الجلسات (كل فويس يُكتب في الجلسة وفي ALL.md)\n"
-        "/context [on|off] — سياق الفويسات السابقة داخل الجلسة (يسقط تلقائياً بعد ضربتين) · /stats — إحصاء\n"
+        "/context [on|off] — سياق الفويسات السابقة داخل الجلسة (يسقط تلقائياً بعد ضربتين) · /session_role <id|-> — دور خاص بالجلسة · /suggest_titles → /pick_title <n> — 🎲 3 اقتراحات لاسم الجلسة · /stats — إحصاء\n"
         "/project_group <مفتاح> <مجموعة> — مفاتيح نفس مشروع Google تتشارك الحصة (والقفز عند 503 لمشروع آخر). اكتب - للإزالة\n"
         "/backup — نسخة احتياطية (أرشيف+جلسات+إعدادات) بلا أسرار\n"
         "/backup_secrets — نسخة keys.json بتأكيد صريح\n"
@@ -676,6 +678,17 @@ def _context_footer(info):
     return ""
 
 
+def _session_fields():
+    """حقول الجلسة لسجل المهام (08 §1 / 03 §3): كل فويس يُربط بالجلسة النشطة لدعم /trace في المرحلة 5."""
+    try:
+        cur = sessions.current()
+    except Exception:
+        cur = None
+    if not cur:
+        return {"session_id": None, "session_name": None}
+    return {"session_id": cur.get("id"), "session_name": cur.get("name")}
+
+
 def _sessions_text():
     """سطر الجلسات في /status (المرحلة 4): الجلسة النشطة + وضع السياق (10 §7.5)."""
     cur = sessions.current()
@@ -683,7 +696,8 @@ def _sessions_text():
         return "📂 الجلسات: لا جلسة نشطة (الفويسات في ALL.md فقط) — /new_session لبدء واحدة"
     extra = f" · ضربات {cur.get('strikes')}" if cur.get("strikes") else ""
     pend = f" · اقتراح معلّق «{cur['pending_title']}»" if cur.get("pending_title") else ""
-    return f"📂 الجلسة النشطة: «{cur['name']}» [{cur['id']}] — {cur.get('count', 0)} فويس · السياق: {sessions.context_mode()}{extra}{pend}"
+    ro = f" · دور الجلسة {cur['role_override']}" if cur.get("role_override") else ""
+    return f"📂 الجلسة النشطة: «{cur['name']}» [{cur['id']}] — {cur.get('count', 0)} فويس · السياق: {sessions.context_mode()}{extra}{pend}{ro}"
 
 
 def _pipeline_text():
@@ -834,7 +848,7 @@ def handle_text(token, chat_id, msg, msg_text):
         if not s_:
             send_telegram_message(token, chat_id, "جلسة غير موجودة (أو مؤرشفة بعد دمج). /sessions للقائمة.", reply_to_id=msg["message_id"])
             return
-        recap = sessions.last_entries(3)
+        recap = sessions.last_entries(3) if Config.RESUME_RECAP else []
         body = f"▶️ {sessions.summary_card()}"
         if recap:
             body += "\n📝 آخر النصوص:\n" + "\n".join(f"• {html.escape(e['raw'][:160])}{'…' if len(e['raw']) > 160 else ''}" for e in recap)
@@ -879,6 +893,56 @@ def handle_text(token, chat_id, msg, msg_text):
         m_ = sessions.merge(args[0], args[1], name=" ".join(args[2:]) or None)
         send_telegram_message(token, chat_id, f"🔗 دُمجتا في «{m_['name']}» [{m_['id']}] — {m_['count']} فويس." if m_ else "تعذر الدمج (تحقق من المعرّفين).",
                               reply_to_id=msg["message_id"])
+
+    elif cmd == "/suggest_titles":
+        if not sessions.current():
+            send_telegram_message(token, chat_id, "لا جلسة نشطة — /new_session أولاً.", reply_to_id=msg["message_id"])
+            return
+        if not Config.SMART_TITLE_ENABLED:
+            send_telegram_message(token, chat_id, "التسمية الذكية معطّلة (SMART_TITLE_ENABLED=0).", reply_to_id=msg["message_id"])
+            return
+        opts = sessions.suggest_titles(" ".join(args) if args else None)
+        if not opts:
+            send_telegram_message(token, chat_id, "لم أحصل على اقتراحات الآن (الجلسة بلا فويسات بعد، أو المساعد النصي غير متاح). /rename_session <اسم> يدوياً.",
+                                  reply_to_id=msg["message_id"])
+            return
+        sessions.remember_title_options(opts)
+        lines = "\n".join(f"{i + 1}. «{t}»" for i, t in enumerate(opts))
+        send_telegram_message(token, chat_id, f"🎲 اقتراحات لاسم الجلسة «{sessions.current_name()}»:\n{lines}\n"
+                                              f"اختر بـ /pick_title <رقم> · أو /rename_session <اسم> · أو تجاهل.", reply_to_id=msg["message_id"])
+
+    elif cmd == "/pick_title":
+        if not args:
+            opts = sessions.title_options()
+            txt = ("\n".join(f"{i + 1}. «{t}»" for i, t in enumerate(opts)) + "\nالاستخدام: /pick_title <رقم>") if opts else "لا اقتراحات محفوظة — /suggest_titles أولاً."
+            send_telegram_message(token, chat_id, txt, reply_to_id=msg["message_id"])
+            return
+        name = sessions.pick_title(args[0])
+        send_telegram_message(token, chat_id, f"✏️ اسم الجلسة الآن: «{name}»" if name else "رقم غير صالح أو لا اقتراحات محفوظة — /suggest_titles.",
+                              reply_to_id=msg["message_id"])
+
+    elif cmd == "/session_role":
+        cur_ = sessions.current()
+        if not cur_:
+            send_telegram_message(token, chat_id, "لا جلسة نشطة — /new_session أولاً.", reply_to_id=msg["message_id"])
+            return
+        if not args:
+            ov = sessions.role_override()
+            send_telegram_message(token, chat_id, f"🎭 دور الجلسة «{cur_['name']}»: {ov or 'الافتراضي (' + settings.role() + ')'}\n"
+                                                  "/session_role <id> لتجاوز الدور لهذه الجلسة فقط · /session_role - للعودة للدور العام · /roles للقائمة",
+                                  reply_to_id=msg["message_id"])
+            return
+        rid = args[0].lower()
+        if rid in ("-", "off", "reset", "الافتراضي"):
+            sessions.set_role_override(None)
+            send_telegram_message(token, chat_id, f"🎭 عادت الجلسة إلى الدور العام ({settings.role()}).", reply_to_id=msg["message_id"])
+            return
+        r_ = prompts.get_role(rid)
+        if not r_:
+            send_telegram_message(token, chat_id, f"دور غير معروف: {rid} — /roles للقائمة", reply_to_id=msg["message_id"])
+            return
+        sessions.set_role_override(rid)
+        send_telegram_message(token, chat_id, f"🎭 دور هذه الجلسة الآن: {rid} ({r_.get('name', '?')}) — يُطبَّق على التفريغ والتنظيم في الجلسة فقط.", reply_to_id=msg["message_id"])
 
     elif cmd == "/context":
         if not args:
@@ -1024,9 +1088,9 @@ def handle_text(token, chat_id, msg, msg_text):
             send_telegram_message(token, chat_id, "رُدّ بـ /polish على رسالة تفريغ أو ملف .md (أو اكتب النص بعد الأمر).", reply_to_id=msg["message_id"])
             return
         import text_assist
-        polished, reason = text_assist.polish(src, settings.role(), glossary_mod.get_glossary())
+        polished, reason = text_assist.polish(src, settings.effective_role(), glossary_mod.get_glossary())
         if polished:
-            send_telegram_message(token, chat_id, delivery.polished_message_html(polished, settings.role()), reply_to_id=msg["message_id"], parse_mode="HTML")
+            send_telegram_message(token, chat_id, delivery.polished_message_html(polished, settings.effective_role()), reply_to_id=msg["message_id"], parse_mode="HTML")
         else:
             send_telegram_message(token, chat_id, f"⚠️ تعذر التنظيم الآن ({reason}).", reply_to_id=msg["message_id"])
 

@@ -146,6 +146,7 @@ def _rebuild_from_files():
                     "status": status, "started": meta.get("started") or "",
                     "ended": tail.get("ended"), "count": count, "last_ts": tail.get("last_ts") or meta.get("started") or "",
                     "role_override": None, "pending_title": None, "strikes": 0, "simple_left": 0,
+                    "summary": tail.get("summary"), "summary_at": tail.get("summary_at", 0),
                     "context_off": False})
     return out
 
@@ -188,6 +189,9 @@ def _scan_file(path):
                     tail["name"] = ln.split("«", 1)[1].rsplit("»", 1)[0]
                 elif ln.startswith("📦 دُمجت في"):
                     tail["merged"] = True
+                elif ln.startswith("🧾 ملخص: "):
+                    tail["summary"] = ln[len("🧾 ملخص: "):].strip()
+                    tail["summary_at"] = count
     except OSError:
         pass
     return count, tail
@@ -517,7 +521,7 @@ def _parse_block(block):
             cur = pol
         elif ln.startswith(_TITLE_MARK):
             cur = title
-        elif ln.startswith(("⏹️ ", "▶️ ", "✏️ ", "📛 ", "📦 ")):
+        elif ln.startswith(("⏹️ ", "▶️ ", "✏️ ", "📛 ", "📦 ", "🎭 ", "🧾 ")):
             cur = None
         elif cur is not None:
             cur.append(ln)
@@ -631,6 +635,81 @@ def propose_title(raw_text, session_id=None, generate_fn=None):
     return title
 
 
+def suggest_titles(raw_text=None, n=None, session_id=None, generate_fn=None):
+    """
+    «🎲 3 اقتراحات» (08 §2) — عند الطلب فقط: n نداءات flash-lite نصية، كل اقتراح 2–4 كلمات، مُنقّى ومُزال التكرار.
+    raw_text=None → آخر نص خام في الجلسة. يرجع قائمة (قد تكون أقصر من n أو فارغة). لا يغيّر الفهرس.
+    """
+    n = n or Config.TITLE_SUGGESTIONS_N
+    with _lock:
+        sid = session_id or current_id()
+        s = _find(sid) if sid else None
+        if s is None:
+            return []
+        if raw_text is None:
+            ents = _entries_of(s["id"])
+            raw_text = ents[-1]["raw"] if ents else ""
+    words = (raw_text or "").split()[:Config.SMART_TITLE_WORDS]
+    if len(words) < 3:
+        return []
+    if generate_fn is None:
+        import text_assist
+        generate_fn = text_assist.generate
+    out, seen = [], {sanitize_name(s.get("name") or "").lower()}
+    for i in range(n):
+        system = ("اقترح عنواناً قصيراً (2 إلى 4 كلمات، بلا علامات ترقيم ولا أقواس ولا شرح) يلخّص موضوع هذا النص المفرغ "
+                  f"من فويس عربي. هذا الاقتراح رقم {i + 1}؛ اجعله مختلفاً في الصياغة عن: {', '.join(out) or 'لا شيء'}. أخرج العنوان فقط.")
+        try:
+            text, _reason = generate_fn(system, " ".join(words))
+        except Exception:
+            text = None
+        t = sanitize_name((text or "").strip().split("\n")[0].strip("«»\"'.:- "))
+        if not t or len(t.split()) > 6 or t.lower() in seen:
+            continue
+        seen.add(t.lower())
+        out.append(t)
+    return out
+
+
+def remember_title_options(options, session_id=None):
+    """يحفظ آخر اقتراحات «🎲» في الفهرس ليعمل /pick_title بعد إعادة التشغيل."""
+    with _lock:
+        sid = session_id or current_id()
+        s = _find(sid) if sid else None
+        if s is None:
+            return False
+        s["title_options"] = list(options or [])[:10]
+        _write_index()
+        return True
+
+
+def title_options(session_id=None):
+    s = get(session_id) if session_id else current()
+    return list((s or {}).get("title_options") or [])
+
+
+def pick_title(index_1based, session_id=None):
+    """يعتمد الاقتراح رقم n من آخر «🎲» (إعادة تسمية + مسح المعلّق والخيارات). يرجع الاسم أو None."""
+    opts = title_options(session_id)
+    try:
+        i = int(index_1based) - 1
+    except (TypeError, ValueError):
+        return None
+    if i < 0 or i >= len(opts):
+        return None
+    with _lock:
+        sid = session_id or current_id()
+    new_name = rename(opts[i], sid)
+    if not new_name:
+        return None
+    with _lock:
+        s2 = _find(sid)
+        if s2 is not None:
+            s2["title_options"] = []
+            _write_index()
+    return new_name
+
+
 def accept_pending_title(session_id=None):
     """قبول صامت (08 §2 قرار المالك أ): يعتمد الاقتراح المعلّق اسماً للجلسة. يرجع الاسم أو None."""
     with _lock:
@@ -680,6 +759,112 @@ def voice_title(raw_text, generate_fn=None):
     if not t or len(t.split()) > 8:
         return None
     return t
+
+
+# ======================================================================
+# دور الجلسة (06 §2 / 08 §1): session.role_override
+# ======================================================================
+def set_role_override(role_id, session_id=None):
+    """تعيين/إلغاء تجاوز الدور لجلسة (None أو "" = الدور الافتراضي). يُعاد False إن لم توجد جلسة."""
+    with _lock:
+        sid = session_id or current_id()
+        s = _find(sid) if sid else None
+        if s is None:
+            return False
+        s["role_override"] = (role_id or "").strip().lower() or None
+        _write_index()
+        try:
+            _append_file(session_file(s["id"]), f"🎭 دور الجلسة: {s['role_override'] or 'الافتراضي'}\n\n")
+        except OSError:
+            pass
+        return True
+
+
+def role_override(session_id=None):
+    """الدور المتجاوز للجلسة (الحالية افتراضياً) أو None."""
+    s = get(session_id) if session_id else current()
+    return (s or {}).get("role_override") or None
+
+
+def terms_hint(session_id=None):
+    """L0 (10 §2): سطر تلميح إملائي من مصطلحات الجلسة لطبقة A. فارغ إن لا جلسة/لا مصطلحات."""
+    terms = session_terms(session_id)
+    if not terms:
+        return ""
+    return "أسماء ظهرت في هذه الجلسة، اكتبها كما هي: " + ", ".join(terms)
+
+
+# ======================================================================
+# L2 (10 §2): ملخص الجلسة التراكمي — كل SESSION_SUMMARY_EVERY فويسات عبر flash-lite (نصياً)
+# يدخل طبقة B (التنظيم) فقط. لا يُحقن أبداً في طبقة A (التفريغ).
+# ======================================================================
+def summary(session_id=None):
+    """آخر ملخص تراكمي محفوظ للجلسة (أو None)."""
+    s = get(session_id) if session_id else current()
+    return (s or {}).get("summary") or None
+
+
+def summary_due(session_id=None):
+    """هل حان تحديث الملخص؟ (count وصل مضاعف SESSION_SUMMARY_EVERY ولم يُلخَّص عنده بعد)."""
+    every = int(Config.SESSION_SUMMARY_EVERY or 0)
+    if every <= 0:
+        return False
+    s = get(session_id) if session_id else current()
+    if not s:
+        return False
+    count = int(s.get("count") or 0)
+    return count > 0 and count % every == 0 and int(s.get("summary_at") or 0) < count
+
+
+def maybe_update_summary(session_id=None, generate_fn=None):
+    """
+    يحدّث الملخص إن حان وقته: يُغذّي flash-lite بالملخص السابق + آخر N نصوص خام (مقتطعة) ويطلب ملخصاً ≤ SESSION_SUMMARY_MAX_CHARS.
+    يُخزَّن في الفهرس ويُلحق بملف الجلسة كسطر «🧾 ملخص:» (append-only → يُستعاد عند إعادة البناء).
+    يرجع الملخص الجديد أو None (لا شيء حان/فشل). أي فشل صامت — لا يؤثر على الفويس.
+    """
+    with _lock:
+        sid = session_id or current_id()
+        s = _find(sid) if sid else None
+        if s is None:
+            return None
+        sid = s["id"]
+    if not summary_due(sid):
+        return None
+    every = int(Config.SESSION_SUMMARY_EVERY)
+    with _lock:
+        s = _find(sid)
+        prev = (s or {}).get("summary") or ""
+        count = int((s or {}).get("count") or 0)
+        ents = _entries_of(sid)[-every:]
+    if not ents:
+        return None
+    if generate_fn is None:
+        import text_assist
+        generate_fn = text_assist.generate
+    chunk = "\n---\n".join((e["raw"] or "")[:1200] for e in ents)
+    system = (f"أنت تلخّص جلسة تفريغ صوتي عربية تراكمياً. اكتب ملخصاً موجزاً (حتى {Config.SESSION_SUMMARY_MAX_CHARS} حرف) "
+              "يذكر الموضوع، الأسماء والمصطلحات التقنية كما وردت، والقرارات/النقاط المفتوحة. بلا مقدمات ولا عناوين. أخرج الملخص فقط.")
+    user = (f"الملخص السابق:\n{prev}\n\nالنصوص الجديدة:\n{chunk}" if prev else chunk)
+    try:
+        text, _reason = generate_fn(system, user)
+    except Exception:
+        text = None
+    text = " ".join((text or "").split())
+    if not text:
+        return None
+    text = text[:Config.SESSION_SUMMARY_MAX_CHARS]
+    with _lock:
+        s = _find(sid)
+        if s is None:
+            return None
+        s["summary"] = text
+        s["summary_at"] = count
+        _write_index()
+        try:
+            _append_file(session_file(sid), f"🧾 ملخص: {text}\n\n")
+        except OSError:  # pragma: no cover
+            pass
+    return text
 
 
 # ======================================================================
@@ -827,7 +1012,10 @@ def stats_text():
     lines = [f"📊 الجلسات: {len(items)} (نشطة: {len(active)}) · فويسات داخل جلسات: {total_voices}"]
     if cur:
         lines.append(f"🟢 النشطة: «{cur['name']}» — {cur.get('count', 0)} فويس · السياق: {context_mode()}"
-                     + (f" · ضربات: {cur.get('strikes', 0)}" if cur.get("strikes") else ""))
+                     + (f" · ضربات: {cur.get('strikes', 0)}" if cur.get("strikes") else "")
+                     + (f" · 🧾 ملخص L2 عند الفويس {cur.get('summary_at')}" if cur.get("summary") else ""))
+        if cur.get("summary"):
+            lines.append(f"🧾 {cur['summary'][:300]}{'…' if len(cur['summary']) > 300 else ''}")
     else:
         lines.append("لا جلسة نشطة (الفويسات تُؤرشف في ALL.md فقط).")
     return "\n".join(lines)

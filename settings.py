@@ -93,6 +93,18 @@ def role():
     return get("role", Config.DEFAULT_ROLE)
 
 
+def effective_role():
+    """الدور الفعّال: تجاوز الجلسة الحالية (06 §2) إن وُجد، وإلا الدور العام."""
+    try:
+        import sessions
+        ov = sessions.role_override()
+        if ov:
+            return ov
+    except Exception:
+        pass
+    return role()
+
+
 def set_role(role_id):
     return set_value("role", role_id)
 
