@@ -20,6 +20,7 @@ from transcriber import transcribe_audio_bytes_ex
 from model_state import model_circuit
 import heartbeat
 import backup
+import preflight
 
 if sys.platform == "win32":
     try:
@@ -263,6 +264,7 @@ def _help_text():
         "/rename <قديم> <جديد> — إعادة تسمية مفتاح\n"
         "/backup — نسخة احتياطية (أرشيف+جلسات+إعدادات) بلا أسرار\n"
         "/backup_secrets — نسخة keys.json بتأكيد صريح\n"
+        "/version — رقم النسخة والبناء ومدة التشغيل\n"
         "/reset — فتح قواطع الموديلات المقفولة مؤقتاً (لو عايز تجرّب حالاً)\n"
         "/help — هذه الرسالة\n\n"
         f"🛡️ الموديلات: {key_manager.models_chain_text()}"
@@ -405,6 +407,9 @@ def handle_text(token, chat_id, msg, msg_text):
             _send_document(token, chat_id, name, zip_bytes, "application/zip", caption, msg["message_id"])
         except Exception as e:
             send_telegram_message(token, chat_id, f"⚠️ تعذر إنشاء نسخة الأسرار: {e}", reply_to_id=msg["message_id"])
+
+    elif cmd == "/version":
+        send_telegram_message(token, chat_id, preflight.version_line(), reply_to_id=msg["message_id"])
 
     elif cmd in ("/start", "/help", "مساعدة"):
         send_telegram_message(token, chat_id, _help_text(), reply_to_id=msg["message_id"])

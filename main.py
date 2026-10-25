@@ -16,6 +16,8 @@ from config import Config
 from key_manager import key_manager
 import web_service
 import telegram_bot
+import preflight
+from model_state import model_circuit
 
 
 class _PrintToLog:
@@ -60,28 +62,24 @@ def _bot_thread():
     return t
 
 
-def _startup_ping(bot_token, chat_id):
-    """إشعار إقلاع مختصر على تليجرام."""
-    if not (Config.NOTIFY_ON_START and bot_token and chat_id):
-        return
+def _startup_ping(bot_token, chat_id, web_error=None):
+    """
+    تقرير الإقلاع بسطر واحد (22 Z6): يُطبع دائماً في اللوج، ويُرسل على تليجرام إن NOTIFY_ON_START.
+    يحل محل قراءة كونسول الاستضافة: المالك يرى فوراً keys/tg/web/DATA_DIR/circuit + النسخة.
+    """
     try:
-        now = time.time()
-        keys = key_manager.data.get("keys", [])
-        available = sum(
-            1 for k in keys if any(key_manager.is_model_available(k, m, now) for m in Config.MODELS)
+        ok, line, _details = preflight.run_preflight(
+            key_manager, model_circuit=model_circuit, web_port=Config.WEB_PORT, web_error=web_error,
         )
-        remaining = sum(
-            v for k in keys for m, v in key_manager.remaining_today(k).items()
-            if key_manager.is_model_available(k, m, now)
-        )
-        msg = (
-            "🚀 المنظومة اشتغلت الآن.\n"
-            f"🔑 مفاتيح: {len(keys)} (متاح: {available})\n"
-            f"⚡ رصيد متاح اليوم: {remaining} ريكورد\n"
-            f"🌐 الويب على المنفذ {Config.WEB_PORT}\n"
-            f"🕛 تصفير الكوتا: {key_manager.next_reset_display()} ({Config.DISPLAY_TZ})"
-        )
-        telegram_bot.send_telegram_message(bot_token, chat_id, msg)
+        print(f"🚀 preflight: {line}")
+        if Config.NOTIFY_ON_START and bot_token and chat_id:
+            extra = ""
+            if not ok and web_error:
+                extra = f"\n⚠️ الويب لم يشتغل: {web_error} — البوت شغال طبيعي؛ /health غير متاح حتى يُصلح المنفذ."
+            telegram_bot.send_telegram_message(
+                bot_token, chat_id,
+                f"🚀 المنظومة اشتغلت.\n{line}{extra}\n🕛 تصفير الكوتا: {key_manager.next_reset_display()} ({Config.DISPLAY_TZ})",
+            )
     except Exception as e:
         print(f"⚠️ تعذر إرسال إشعار الإقلاع: {e}")
 
@@ -116,16 +114,7 @@ def main():
     if bot_token:
         bot_t = _bot_thread()
         time.sleep(1.5)
-        _startup_ping(bot_token, chat_id)
-        if web_error and chat_id:
-            # G27: إشعار مرة واحدة فقط — المالك كان يظن أن الويب يعمل لأن اللوج وحده يعرف
-            try:
-                telegram_bot.send_telegram_message(
-                    bot_token, chat_id,
-                    f"⚠️ الويب لم يشتغل على المنفذ {Config.WEB_PORT}: {web_error}\nالبوت شغال طبيعي. /health غير متاح حتى يُصلح المنفذ."
-                )
-            except Exception as e:
-                print(f"⚠️ تعذر إرسال إشعار فشل الويب: {e}")
+        _startup_ping(bot_token, chat_id, web_error=web_error)
     else:
         print("ℹ️ لم يتم العثور على توكن تليجرام، المنظومة تعمل في وضع الويب فقط.")
 
