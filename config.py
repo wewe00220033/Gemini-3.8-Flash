@@ -149,6 +149,28 @@ class Config:
     # أوضاع التدهور حسب المتبقي اليومي (04 §3.2): normal > 30% ≥ saver > 0 = freeze
     QUOTA_SAVER_RATIO = 0.30
 
+    # ==============================================================
+    # المرحلة 3 — خط الإنتاج: الأرشفة + القاموس + الأدوار + الرسالتان (مواصفات 05/06/07/08)
+    # ==============================================================
+    TRANSCRIPTS_DIR = os.path.join(DATA_DIR, "transcripts")          # ALL.md (append-only)
+    GLOSSARY_FILE = os.path.join(DATA_DIR, "glossary.json")           # القاموس المخصص (بلا أسرار → يدخل /backup)
+    ROLES_FILE = os.path.join(DATA_DIR, "roles.json")                 # الأدوار المخصصة (الافتراضية في الكود محمية)
+    SETTINGS_FILE = os.path.join(DATA_DIR, "settings.json")           # delivery_mode / role / header_target
+    # البانر (06 §4): يُنسخ مع النص ليفهم الوكيل أنه تفريغ آلي
+    TRANSCRIPT_HEADER_ENABLED = os.environ.get("TRANSCRIPT_HEADER_ENABLED", "1") not in ("0", "false", "False", "")
+    TRANSCRIPT_HEADER_TARGET = os.environ.get("TRANSCRIPT_HEADER_TARGET", "both")   # both | raw_only | polished_only
+    TRANSCRIBE_LAYER_A_MAX_CHARS = 600     # 06 §8: طبقة A (التفريغ) قصيرة وثابتة دائماً — اختبار يحرسها
+    # الرسالتان (07 §1): dual (افتراضي) | raw_only | polished_only — محفوظ في settings.json
+    DELIVERY_MODE_DEFAULT = os.environ.get("DELIVERY_MODE", "dual")
+    DEFAULT_ROLE = os.environ.get("DEFAULT_ROLE", "general")
+    # المساعد النصي (02 §1 عمود 3): Lite مسموح **نصياً فقط** (تنظيم/تسمية/أدوار) — ممنوع للتفريغ (اختبار يمنع التقاطع)
+    TEXT_ASSIST_MODEL = os.environ.get("TEXT_ASSIST_MODEL", "gemini-3.5-flash-lite")
+    TEXT_ASSIST_THINKING_BUDGET = int(os.environ.get("TEXT_ASSIST_THINKING_BUDGET", "2048"))   # أقصى تفكير (قرار المالك)
+    TEXT_ASSIST_TIMEOUT = int(os.environ.get("TEXT_ASSIST_TIMEOUT", "40"))
+    TEXT_ASSIST_DAILY_QUOTA = 500
+    POLISH_FILE_THRESHOLD = 12000          # 07 §4: نص > ~3 رسائل → يُرسل كملف .md + معاينة
+    PANEL_PAGE_SIZE = 5
+
     # لو كل الموديلات وقعت في نفس اللحظة: جولات إضافية محدودة مع انتظار ذكي (min(أقرب فتح, الميزانية))
     TRANSIENT_RETRY_ROUNDS = 2           # إجمالي 3 جولات كحد أقصى
     TRANSIENT_RETRY_BACKOFF = (2, 4)     # حد أدنى للانتظار بين الجولات
