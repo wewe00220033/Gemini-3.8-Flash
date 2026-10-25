@@ -46,7 +46,8 @@ def _env_tuple(name, default):
 
 class Supervisor:
     def __init__(self, data_dir=None, script=None, backoff=None, max_per_hour=None, beat_max=None,
-                 shutdown_grace=None, python=None, sleep=time.sleep, clock=time.monotonic, log=print):
+                 shutdown_grace=None, python=None, sleep=time.sleep, clock=time.monotonic, log=print,
+                 beat_interval=None):
         script_dir = os.path.dirname(os.path.abspath(__file__))
         self.data_dir = data_dir or (os.environ.get("DATA_DIR", "").strip() or script_dir)
         self.state_dir = os.path.join(self.data_dir, "state")
@@ -56,7 +57,9 @@ class Supervisor:
         self.python = python or sys.executable
         self.backoff = backoff or _env_tuple("SUPERVISOR_BACKOFF", (5, 10, 20, 60))
         self.max_per_hour = max_per_hour or _env_int("SUPERVISOR_MAX_PER_HOUR", 20)
-        self.beat_max = beat_max or _env_int("SUPERVISOR_BEAT_MAX", 60)
+        # لا يقل عن 3 × فاصل النبض (5ث) — قيمة أقل تعني "تجمد" كاذب كل دورة (كشفه اختبار دخان حي)
+        self.beat_interval = beat_interval or _env_int("WORKER_BEAT_INTERVAL", 5)
+        self.beat_max = max(3 * self.beat_interval, beat_max or _env_int("SUPERVISOR_BEAT_MAX", 60))
         self.shutdown_grace = shutdown_grace or _env_int("SHUTDOWN_GRACE", 20)
         self._sleep, self._clock, self._log = sleep, clock, log
         self.generation = 0

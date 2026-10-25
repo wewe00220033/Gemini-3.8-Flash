@@ -95,10 +95,10 @@ def test_crash_uses_backoff_ladder_and_resets_on_clean_run(env):
 
 def test_frozen_worker_is_killed_and_restarted(env):
     make, data, sleeps = env
-    s = make("freeze,0", beat_max=1)
+    s = make("freeze,0", beat_max=1, beat_interval=0.3)   # الحد الأدنى 3×0.3 → beat_max=1
     t0 = time.monotonic()
     assert s.run() == 0
-    assert time.monotonic() - t0 < 15
+    assert time.monotonic() - t0 < 10 and s.beat_max == 1
     assert s.generation == 2
     r = json.load(open(s.reason_file, encoding="utf-8"))
     assert r["reason"] == "frozen" and s.history[-1][2] == "frozen"
@@ -144,6 +144,11 @@ def test_read_and_clear_restart_reason_and_touch_beat(tmp_path):
     assert sv.read_and_clear_restart_reason(str(p)) is None
     b = tmp_path / "deep" / "worker.beat"
     assert sv.touch_beat(str(b)) is True and b.exists()
+
+
+def test_beat_max_clamped_above_beat_interval(env):
+    make, _, _ = env
+    assert make("0", beat_max=3).beat_max == 15 and make("0", beat_max=60).beat_max == 60   # فاصل 5ث → حد أدنى 15
 
 
 def test_supervisor_module_has_no_project_imports():
