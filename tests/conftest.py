@@ -80,7 +80,7 @@ def _no_network_polish(monkeypatch):
     الافتراضي: تنظيم وهمي حتمي. اختبارات المرحلة 3 تستبدله صراحةً عند الحاجة (فشل/نجاح)."""
     import text_assist
 
-    def _stub_polish(raw_text, role_id=None, glossary=None):
+    def _stub_polish(raw_text, role_id=None, glossary=None, context_summary=None):
         return ("[منظم-اختبار] " + raw_text, None)
 
     def _no_post(*a, **k):

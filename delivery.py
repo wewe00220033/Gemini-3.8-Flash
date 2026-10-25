@@ -169,7 +169,7 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
         # L2 (10 §2): ملخص الجلسة التراكمي → طبقة B فقط (لا يُمرَّر لطبقة A إطلاقاً)
         l2 = sessions.summary() if session_name else None
         try:
-            if l2 and polish_fn is text_assist_polish():
+            if l2 and _accepts_context_summary(polish_fn):
                 polished, reason = polish_fn(raw, role_id, gl, context_summary=l2)
             else:
                 polished, reason = polish_fn(raw, role_id, gl)
@@ -206,10 +206,14 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
     return result
 
 
-def text_assist_polish():
-    """مرجع دالة التنظيم الحقيقية (لتمييزها عن polish_fn المحقونة التي قد لا تقبل context_summary)."""
-    import text_assist
-    return text_assist.polish
+def _accepts_context_summary(fn):
+    """هل تقبل دالة التنظيم وسيط context_summary؟ (polish_fn المحقونة في المسار المكرر/الاختبارات قد لا تقبله)."""
+    try:
+        import inspect
+        params = inspect.signature(fn).parameters
+        return "context_summary" in params or any(p.kind == p.VAR_KEYWORD for p in params.values())
+    except (TypeError, ValueError):
+        return False
 
 
 def _send_long(sender, html_text, plain_text, reply_to_id, filename_prefix, caption, head_html=""):
