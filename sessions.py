@@ -77,7 +77,8 @@ def sanitize_name(name):
 
 
 def default_name(when=None):
-    return "جلسة " + (when or datetime.now()).strftime("%Y-%m-%d %H:%M")
+    # بلا ":" (محظورة في أسماء الملفات على ويندوز — sanitize_name تزيلها)
+    return "جلسة " + (when or datetime.now()).strftime("%Y-%m-%d %H.%M")
 
 
 def reset_cache():
@@ -132,11 +133,18 @@ def _rebuild_from_files():
         m = re.fullmatch(r"session_([0-9a-f]{8})\.md", fn)
         if not m:
             continue
-        meta = _read_yaml_head(os.path.join(sessions_dir(), fn))
-        count = _count_entries_file(os.path.join(sessions_dir(), fn))
-        out.append({"id": m.group(1), "name": meta.get("name") or f"جلسة {m.group(1)}",
-                    "status": meta.get("status") or "ended", "started": meta.get("started") or "",
-                    "ended": meta.get("ended") or None, "count": count, "last_ts": meta.get("started") or "",
+        path = os.path.join(sessions_dir(), fn)
+        meta = _read_yaml_head(path)
+        count, tail = _scan_file(path)
+        # الحالة الحقيقية من ذيل الملف (append-only): آخر حدث ⏹️/▶️؛ الاسم الأخير من 📛/✏️ لو وُجد
+        status = "active"
+        if tail.get("last_event") == "end":
+            status = "ended"
+        if tail.get("merged"):
+            status = "archived"
+        out.append({"id": m.group(1), "name": tail.get("name") or meta.get("name") or f"جلسة {m.group(1)}",
+                    "status": status, "started": meta.get("started") or "",
+                    "ended": tail.get("ended"), "count": count, "last_ts": tail.get("last_ts") or meta.get("started") or "",
                     "role_override": None, "pending_title": None, "strikes": 0, "simple_left": 0,
                     "context_off": False})
     return out
@@ -161,12 +169,28 @@ def _read_yaml_head(path):
     return meta
 
 
-def _count_entries_file(path):
+def _scan_file(path):
+    """(count, tail): عدد المدخلات + آخر حدث/اسم/طابع زمني من ملف الجلسة (لإعادة البناء)."""
+    count, tail = 0, {}
     try:
         with open(path, "r", encoding="utf-8") as f:
-            return sum(1 for ln in f if ln.startswith(_ENTRY_MARK))
+            for ln in f:
+                if ln.startswith(_ENTRY_MARK):
+                    count += 1
+                    tail["last_ts"] = ln[len(_ENTRY_MARK):len(_ENTRY_MARK) + 19]
+                elif ln.startswith("⏹️ انتهت"):
+                    tail["last_event"] = "end"
+                    tail["ended"] = ln.split(":", 1)[1].strip()[:19] if ":" in ln else None
+                elif ln.startswith("▶️ استُؤنفت"):
+                    tail["last_event"] = "resume"
+                    tail["ended"] = None
+                elif ln.startswith(("📛 الاسم: «", "✏️ أُعيدت التسمية: «")):
+                    tail["name"] = ln.split("«", 1)[1].rsplit("»", 1)[0]
+                elif ln.startswith("📦 دُمجت في"):
+                    tail["merged"] = True
     except OSError:
-        return 0
+        pass
+    return count, tail
 
 
 def _find(session_id_or_prefix):
@@ -381,6 +405,11 @@ def merge(id_a, id_b, name=None, when=None):
         idx["sessions"].append(s)
         a["status"] = b["status"] = "archived"
         _write_index(idx)
+        for src in (a, b):
+            try:
+                _append_file(session_file(src["id"]), f"📦 دُمجت في [{sid}] «{nm}»: {_now_str(when)}\n\n")
+            except OSError:  # pragma: no cover
+                pass
         _write_file_header(s)
         body = "".join(_format_entry_block(e["meta"], e["raw"], e["polished"], e.get("title")) for e in entries)
         _append_file(session_file(sid), body + f"⏹️ انتهت (دمج): {s['ended']} · {s['count']} فويس\n\n")
@@ -488,7 +517,7 @@ def _parse_block(block):
             cur = pol
         elif ln.startswith(_TITLE_MARK):
             cur = title
-        elif ln.startswith(("⏹️ ", "▶️ ", "✏️ ")):
+        elif ln.startswith(("⏹️ ", "▶️ ", "✏️ ", "📛 ", "📦 ")):
             cur = None
         elif cur is not None:
             cur.append(ln)
