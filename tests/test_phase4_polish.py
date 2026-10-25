@@ -99,14 +99,15 @@ def test_terms_hint_empty_without_session_or_terms(S):
 
 def test_transcription_prompt_includes_session_terms_inside_session(S, engine):
     base = engine.transcription_prompt()
-    assert "Docker" not in base
+    assert "اكتبها كما هي" not in base                                       # (SYSTEM_PROMPT نفسه يذكر Docker — نفحص سطر التلميح)
     S.start("خادم")
     S.append_entry(LONG_RAW, model=M1)
     p = engine.transcription_prompt()
-    assert "اكتبها كما هي" in p and "Docker" in p and "Nginx" in p
+    hint = [ln for ln in p.split("\n") if "اكتبها كما هي" in ln]
+    assert hint and "Docker" in hint[0] and "Nginx" in hint[0]
     assert p.startswith(engine.Config.SYSTEM_PROMPT)                        # الأساس لم يتغير
     S.end()
-    assert "Docker" not in engine.transcription_prompt()                   # خارج الجلسة → لا حقن
+    assert "اكتبها كما هي" not in engine.transcription_prompt()             # خارج الجلسة → لا حقن
 
 
 def test_layer_a_extra_capped_even_with_many_terms(S, engine, fresh_env):
@@ -401,7 +402,7 @@ def test_summary_survives_index_rebuild_and_failure_is_silent(S):
     assert S.get(s["id"])["summary"] == "ملخص محفوظ" and S.get(s["id"])["summary_at"] == 5
     assert S.summary_due(s["id"]) is False
     long = "ك" * 2000
-    assert len(S.maybe_update_summary(generate_fn=lambda a, b: (long, None)) or "") == 0 or True   # لا شيء حان
+    assert S.maybe_update_summary(generate_fn=lambda a, b: (long, None)) is None   # لا شيء حان بعد إعادة البناء
     for i in range(5):
         S.append_entry(f"نص {i + 5}", model=M1)
     out = S.maybe_update_summary(generate_fn=lambda a, b: (long, None))
