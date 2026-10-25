@@ -150,23 +150,74 @@ def test_help_lists_new_commands(bot):
     assert "/remove" in t and "/rename" in t and "Lite" in t
 
 
-def test_backup_command_sends_keys_json_document(bot, fresh_env):
-    tb, sent = bot
-    tb.key_manager.add_key(VALID_A, "A")
-    captured = {}
+def _capture_documents(tb, sent=None):
+    captured = []
+
     def fake_post(url, json=None, timeout=None, data=None, files=None):
         if "sendDocument" in url:
-            captured["data"] = data; captured["files"] = files
+            captured.append({"data": data, "files": files})
+        elif sent is not None:
+            sent.append({"url": url, "payload": json})
         return FakeResp(200, payload={"ok": True})
     import pytest as _p
     mp = _p.MonkeyPatch(); mp.setattr(tb.requests, "post", fake_post)
+    return captured, mp
+
+
+def test_backup_public_never_contains_keys_json(bot, fresh_env, tmp_path):
+    """13 S4: /backup يرسل ZIP بالبيانات العامة فقط — keys.json لا يدخل أبداً حتى لو كان داخل DATA_DIR."""
+    import zipfile, io
+    tb, sent = bot
+    tb.key_manager.add_key(VALID_A, "A")
+    data_dir = tmp_path
+    (data_dir / "transcripts").mkdir()
+    (data_dir / "transcripts" / "ALL.md").write_text("# archive\n", encoding="utf-8")
+    (data_dir / "transcripts" / "keys.json").write_text("{\"leak\": 1}", encoding="utf-8")  # تسريب مفتعل
+    import backup as bk
+    import pytest as _p
+    mp0 = _p.MonkeyPatch(); mp0.setattr(bk.Config, "DATA_DIR", str(data_dir))
+    captured, mp = _capture_documents(tb)
     try:
         tb.handle_text("T", "1", {"message_id": 9}, "/backup")
     finally:
-        mp.undo()
-    assert captured["data"]["chat_id"] == "1"
-    assert captured["files"]["document"][0] == "keys.json"
-    assert VALID_A.encode() in captured["files"]["document"][1]
+        mp.undo(); mp0.undo()
+    assert len(captured) == 1
+    name, blob, mime = captured[0]["files"]["document"]
+    assert name.startswith("backup_") and name.endswith(".zip") and mime == "application/zip"
+    names = zipfile.ZipFile(io.BytesIO(blob)).namelist()
+    assert "transcripts/ALL.md" in names
+    assert not any(n.endswith("keys.json") for n in names)
+    assert VALID_A.encode() not in blob
+
+
+def test_backup_secrets_requires_confirm_then_sends_keys(bot, fresh_env):
+    tb, sent = bot
+    import backup as bk
+    import pytest as _p
+    mp0 = _p.MonkeyPatch(); mp0.setattr(bk.Config, "KEYS_JSON_FILE", tb.Config.KEYS_JSON_FILE)
+    tb.key_manager.add_key(VALID_A, "A")
+    captured, mp = _capture_documents(tb, sent)
+    try:
+        tb.handle_text("T", "1", {"message_id": 9}, "/backup_secrets")
+        assert captured == []
+        assert any("confirm" in (m["payload"] or {}).get("text", "") for m in sent)
+        tb.handle_text("T", "1", {"message_id": 10}, "/backup_secrets confirm")
+    finally:
+        mp.undo(); mp0.undo()
+    assert len(captured) == 1
+    import zipfile, io
+    name, blob, _ = captured[0]["files"]["document"]
+    assert name.startswith("secrets_")
+    z = zipfile.ZipFile(io.BytesIO(blob))
+    assert z.namelist() == ["keys.json"]
+    assert VALID_A.encode() in z.read("keys.json")
+
+
+def test_help_mentions_both_backup_commands(bot):
+    tb, sent = bot
+    t = tb._help_text()
+    assert "/backup " in t or "/backup —" in t
+    assert "/backup_secrets" in t
 
 
 # ======================================================================
