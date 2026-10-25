@@ -275,7 +275,10 @@ def test_all_models_down_bounded_rounds_then_clear_message(engine, monkeypatch):
     # Failover v2 (04 §2.3): انتظار ذكي = أقرب فتح قاطع (20) لا backoff أعمى (2)، ثم جولة ثانية تضرب الشبكة
     # لأن sleep وهمي (القاطع لا يزال مقفولاً فعلياً → تُتخطّى كل الموديلات بلا طلبات) والميزانية تمنع المزيد
     assert len(calls) == 2
-    assert sleeps == [engine.Config.MODEL_PAUSE_LADDER_5XX[0]]
+    # remaining() = int(until - now) + 1 بساعة حقيقية: على لينكس يمر كسر ثانية → 20، وعلى ويندوز (دقة ~15ms)
+    # القراءتان في نفس التكة → 21. الاختبار يقبل كليهما (test_failover_v2 يستخدم ساعة وهمية ويثبّت 21).
+    ladder0 = engine.Config.MODEL_PAUSE_LADDER_5XX[0]
+    assert len(sleeps) == 1 and ladder0 <= sleeps[0] <= ladder0 + 1, sleeps
     assert isinstance(ei.value, engine.DeferredError) and ei.value.kind == "model"
     msg = str(ei.value)
     assert "مزدحمة" in msg and "/reset" in msg and msg.startswith("🤖 Gemini:")
