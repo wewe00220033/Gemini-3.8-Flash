@@ -130,12 +130,28 @@ class Config:
     # قاطع الدائرة على مستوى الموديل (بالثواني): لو موديل رجّع 5xx أو Timeout يُتخطّى للمدة دي
     # على كل المفاتيح (المشكلة في Google مش في المفتاح). 0 = معطّل. /reset يفتح القواطع يدوياً.
     MODEL_PAUSE_ON_TIMEOUT = 90
-    MODEL_PAUSE_ON_5XX = 180
+    MODEL_PAUSE_ON_5XX = 180             # يبقى للتوافق = أعلى درجة في السلم أدناه
     MODEL_PAUSE_ON_404 = 3600
 
-    # لو كل الموديلات وقعت في نفس اللحظة: جولات إضافية محدودة مع انتظار قصير بينها
+    # --- Failover v2 (المرحلة 2 — 04 §2) ---
+    # قفل متدرج لـ 5xx: الضربة 1 → 20ث، 2 → 45ث، 3 → 90ث، 4+ → 180ث؛ العداد يُصفَّر عند نجاح الموديل
+    MODEL_PAUSE_LADDER_5XX = (20, 45, 90, 180)
+    # 503 على مفتاح: جرّب حتى N مفتاح آخر من مجموعة مشروع مختلفة قبل قفل الموديل (المالك: 3 أو 5؛ 2 افتراضياً — كل قفزة تحرق طلباً)
+    MODEL_503_KEY_HOPS = int(os.environ.get("MODEL_503_KEY_HOPS", "2"))
+    # ميزانية زمنية كلية للمحاولة الواحدة؛ بعدها → تأجيل في الطابور (DeferredError) بدل الدوران
+    RETRY_BUDGET_SECONDS = int(os.environ.get("RETRY_BUDGET_SECONDS", "45"))
+    # حفظ القاطع على القرص حتى لا نضرب موديلاً نعلم أنه مقفول بعد إعادة التشغيل (04 §2.5)
+    CIRCUIT_FILE = os.path.join(DATA_DIR, "state", "circuit.json")
+    # مجموعات المشاريع: project_group صريح → وسم project → كل مفتاح مجموعة مستقلة؛ دمج تلقائي عند 429 يومي متزامن
+    KEY_GROUP_AUTODETECT = os.environ.get("KEY_GROUP_AUTODETECT", "1") not in ("0", "false", "False", "")
+    KEY_GROUP_AUTODETECT_WINDOW = 60     # ثانية: مفتاحان نفد يومياً على نفس الموديل خلالها = مشروع واحد
+    KEY_GROUPS_FILE = os.path.join(DATA_DIR, "state", "key_groups.json")
+    # أوضاع التدهور حسب المتبقي اليومي (04 §3.2): normal > 30% ≥ saver > 0 = freeze
+    QUOTA_SAVER_RATIO = 0.30
+
+    # لو كل الموديلات وقعت في نفس اللحظة: جولات إضافية محدودة مع انتظار ذكي (min(أقرب فتح, الميزانية))
     TRANSIENT_RETRY_ROUNDS = 2           # إجمالي 3 جولات كحد أقصى
-    TRANSIENT_RETRY_BACKOFF = (2, 4)     # ثوانٍ قبل الجولة 2 ثم 3
+    TRANSIENT_RETRY_BACKOFF = (2, 4)     # حد أدنى للانتظار بين الجولات
 
     # (اختياري — فاضي افتراضياً) مستوى التفكير لكل موديل: MINIMAL | LOW | MEDIUM | HIGH
     # يُرسل فقط للموديلات المذكورة هنا. قرار المالك: نسيبه على الافتراضي (MEDIUM) لأعلى دقة في العامية.
