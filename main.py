@@ -3,20 +3,25 @@
 نقطة الانطلاق الرئيسية الموحدة 360° (Master Unified Runner)
 - يشغل خادم الويب والواجهة الصوتية في خيط خلفي (Web Service)
 - يشغل بوت التليجرام في خيط خلفي (Telegram Bot)
-- Watchdog: يراقب الاثنين ويعيد تشغيل أيهما يقع، ويبلغك على تليجرام
+- Runtime: poller قابل لإعادة التشغيل (L1) + pool تفريغ مشترك + watchdog مستقل لا يلمس الشبكة (03b)
+- SIGTERM/SIGINT → إيقاف رشيق: انتظار المهام الجارية ≤ SHUTDOWN_GRACE ثم خروج 0 (Pterodactyl Stop/Restart)
+- الخيط الرئيسي خامل: يراقب المراقب (watchdog) والويب فقط
 - Startup Ping: رسالة على تليجرام عند الإقلاع (تعرف لو الاستضافة عملت Restart)
 - مهيأ للعمل محلياً أو على خوادم الاستضافة (24/7 Hosting)
 """
 
 import sys
 import time
+import signal
 import logging
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from config import Config
 from key_manager import key_manager
 import web_service
 import telegram_bot
 import preflight
+import watchdog
 from model_state import model_circuit
 
 
@@ -56,10 +61,105 @@ def _setup_logging():
     sys.stderr = _PrintToLog(logging.getLogger("app"), logging.ERROR)
 
 
-def _bot_thread():
-    t = threading.Thread(target=telegram_bot.main, daemon=True, name="telegram-bot")
-    t.start()
-    return t
+class Runtime:
+    """
+    يملك خيوط النظام: poller (قابل لإعادة التشغيل L1)، pool التفريغ المشترك، watchdog، notifier.
+    - `restart_poller()`: يضبط stop_event القديم (الـ poller القديم يخرج عند أول فرصة ويقتل Session خيطه)،
+      ثم يطلق خيطاً جديداً بـ stop_event جديد. الـ pool لا يُمس — المهام الجارية تكمل.
+    - `shutdown()`: إيقاف رشيق (03b الطبقة 0.5): stop_event → انتظار in_flight ≤ SHUTDOWN_GRACE → خروج 0.
+    """
+
+    def __init__(self, bot_token, chat_id):
+        self.bot_token, self.chat_id = bot_token, chat_id
+        self.pool = ThreadPoolExecutor(max_workers=max(1, Config.BOT_WORKERS), thread_name_prefix="transcribe")
+        self.poller_stop = None
+        self.poller_thread = None
+        self.global_stop = threading.Event()
+        self.notifier = None
+        self.watchdog = None
+        self.watchdog_restarts = 0
+        self._lock = threading.Lock()
+
+    # ---- poller ----
+    def start_poller(self):
+        with self._lock:
+            self.poller_stop = threading.Event()
+            t = threading.Thread(target=telegram_bot.main, kwargs={"stop_event": self.poller_stop, "pool": self.pool},
+                                 daemon=True, name=f"telegram-bot-{telegram_bot.STATE['poller_generation'] + 1}")
+            t.start()
+            self.poller_thread = t
+            return t
+
+    def restart_poller(self):
+        """L1: يُنادى من الـ watchdog (لا شبكة هنا؛ إنشاء خيط فقط)."""
+        if self.global_stop.is_set():
+            return False
+        old_stop = self.poller_stop
+        if old_stop is not None:
+            old_stop.set()
+        self.start_poller()
+        return True
+
+    def poller_alive(self):
+        return bool(self.poller_thread and self.poller_thread.is_alive())
+
+    # ---- watchdog ----
+    def start_watchdog(self):
+        if self.notifier is None and self.bot_token and self.chat_id:
+            self.notifier = watchdog.Notifier(
+                lambda text: telegram_bot.send_telegram_message(self.bot_token, self.chat_id, text)
+            )
+            self.notifier.start()
+        self.watchdog = watchdog.Watchdog(
+            restart_poller=self.restart_poller,
+            stall_after=telegram_bot.current_stall_after,
+            notifier=self.notifier,
+            set_protect=telegram_bot.set_protect_mode,
+            set_emergency=telegram_bot.set_emergency_mode,
+            watch=Config.HEALTH_WATCH_THREADS,
+        )
+        self.watchdog.start()
+        web_service.RUNTIME["watchdog"] = self.watchdog
+        return self.watchdog
+
+    # ---- shutdown ----
+    def shutdown(self, reason="SIGTERM"):
+        """إيقاف رشيق: يرجع عدد المهام التي لم تكتمل خلال المهلة (0 = نظيف)."""
+        print(f"🛑 {reason}: إيقاف رشيق — لا أستقبل جديداً، أنتظر المهام الجارية ≤ {Config.SHUTDOWN_GRACE}ث...")
+        self.global_stop.set()
+        if self.poller_stop is not None:
+            self.poller_stop.set()
+        if self.watchdog is not None:
+            self.watchdog.stop(timeout=1)
+        deadline = time.monotonic() + Config.SHUTDOWN_GRACE
+        while telegram_bot.STATE["in_flight"] > 0 and time.monotonic() < deadline:
+            time.sleep(0.2)
+        left = telegram_bot.STATE["in_flight"]
+        self.pool.shutdown(wait=False, cancel_futures=True)
+        if self.notifier is not None:
+            self.notifier.stop(timeout=1)
+        if left:
+            print(f"⚠️ {left} مهمة لم تكتمل خلال المهلة — ستُعاد بعد الإقلاع عند تفعيل jobs.ndjson (1b).")
+        else:
+            print("👋 تم إيقاف المنظومة بنجاح (0 مهام معلقة).")
+        return left
+
+
+def install_signal_handlers(stop_event):
+    """SIGTERM/SIGINT → stop_event فقط (لا عمل داخل المعالج). يعمل فقط في الخيط الرئيسي."""
+    def _handler(signum, frame):
+        print(f"📨 إشارة {signal.Signals(signum).name} — بدء الإيقاف الرشيق")
+        stop_event.set()
+    installed = []
+    for sig in (getattr(signal, "SIGTERM", None), getattr(signal, "SIGINT", None)):
+        if sig is None:
+            continue
+        try:
+            signal.signal(sig, _handler)
+            installed.append(sig)
+        except (ValueError, OSError):
+            pass   # ليس الخيط الرئيسي / منصة لا تدعم
+    return installed
 
 
 def _startup_ping(bot_token, chat_id, web_error=None):
@@ -109,40 +209,42 @@ def main():
         web_error = f"{type(e).__name__}: {e}"
         print(f"⚠️ تحذير: تعذر تشغيل خادم الويب على {Config.WEB_HOST}:{Config.WEB_PORT}: {web_error} — البوت يكمل بلا ويب.")
 
-    # 2. بوت تليجرام
-    bot_t = None
+    # 2. بوت تليجرام + watchdog مستقل (03b الطبقة 3) + معالجات SIGTERM (الطبقة 0.5)
+    rt = Runtime(bot_token, chat_id)
+    install_signal_handlers(rt.global_stop)
     if bot_token:
-        bot_t = _bot_thread()
+        rt.start_poller()
+        rt.start_watchdog()
         time.sleep(1.5)
         _startup_ping(bot_token, chat_id, web_error=web_error)
     else:
         print("ℹ️ لم يتم العثور على توكن تليجرام، المنظومة تعمل في وضع الويب فقط.")
 
-    # 3. Watchdog
-    web_restarts = bot_restarts = 0
+    # 3. الخيط الرئيسي خامل: يراقب المراقب (watchdog) والويب فقط، وينتظر إشارة الإيقاف
+    web_restarts = 0
     try:
-        while True:
-            time.sleep(Config.WATCHDOG_INTERVAL)
-
+        while not rt.global_stop.wait(Config.WATCHDOG_INTERVAL * 3):
             if web_t is not None and not web_t.is_alive():
                 web_restarts += 1
-                print(f"🩺 Watchdog: خادم الويب توقف — إعادة تشغيل (#{web_restarts})...")
+                print(f"🩺 main: خادم الويب توقف — إعادة تشغيل (#{web_restarts})...")
                 try:
                     web_t = web_service.start_web_server_thread()
                 except Exception as e:
                     print(f"⚠️ فشل إعادة تشغيل الويب: {e}")
-
-            if bot_t is not None and not bot_t.is_alive():
-                bot_restarts += 1
-                print(f"🩺 Watchdog: بوت تليجرام توقف — إعادة تشغيل (#{bot_restarts})...")
-                bot_t = _bot_thread()
-                if bot_token and chat_id and Config.NOTIFY_ON_START:
-                    telegram_bot.send_telegram_message(
-                        bot_token, chat_id,
-                        f"🩺 Watchdog أعاد تشغيل البوت (#{bot_restarts}). آخر خطأ: {telegram_bot.STATE.get('last_error')}"
-                    )
+            if rt.watchdog is not None and not rt.watchdog.is_alive():
+                rt.watchdog_restarts += 1
+                print(f"🩺 main: الـ watchdog توقف — إعادة إنشائه (#{rt.watchdog_restarts})")
+                rt.start_watchdog()
+            # 401 أوقف الـ poller طوعاً → لا نعيده (التوكن باطل)؛ أي خروج آخر غير متوقع → إعادة
+            if bot_token and not rt.poller_alive() and telegram_bot.STATE.get("stopped_reason") not in ("401",):
+                print("🩺 main: خيط الـ poller مات بلا سبب معروف — إعادة تشغيل")
+                rt.restart_poller()
     except KeyboardInterrupt:
-        print("\n👋 تم إيقاف المنظومة بنجاح.")
+        rt.global_stop.set()
+    code = 0
+    if bot_token:
+        rt.shutdown(reason="إيقاف")
+    sys.exit(code)
 
 
 if __name__ == "__main__":

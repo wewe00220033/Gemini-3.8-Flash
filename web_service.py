@@ -65,6 +65,19 @@ class WebRequestHandler(BaseHTTPRequestHandler):
     def _route(self):
         return urlparse(self.path).path
 
+    def _drain_body(self, limit=1 << 20):
+        """يقرأ ويهمل body الطلب (حتى limit) كي لا يُقطع الاتصال قبل وصول الرد للعميل."""
+        try:
+            n = int(self.headers.get("Content-Length", 0) or 0)
+        except ValueError:
+            n = 0
+        remaining = min(n, limit)
+        while remaining > 0:
+            chunk = self.rfile.read(min(remaining, 65536))
+            if not chunk:
+                break
+            remaining -= len(chunk)
+
     @staticmethod
     def parse_multipart(body, content_type):
         """
@@ -135,6 +148,8 @@ class WebRequestHandler(BaseHTTPRequestHandler):
         path = self._route()
 
         if path not in ("/api/transcribe", "/api/add_key"):
+            # نستهلك الـ body قبل الرد: على Windows إغلاق السوكت وبه بيانات غير مقروءة يرسل RST (10054) بدل 404
+            self._drain_body()
             return self._send_json(404, {"ok": False, "error": "not found"})
 
         if not self._authorized():
@@ -189,8 +204,13 @@ class WebRequestHandler(BaseHTTPRequestHandler):
 WEB_STATE = {"started_at": None, "alive": False, "last_error": None}
 
 
+# مرجع اختياري يضبطه main.py (RUNTIME["watchdog"] = Watchdog) ليعرض /health سلم التصعيد بلا دورة استيراد
+RUNTIME = {}
+
+
 def build_health():
-    """تقرير صحة JSON يقرأه /health والـ watchdog."""
+    """تقرير صحة JSON يقرأه /health والمراقب الخارجي (UptimeRobot)."""
+    telegram_bot = None
     try:
         import telegram_bot
         bot_state = telegram_bot.STATE
@@ -206,16 +226,44 @@ def build_health():
     bot_alive = bool(bot_state.get("alive")) and (last_poll is not None and now - last_poll < 120)
     # النبضات (monotonic) — الخيوط المسجلة فقط تُحكم؛ في وضع ويب-فقط (لا بوت) لا حكم على خيوط البوت
     beats = heartbeat.snapshot()
+    # العتبة تتبع الوضع الحالي (عادي ≈55 / حذر أو حماية ≈35 / طوارئ ≈25) ولا تقل عن HEALTH_STALE_AFTER المضبوطة يدوياً
+    stale_after = Config.HEALTH_STALE_AFTER
+    try:
+        stale_after = max(Config.HEALTH_STALE_AFTER, int(telegram_bot.current_stall_after()))
+    except Exception:
+        pass
     stale = []
     if bot_configured:
         for name in Config.HEALTH_WATCH_THREADS:
-            if heartbeat.is_stale(name, Config.HEALTH_STALE_AFTER):
+            if heartbeat.is_stale(name, stale_after):
                 stale.append(name)
+    resilience = {
+        "poller_generation": bot_state.get("poller_generation", 0),
+        "net_errors": bot_state.get("net_errors", 0),
+        "read_timeouts": bot_state.get("read_timeouts", 0),
+        "protect_mode": bool(bot_state.get("protect_mode")),
+        "emergency_mode": bool(bot_state.get("emergency_mode")),
+        "in_flight": bot_state.get("in_flight", 0),
+        "stopped_reason": bot_state.get("stopped_reason"),
+    }
+    try:
+        import netsession
+        resilience["cautious_remaining_s"] = int(netsession.cautious.remaining_s())
+        resilience["sessions"] = netsession.stats()
+    except Exception:
+        pass
+    wd = RUNTIME.get("watchdog")
+    if wd is not None:
+        try:
+            resilience["watchdog"] = wd.snapshot()
+        except Exception:
+            pass
     return {
         "ok": not stale,
         "stale_threads": stale,
-        "stale_after_s": Config.HEALTH_STALE_AFTER,
+        "stale_after_s": stale_after,
         "beats": beats,
+        "resilience": resilience,
         "web_alive": True,
         "bot_alive": bot_alive,
         "bot_configured": bot_configured,

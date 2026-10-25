@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """اختبارات endpoints خادم الويب (P1-اختياري, P2, P8, P19) باستخدام mock لمحرك التفريغ."""
 import json
+import os
 import socket
 import threading
 import urllib.request
@@ -207,7 +208,9 @@ def test_index_served_from_static_file(web):
     assert "isTypeSupported" in page           # 3.9 mimeType detection
     assert "id=\"toast\"" in page               # 3.5 no alert()
     assert "alert(" not in page.split("<script>")[1].replace("// شريط رسائل بدل alert()", "")
-    assert web_service._INDEX_FILE.endswith("static/index.html")
+    # مستقل عن فاصل المسار (Windows يستخدم \\): نقارن المكوّنين الأخيرين
+    parts = os.path.normpath(web_service._INDEX_FILE).split(os.sep)
+    assert parts[-2:] == ["static", "index.html"]
 
 
 def test_index_fallback_when_static_missing(web, monkeypatch):
@@ -292,3 +295,46 @@ def test_start_web_server_thread_raises_in_caller_when_port_busy(fresh_env, monk
             web_service.start_web_server_thread()
     finally:
         s.close()
+
+
+# ---------- المرحلة 1a: /health يعرض التعافي الذاتي وعتبته تتبع الوضع ----------
+
+def test_health_reports_resilience_and_mode_aware_threshold(web, monkeypatch):
+    import heartbeat
+    import telegram_bot
+    import web_service
+    heartbeat.reset()
+    try:
+        monkeypatch.setattr(web_service.key_manager, "get_telegram_config", lambda: ("123:tok", "", "1"))
+        monkeypatch.setattr(web_service.Config, "HEALTH_STALE_AFTER", 10)   # أقل من العتبة الديناميكية
+        heartbeat.beat("poller")
+        telegram_bot.set_protect_mode(True)
+        status, body = _get(web + "/health")
+        h = json.loads(body)
+        assert status == 200
+        assert h["stale_after_s"] == telegram_bot.current_stall_after()      # ≈35 في الحماية
+        r = h["resilience"]
+        assert r["protect_mode"] is True and r["emergency_mode"] is False
+        assert "poller_generation" in r and "sessions" in r and "cautious_remaining_s" in r
+        assert "watchdog" not in r                                            # لا Runtime في الاختبار
+
+        class W:
+            def snapshot(self):
+                return {"level": "L3", "restarts": 3}
+        monkeypatch.setitem(web_service.RUNTIME, "watchdog", W())
+        h = json.loads(_get(web + "/health")[1])
+        assert h["resilience"]["watchdog"] == {"level": "L3", "restarts": 3}
+    finally:
+        telegram_bot.set_protect_mode(False)
+        heartbeat.reset()
+
+
+def test_unknown_post_drains_body_before_404(web):
+    """توافق Windows: body كبير على مسار مجهول يُقرأ بالكامل قبل 404 (لا RST/10054)."""
+    req = urllib.request.Request(web + "/api/nope", data=b"x" * 200_000,
+                                 headers={"Content-Type": "application/octet-stream"})
+    try:
+        urllib.request.urlopen(req, timeout=5)
+        pytest.fail("expected 404")
+    except urllib.error.HTTPError as e:
+        assert e.code == 404 and json.loads(e.read())["error"] == "not found"
