@@ -5,6 +5,11 @@
 - يكتشف المفاتيح التلقائية المرسلة عبر الشات
 - يدير التدوير التلقائي وفترات التهدئة (Cooldown) عند كود 429
 - يحسب الإحصائيات والرصيد اليومي الفعلي
+- مرحلة 2 (مواصفة 04 §2.4/§3): مجموعات المشاريع project_group — نفاد يومي/429 على مفتاح يُعلَّم
+  على كل مفاتيح مجموعته (نفس مشروع Google = نفس الحصة)، اكتشاف تلقائي للمجموعات، ودفتر الحصص
+  (normal / saver / freeze).
+
+Thread-safety: كل تعديل على self.data يتم تحت self._lock (RLock) وينتهي بـ save() واحد ذري.
 """
 
 import os
@@ -15,6 +20,11 @@ import tempfile
 import threading
 from datetime import datetime, timedelta, timezone
 from config import Config
+
+try:
+    import store
+except ImportError:  # pragma: no cover
+    store = None
 
 class KeyManager:
     def __init__(self):
@@ -29,7 +39,13 @@ class KeyManager:
             },
             "recordings_dir": Config.DEFAULT_RECORDINGS_DIR
         }
+        # مجموعات مكتشفة تلقائياً: key_str -> group  (تُحفظ في state/key_groups.json)
+        self._auto_groups = {}
+        # آخر نفاد يومي لكل موديل: model -> [(ts, key_str), ...] لنافذة الاكتشاف
+        self._daily_exhaust_log = {}
+        self._invalid_notified = set()
         self.load()
+        self._load_auto_groups()
 
     def load(self):
         # 1. لو keys.json موجود نقرأه ثم ندمج معه أي مفاتيح جديدة من متغيرات البيئة
@@ -196,6 +212,131 @@ class KeyManager:
         tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
         return tomorrow.astimezone(self._tz(Config.DISPLAY_TZ)).strftime("%H:%M (%Y-%m-%d)")
 
+    # ==================================================================
+    # مجموعات المشاريع (project_group) — مواصفة 04 §2.4
+    # ==================================================================
+    def group_of(self, key_entry):
+        """
+        مجموعة المفتاح: (1) project_group الصريح؛ (2) وسم project؛ (3) مجموعة مكتشفة تلقائياً؛
+        (4) وإلا المفتاح نفسه مجموعة مستقلة (السلوك القديم — آمن بلا كسر).
+        """
+        if not isinstance(key_entry, dict):
+            return None
+        explicit = (key_entry.get("project_group") or "").strip()
+        if explicit:
+            return explicit
+        tag = (key_entry.get("project") or "").strip()
+        if tag:
+            return tag
+        key_str = key_entry.get("key") or ""
+        auto = self._auto_groups.get(key_str)
+        if auto:
+            return auto
+        return "key:" + key_str
+
+    def group_label(self, key_entry):
+        """اسم المجموعة للعرض أو None لو المفتاح مستقل (لا نعرض شيئاً زائداً)."""
+        g = self.group_of(key_entry)
+        return None if not g or g.startswith("key:") else g
+
+    def siblings(self, key_entry):
+        """كل المفاتيح في نفس مجموعة key_entry (بما فيها هو). يُستدعى تحت القفل."""
+        g = self.group_of(key_entry)
+        return [k for k in self.data.get("keys", []) if self.group_of(k) == g]
+
+    def _find_key(self, key_str):
+        for k in self.data.get("keys", []):
+            if k.get("key") == key_str:
+                return k
+        return None
+
+    def _resolve(self, name_or_prefix):
+        """مفتاح بالاسم (غير حساس للحالة) أو ببادئة المفتاح أو بالرقم id."""
+        target = (name_or_prefix or "").strip()
+        if not target:
+            return None
+        for k in self.data.get("keys", []):
+            if k.get("name", "").lower() == target.lower() or k.get("key", "").startswith(target):
+                return k
+            if target.isdigit() and str(k.get("id")) == target:
+                return k
+        return None
+
+    def set_project_group(self, name_or_prefix, group):
+        """
+        /project_group <key> <group>: يثبّت المجموعة صراحةً في keys.json.
+        group فارغ أو '-' يزيل المجموعة (يرجع المفتاح مستقلاً). يرجع المدخل أو None.
+        """
+        with self._lock:
+            k = self._resolve(name_or_prefix)
+            if k is None:
+                return None
+            group = (group or "").strip()
+            if group in ("", "-", "none", "بدون"):
+                k.pop("project_group", None)
+                self._auto_groups.pop(k.get("key", ""), None)
+                self._save_auto_groups()
+            else:
+                k["project_group"] = group[:40]
+            self.save()
+            return k
+
+    def _load_auto_groups(self):
+        path = getattr(Config, "KEY_GROUPS_FILE", None)
+        if not path or store is None:
+            return
+        data = store.load_json_tolerant(path, default={})
+        groups = data.get("groups") if isinstance(data, dict) else None
+        if isinstance(groups, dict):
+            self._auto_groups = {str(k): str(v) for k, v in groups.items() if v}
+
+    def _save_auto_groups(self):
+        """يُستدعى تحت القفل. يكتب state/key_groups.json ذرياً (المفاتيح مقنّعة لا تُكتب كاملة)."""
+        path = getattr(Config, "KEY_GROUPS_FILE", None)
+        if not path or store is None:
+            return
+        try:
+            store.atomic_write_json(path, {
+                "groups": dict(self._auto_groups),
+                "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            })
+        except Exception as e:  # pragma: no cover
+            print(f"⚠️ key_groups.json: تعذّر الحفظ ({e})")
+
+    def _autodetect_group(self, key_entry, model, now):
+        """
+        نفاد يومي على (model, key) الآن: لو مفتاح آخر نفد يومياً على نفس الموديل خلال
+        KEY_GROUP_AUTODETECT_WINDOW ثانية → غالباً نفس مشروع Google → ندمجهما في مجموعة واحدة.
+        يُستدعى تحت القفل. يرجع اسم المجموعة الجديدة أو None.
+        """
+        if not getattr(Config, "KEY_GROUP_AUTODETECT", True):
+            return None
+        window = getattr(Config, "KEY_GROUP_AUTODETECT_WINDOW", 60)
+        key_str = key_entry.get("key") or ""
+        log = self._daily_exhaust_log.setdefault(model, [])
+        log[:] = [(ts, k) for ts, k in log if now - ts <= window and k != key_str]
+        merged = None
+        for _, other_str in log:
+            other = self._find_key(other_str)
+            if other is None or self.group_of(other) == self.group_of(key_entry):
+                continue
+            # لا ندمج مفتاحاً له project_group صريح مع مجموعة أخرى — قرار المالك يعلو
+            if key_entry.get("project_group") or other.get("project_group") or key_entry.get("project"):
+                continue
+            g_other = self.group_of(other)
+            group = g_other if not g_other.startswith("key:") else f"auto-{other.get('id', '?')}"
+            # ندمج كل أعضاء مجموعة المفتاح الحالي في مجموعة الآخر
+            for member in self.siblings(key_entry):
+                self._auto_groups[member.get("key") or ""] = group
+            if g_other.startswith("key:"):
+                self._auto_groups[other_str] = group
+            merged = group
+            print(f"🔗 اكتشاف تلقائي: [{key_entry.get('name')}] و[{other.get('name')}] نفدا يومياً معاً على {model} → مجموعة {group}")
+        log.append((now, key_str))
+        if merged:
+            self._save_auto_groups()
+        return merged
+
     def _model_blocked_until(self, key_entry, model):
         """متى يفك الموديل على هذا المفتاح (0 = متاح). يراعي الحقول القديمة أيضاً."""
         until = 0
@@ -296,25 +437,34 @@ class KeyManager:
             else:
                 cooldown = Config.KEY_COOLDOWN_SECONDS
             until = now + cooldown
-            for k in self.data.get("keys", []):
-                if k.get("key") != key_str:
-                    continue
-                k["exhausted_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                if model:
-                    em = k.setdefault("exhausted_models", {})
-                    em[model] = until
+            k = self._find_key(key_str)
+            if k is None:
+                return
+            stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            k["exhausted_at"] = stamp
+            if model:
+                if daily:
+                    self._autodetect_group(k, model, now)
+                # نفاد يومي أو 429 معدل على الموديل = على المشروع كله → نعلّم كل الأشقاء (04 §2.4)
+                targets = self.siblings(k)
+                for t in targets:
+                    em = t.setdefault("exhausted_models", {})
+                    em[model] = max(em.get(model, 0) or 0, until)
                     # لو كل الموديلات مقفولة نعلّم المفتاح كله للتوافق مع العرض القديم
                     if all(em.get(m, 0) > now for m in Config.MODELS):
-                        k["status"] = "exhausted"
-                        k["exhausted_until"] = max(em.values())
-                    label = f"الموديل [{model}] على المفتاح [{k.get('name')}]"
-                else:
-                    k["status"] = "exhausted"
-                    k["exhausted_until"] = until
-                    label = f"المفتاح [{k.get('name')}]"
-                print(f"🔒 تم قفل {label} حتى: {datetime.fromtimestamp(until).strftime('%H:%M:%S')} ({int(cooldown // 60)} د)")
-                self.save()
-                break
+                        t["status"] = "exhausted"
+                        t["exhausted_until"] = max(em.values())
+                    if t is not k:
+                        t["exhausted_at"] = stamp
+                label = f"الموديل [{model}] على المفتاح [{k.get('name')}]"
+                if len(targets) > 1:
+                    label += f" + {len(targets) - 1} شقيق في مجموعة [{self.group_label(k)}]"
+            else:
+                k["status"] = "exhausted"
+                k["exhausted_until"] = until
+                label = f"المفتاح [{k.get('name')}]"
+            print(f"🔒 تم قفل {label} حتى: {datetime.fromtimestamp(until).strftime('%H:%M:%S')} ({int(cooldown // 60)} د)")
+            self.save()
 
     def mark_key_invalid(self, key_str, reason=""):
         """
@@ -363,6 +513,79 @@ class KeyManager:
                 continue
             out[m] = max(quota - self._usage_today(key_entry, m), 0)
         return out
+
+    # ==================================================================
+    # دفتر الحصص (Quota Ledger) — مواصفة 04 §3
+    # ==================================================================
+    def quota_ledger(self):
+        """
+        ملخص مجمّع للمتبقي التقريبي اليوم عبر كل المفاتيح/الموديلات:
+        {"remaining": N, "total": T, "per_model": {model: n}, "ratio": r, "mode": normal|saver|freeze,
+         "reset_in_s": s}
+        المتبقي يحسب فقط ما هو متاح فعلاً اليوم (يستبعد المقفول حتى تصفير الكوتا أو الباطل).
+        """
+        with self._lock:
+            now = time.time()
+            keys = self.data.get("keys", [])
+            per_model = {m: 0 for m in Config.MODELS if Config.MODEL_DAILY_QUOTA.get(m) is not None}
+            total = 0
+            reset_in = self.seconds_until_quota_reset()
+            for k in keys:
+                invalid = k.get("status") == "invalid" and (k.get("exhausted_until", 0) or 0) > now
+                rem = self.remaining_today(k)
+                for m, quota in Config.MODEL_DAILY_QUOTA.items():
+                    if m not in per_model:
+                        continue
+                    total += quota
+                    if invalid:
+                        continue
+                    until = self._model_blocked_until(k, m)
+                    # قفل يمتد حتى التصفير = نفاد يومي فعلي (حتى لو العدّاد المحلي أقل)
+                    if until - now >= reset_in - 5:
+                        continue
+                    per_model[m] += rem.get(m, 0)
+            remaining = sum(per_model.values())
+            ratio = (remaining / total) if total else 0.0
+            saver = getattr(Config, "QUOTA_SAVER_RATIO", 0.30)
+            if remaining <= 0:
+                mode = "freeze"
+            elif ratio <= saver:
+                mode = "saver"
+            else:
+                mode = "normal"
+            return {
+                "remaining": remaining,
+                "total": total,
+                "per_model": per_model,
+                "ratio": round(ratio, 3),
+                "mode": mode,
+                "reset_in_s": reset_in,
+            }
+
+    def quota_mode(self):
+        return self.quota_ledger()["mode"]
+
+    def remaining_total(self):
+        return self.quota_ledger()["remaining"]
+
+    def quota_ledger_text(self):
+        """سطر العرض: "متبقي تقريبي اليوم ~31 فويس (3.6 Flash: 14، 3.5 Transcribe: 17) — يتصفر بعد 6س"."""
+        led = self.quota_ledger()
+        parts = "، ".join(f"{self._short_model(m)}: {n}" for m, n in led["per_model"].items())
+        h, rem = divmod(led["reset_in_s"], 3600)
+        when = f"{h}س" if h else f"{max(1, rem // 60)}د"
+        mode_tag = {"saver": " · 🟡 وضع التوفير", "freeze": " · 🧊 متجمد حتى التصفير"}.get(led["mode"], "")
+        return f"متبقي تقريبي اليوم ~{led['remaining']} فويس ({parts}) — يتصفر بعد {when}{mode_tag}"
+
+    def groups_summary(self):
+        """[(group, [names])] للمجموعات التي تضم أكثر من مفتاح — للعرض الصامت في /status."""
+        with self._lock:
+            groups = {}
+            for k in self.data.get("keys", []):
+                label = self.group_label(k)
+                if label:
+                    groups.setdefault(label, []).append(k.get("name", "?"))
+            return sorted(groups.items())
 
     def remove_key(self, name_or_prefix):
         """يحذف مفتاحاً بالاسم (غير حساس لحالة الأحرف) أو بأول 8 أحرف منه. يرجع المدخل المحذوف أو None."""
@@ -482,10 +705,14 @@ class KeyManager:
                 "─" * 30,
             ]
 
+            lines.insert(5, f"📒 {self.quota_ledger_text()}")
+
             for k in keys:
                 key_masked = k.get("key", "")[:8] + "..." + k.get("key", "")[-4:]
                 flag = "  ❌ مرفوض من Google" if k.get("status") == "invalid" else ""
-                lines.append(f"• {k.get('name')}  [{key_masked}]  عمليات: {k.get('success_count', 0)}{flag}")
+                grp = self.group_label(k)
+                grp_txt = f"  🗂 {grp}" if grp else ""
+                lines.append(f"• {k.get('name')}  [{key_masked}]  عمليات: {k.get('success_count', 0)}{grp_txt}{flag}")
                 rem = self.remaining_today(k)
                 for m in Config.MODELS:
                     until = self._model_blocked_until(k, m)
@@ -503,6 +730,12 @@ class KeyManager:
             if keys and wait:
                 lines.append("─" * 30)
                 lines.append(f"⏱ أقرب مفتاح يعود للعمل بعد: {wait // 60} د")
+
+            groups = self.groups_summary()
+            if groups:
+                lines.append("─" * 30)
+                lines.append("🗂 مجموعات المشاريع (حصة مشتركة): " + " | ".join(
+                    f"{g}: {', '.join(names)}" for g, names in groups))
 
             lines.append("─" * 30)
             lines.append(f"🤖 الموديلات: {self.models_chain_text()}")
