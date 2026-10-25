@@ -8,6 +8,13 @@
 أم في الطلب نفسه، أم في الشبكة؟ — وبناءً على التصنيف نقرر: مفتاح تاني، أم موديل تاني فوراً،
 أم نوقف. موديل واقع (5xx/Timeout) يُقفل مؤقتاً على كل المفاتيح (ModelCircuit) فلا يضيّع وقت
 الطلبات التالية.
+
+Failover v2 (مرحلة 2 — مواصفة 04 §2):
+- 503 على (موديل، مفتاح): قبل قفل الموديل نقفز لمفتاح من **مشروع مختلف** (project_group) حتى
+  MODEL_503_KEY_HOPS قفزة — الحمل قد يكون على المشروع لا الموديل. لو الكل 503 → قفل متدرج.
+- قفل متدرج لـ 5xx: 20 → 45 → 90 → 180 ثانية حسب الضربات المتتالية؛ النجاح يصفّر العداد.
+- انتظار ذكي بدل backoff الأعمى: ننتظر حتى أقرب فتح قاطع فقط لو يسمح به RETRY_BUDGET_SECONDS،
+  وإلا نرفع DeferredError فيؤجل الطابور المهمة ويعيدها تلقائياً — بلا /reset يدوي.
 """
 
 import os
@@ -82,19 +89,24 @@ def transcribe_audio_bytes_ex(audio_bytes, mime_type="audio/mp4"):
     b64_data = base64.b64encode(audio_bytes).decode("utf-8")
     timeout = (Config.GEMINI_CONNECT_TIMEOUT, dynamic_read_timeout(len(audio_bytes)))
 
-    info = {"skipped": [], "attempts": 0, "elapsed": 0.0}
+    info = {"skipped": [], "attempts": 0, "elapsed": 0.0, "hops": 0, "waited": 0, "rounds": 0}
     last = None              # آخر Attempt
     reasons = {}             # model -> سبب الفشل الأخير (للرسالة النهائية)
     network_retries = 0
+    budget = max(0, float(getattr(Config, "RETRY_BUDGET_SECONDS", 45)))
+    max_hops = max(0, int(getattr(Config, "MODEL_503_KEY_HOPS", 2)))
+    ladder = getattr(Config, "MODEL_PAUSE_LADDER_5XX", None) or (Config.MODEL_PAUSE_ON_5XX,)
 
     def _done(att, model, key_str, key_name):
         key_manager.record_success(key_str, model=model)
+        model_circuit.mark_success(model)          # يصفّر عداد ضربات 5xx للموديل
         info["elapsed"] = round(time.time() - started, 1)
         return att.text, model, key_name, info
 
-    rounds = 1 + max(0, int(Config.TRANSIENT_RETRY_ROUNDS))
+    rounds = 1 + max(0, int(Config.TRANSIENT_RETRY_ROUNDS))   # سقف أمان؛ الميزانية الزمنية هي الحاكم الفعلي
     for rnd in range(rounds):
         saw_transient = False
+        info["rounds"] = rnd + 1
 
         for model in Config.MODELS:
             left = model_circuit.remaining(model)
@@ -109,9 +121,15 @@ def transcribe_audio_bytes_ex(audio_bytes, mime_type="audio/mp4"):
             if not keys:
                 reasons.setdefault(model, "كل المفاتيح مقفولة/نفدت كوتاها لهذا الموديل")
 
-            for key_entry in keys:
+            down_groups = set()      # مجموعات مشاريع رجّعت 503 على هذا الموديل في هذه الجولة
+            hops_used = 0
+
+            for idx, key_entry in enumerate(keys):
                 key_str = key_entry.get("key")
                 key_name = key_entry.get("name", "Project")
+                group = _group_of(key_entry)
+                if down_groups and group in down_groups:
+                    continue         # شقيق في مشروع رجّع 503 الآن — بلا فايدة (نفس الحمل)
 
                 att = _attempt(model, key_str, payload, timeout)
                 info["attempts"] += 1
@@ -157,9 +175,19 @@ def transcribe_audio_bytes_ex(audio_bytes, mime_type="audio/mp4"):
                     reasons[model] = f"بطيء (Timeout بعد {int(att.elapsed)} ث)"
                     saw_transient = True
                 elif att.outcome == MODEL_DOWN:
-                    model_circuit.pause(model, Config.MODEL_PAUSE_ON_5XX, f"{att.status or '5xx'}")
-                    reasons[model] = f"Google مزدحمة ({att.status})"
                     saw_transient = True
+                    down_groups.add(group)
+                    # 04 §2.1: قبل قفل الموديل جرّب مفتاحاً من مشروع مختلف (حتى MODEL_503_KEY_HOPS)
+                    has_alt = any(_group_of(k) not in down_groups for k in keys[idx + 1:])
+                    if hops_used < max_hops and has_alt:
+                        hops_used += 1
+                        info["hops"] += 1
+                        reasons[model] = f"Google مزدحمة ({att.status}) — جرّبنا مشروعاً آخر"
+                        print(f"↪️ [{_short(model)}] 503 على [{key_name}] — قفزة {hops_used}/{max_hops} لمفتاح من مشروع آخر")
+                        continue
+                    # 04 §2.2: كل المشاريع المتاحة (حتى الحد) 503 → قفل متدرج 20/45/90/180
+                    locked = model_circuit.strike_5xx(model, ladder, str(att.status or "5xx"))
+                    reasons[model] = f"Google مزدحمة ({att.status}) — مقفول {_fmt_wait(locked)}"
                 elif att.outcome == MODEL_NOT_FOUND:
                     model_circuit.pause(model, Config.MODEL_PAUSE_ON_404, "404")
                     reasons[model] = "غير متاح لهذا المشروع (404)"
@@ -169,15 +197,16 @@ def transcribe_audio_bytes_ex(audio_bytes, mime_type="audio/mp4"):
                     reasons[model] = f"رجّع رداً فارغاً/محجوباً ({att.detail[:60]})"
                 break  # أي حالة من اللي فوق (أو غير متوقعة): لا تحرق مفاتيح تانية
 
-        # نهاية جولة: هل يستحق الأمر جولة تانية؟
+        # نهاية جولة: هل يستحق الأمر جولة تانية؟ (04 §2.3 — انتظار ذكي داخل الميزانية)
         if not saw_transient or rnd == rounds - 1:
             break
-        delay = _backoff(rnd)
-        print(f"⏳ كل الموديلات مزدحمة مؤقتاً — جولة {rnd + 2}/{rounds} بعد {delay} ث...")
-        time.sleep(delay)
-        # لو القواطع لسه مقفولة بعد الانتظار مفيش فايدة من جولة (هتتخطّى كلها)
-        if all(model_circuit.is_open(m) for m in Config.MODELS):
+        wait = _smart_wait(rnd, started, budget)
+        if wait is None:
+            print(f"⏳ ميزانية المحاولة ({int(budget)} ث) لا تكفي لانتظار فتح القاطع — تأجيل للطابور.")
             break
+        print(f"⏳ كل الموديلات مزدحمة مؤقتاً — جولة {rnd + 2}/{rounds} بعد {wait} ث (أقرب فتح قاطع)...")
+        time.sleep(wait)
+        info["waited"] += wait
 
     info["elapsed"] = round(time.time() - started, 1)
     msg = _final_message(reasons, last, tried_any=info["attempts"] > 0)
@@ -185,6 +214,29 @@ def transcribe_audio_bytes_ex(audio_bytes, mime_type="audio/mp4"):
     if wait_s:
         raise DeferredError(msg, wait_s=wait_s, kind=kind)
     raise RuntimeError(msg)
+
+
+def _group_of(key_entry):
+    """مجموعة مشروع المفتاح (04 §2.4) — تحمّل key_manager بدون الدالة (توافق) بأن يعتبر كل مفتاح مجموعة."""
+    fn = getattr(key_manager, "group_of", None)
+    if fn is None:
+        return "key:" + str(key_entry.get("key"))
+    return fn(key_entry)
+
+
+def _smart_wait(rnd, started, budget):
+    """
+    كم ننتظر قبل الجولة التالية؟ (04 §2.3)
+      wait = max(أقرب فتح قاطع, backoff[rnd])   — لا معنى لجولة والقواطع لسه مقفولة
+      لو wait يتجاوز المتبقي من RETRY_BUDGET_SECONDS → None (أوقف وأجّل في الطابور).
+    """
+    elapsed = time.time() - started
+    remaining_budget = budget - elapsed
+    earliest, _m = model_circuit.earliest_open(Config.MODELS)
+    wait = max(int(earliest or 0), int(_backoff(rnd)))
+    if wait <= 0 or wait > remaining_budget:
+        return None
+    return wait
 
 
 class DeferredError(RuntimeError):
@@ -201,9 +253,10 @@ class DeferredError(RuntimeError):
 
 def _deferral(reasons, tried_any):
     """(wait_s, kind) لو الفشل مؤقت ومعروف المدة، وإلا (0, None)."""
-    if reasons and all(model_circuit.is_open(m) for m in Config.MODELS):
+    if reasons and _all_models_blocked():
         wait, _m = model_circuit.earliest_open(Config.MODELS)
-        return max(1, int(wait or 0)), "model"
+        if wait:
+            return max(1, int(wait)), "model"
     if not tried_any:
         keys = key_manager.data.get("keys", [])
         if keys and all(k.get("status") == "invalid" for k in keys):
@@ -401,33 +454,48 @@ def _log_attempt(model, key_name, att):
     print(f"{icon} [{_short(model)}] [{key_name}] {att.outcome} في {att.elapsed:.1f} ث{extra}")
 
 
+def _all_models_blocked():
+    """كل موديل إمّا قاطعه مقفول أو لا مفتاح متاح له الآن — والقفل المؤقت موجود على واحد على الأقل."""
+    any_circuit = False
+    for m in Config.MODELS:
+        if model_circuit.is_open(m):
+            any_circuit = True
+            continue
+        if key_manager.get_active_keys(model=m):
+            return False
+    return any_circuit
+
+
+GEMINI_PREFIX = "🤖 Gemini: "     # 04 §4: تمييز مصدر الخطأ للمستخدم
+
+
 def _final_message(reasons, last, tried_any):
     parts = [f"{_short(m)}: {r}" for m, r in reasons.items()]
     detail = " · ".join(parts) if parts else (last.detail if last else "")
 
-    if reasons and all(model_circuit.is_open(m) for m in Config.MODELS):
+    if reasons and _all_models_blocked():
         wait, m = model_circuit.earliest_open(Config.MODELS)
         return (
-            f"⛔ Google مزدحمة على كل الموديلات حالياً. أقرب فتح: {_short(m)} بعد {_fmt_wait(wait)}. "
-            f"اكتب /reset لتجاوز الانتظار.\n({detail})"
+            f"{GEMINI_PREFIX}⏳ Google مزدحمة على كل الموديلات حالياً. أقرب فتح: {_short(m)} بعد {_fmt_wait(wait)}. "
+            f"هأعيد المحاولة تلقائياً (أو اكتب /reset لتجاوز الانتظار).\n({detail})"
         )
 
     if not tried_any:
         keys = key_manager.data.get("keys", [])
         if keys and all(k.get("status") == "invalid" for k in keys):
-            return "❌ كل المفاتيح مرفوضة من Google (مسرّبة/معطّلة). ابعت مفتاح جديد."
+            return f"{GEMINI_PREFIX}❌ كل المفاتيح مرفوضة من Google (مسرّبة/معطّلة). ابعت مفتاح جديد."
         wait = key_manager.earliest_availability()
         if wait:
             return (
-                f"كل المفاتيح في فترة تهدئة أو استنفدت كوتاها اليومية. "
+                f"{GEMINI_PREFIX}كل المفاتيح في فترة تهدئة أو استنفدت كوتاها اليومية. "
                 f"أقرب مفتاح يعود للعمل بعد {max(1, wait // 60)} دقيقة (تصفير الكوتا: {key_manager.next_reset_display()})."
                 + (f"\n({detail})" if detail else "")
             )
 
     if last and last.outcome == BLOCKED:
-        return f"🚫 الموديل رفض المحتوى أو رجّع رداً فارغاً ({last.detail}).\n({detail})"
+        return f"{GEMINI_PREFIX}🚫 الموديل رفض المحتوى أو رجّع رداً فارغاً ({last.detail}).\n({detail})"
 
-    return f"فشلت كافة المحاولات عبر جميع الموديلات والمفاتيح. {detail}"
+    return f"{GEMINI_PREFIX}فشلت كافة المحاولات عبر جميع الموديلات والمفاتيح. {detail}"
 
 
 # ======================================================================
