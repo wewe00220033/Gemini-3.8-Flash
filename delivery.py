@@ -59,6 +59,24 @@ def polished_message_html(polished_text, role_id, session_name=None):
     return head + "\n" + f"<pre>{html.escape(body)}</pre>"
 
 
+def prepare_for_web(raw_text, model=None, key_name=None, info=None):
+    """مسار الويب: القاموس (scope الخام) + أرشفة ALL.md. لا إرسال ولا تنظيم. يرجع (text, archived).
+    أي خطأ في القاموس/الأرشيف لا يُسقط التفريغ (نرجع النص كما هو)."""
+    info = info or {}
+    try:
+        raw, _gl = prepare_texts(raw_text)
+    except Exception as e:
+        print(f"⚠️ القاموس (ويب): {e}")
+        raw = raw_text
+    try:
+        archived = archive.append(raw, model=model, elapsed=info.get("elapsed"), key_name=key_name,
+                                  session_name=None)
+    except Exception as e:
+        print(f"⚠️ الأرشفة (ويب): {e}")
+        archived = False
+    return raw, archived
+
+
 def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn=None, glossary=None,
             session_name=None, footer_html=""):
     """

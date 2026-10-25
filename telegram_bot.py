@@ -380,9 +380,12 @@ def process_job(job):
         audio_bytes = job.meta.get("audio_bytes") or b""
         fn = job.meta.get("transcribe_fn") or transcribe_audio_bytes_ex
         text, model, key_name, info = fn(audio_bytes, job.mime_type)
-        jobs.record(job.job_id, "sent", model=model, key=str(key_name), elapsed=info.get("elapsed"), text=text[:2000])
+        # مرحلة 3: الويب يمر بالقاموس (هدف الخام) ويُؤرشف في ALL.md مثل تليجرام — بلا تنظيم (توفير حصة flash-lite)
+        text, archived = delivery.prepare_for_web(text, model=model, key_name=key_name, info=info)
+        jobs.record(job.job_id, "sent", model=model, key=str(key_name), elapsed=info.get("elapsed"),
+                    text=text[:2000], archived=archived)
         STATE["processed"] += 1
-        return {"text": text, "model": model, "key_name": key_name, "info": info}
+        return {"text": text, "model": model, "key_name": key_name, "info": info, "archived": archived}
 
     token = job.meta.get("token") or _runtime_token()
     chat_id, reply_to = job.chat_id, job.message_id
