@@ -173,14 +173,16 @@ def test_default_payload_keeps_prompt_as_text_part(engine, monkeypatch):
     monkeypatch.setattr(engine.Config, "TEMPERATURE", None)
     p = engine._build_payload("QUJD", "audio/ogg")
     assert "system_instruction" not in p and "generationConfig" not in p
-    assert p["contents"][0]["parts"][1]["text"] == engine.Config.SYSTEM_PROMPT
+    # المرحلة 3: طبقة A = SYSTEM_PROMPT + (سطر الدور + تلميح القاموس) — تبدأ دائماً بالقواعد الأساسية
+    assert p["contents"][0]["parts"][1]["text"] == engine.transcription_prompt()
+    assert p["contents"][0]["parts"][1]["text"].startswith(engine.Config.SYSTEM_PROMPT)
 
 
 def test_optional_system_instruction_and_temperature(engine, monkeypatch):
     monkeypatch.setattr(engine.Config, "USE_SYSTEM_INSTRUCTION", True)
     monkeypatch.setattr(engine.Config, "TEMPERATURE", 0.0)
     p = engine._build_payload("QUJD", "audio/ogg")
-    assert p["system_instruction"]["parts"][0]["text"] == engine.Config.SYSTEM_PROMPT
+    assert p["system_instruction"]["parts"][0]["text"] == engine.transcription_prompt()
     assert p["generationConfig"] == {"temperature": 0.0}
     assert p["contents"][0]["parts"][0]["inline_data"]["mime_type"] == "audio/ogg"
 

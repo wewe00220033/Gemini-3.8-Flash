@@ -20,3 +20,7 @@ state/
 *.corrupt-*
 data/
 .smoke_failover/
+glossary.json
+roles.json
+settings.json
+transcripts/
