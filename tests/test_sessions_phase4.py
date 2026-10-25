@@ -265,8 +265,9 @@ def test_context_disabled_globally(S, monkeypatch):
     assert S.context_block() == "" and S.context_mode() == "off"
 
 
-def test_backup_includes_sessions_dir(S):
+def test_backup_includes_sessions_dir(S, monkeypatch):
     import backup
+    monkeypatch.setattr(backup, "Config", S.Config)                        # backup يحمل مرجعاً قديماً بعد reload(config)
     S.start("ن")
     assert any(p.endswith("sessions") for p in backup.data_roots())
 
@@ -392,9 +393,11 @@ def _texts(sent):
 
 def _voice_job(uid):
     import voice_queue
+    import jobs
     msg = {"message_id": 5, "chat": {"id": 1}, "date": 1, "voice": {"file_id": "f" + uid, "file_unique_id": uid}}
     job = voice_queue.new_telegram_job("1", msg, "f" + uid, "audio/ogg", "voice")
     job.meta["token"] = "T"
+    jobs.record(job.job_id, "received", **job.journal_fields())            # ما يكتبه submit() عادة (للـ dedup)
     return job
 
 

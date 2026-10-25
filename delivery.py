@@ -154,8 +154,9 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
     if archive_entry and session_name:
         try:
             if sessions.needs_title_suggestion():
-                result["title_suggestion"] = sessions.propose_title(
-                    raw, generate_fn=(lambda sys_t, usr_t: (title_fn(raw), None)) if title_fn is not None else None)
+                # توفير: لو حصلنا على عنوان الفويس للتو نعيد استخدامه اقتراحاً للجلسة (نداء lite واحد لا اثنان)
+                gen = (lambda sys_t, usr_t: (result["title"], None)) if result["title"] else None
+                result["title_suggestion"] = sessions.propose_title(raw, generate_fn=gen)
         except Exception as e:  # pragma: no cover
             print(f"⚠️ اقتراح اسم الجلسة: {e}")
 
