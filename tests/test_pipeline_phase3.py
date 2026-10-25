@@ -94,8 +94,9 @@ def test_glossary_normalization_matches_variants_only(mods):
 def test_glossary_context_rules_skip(mods):
     g = mods[0].get_glossary()
     pol, n = g.apply("أوبس في ستوديو", target="polished")
-    # "ستوديو" ليست ضمن قواعد أوبس → يُستبدل؛ أما "فلاش لايت" فتُهمل بسبب "لايت"
-    assert "Opus" in pol
+    assert pol == "أوبس في ستوديو" and n == 0            # "ستوديو" ضمن قواعد أوبس → تخطٍ (OBS Studio)
+    pol, n = g.apply("جرّبت أوبس أمس", target="polished")
+    assert pol == "جرّبت Opus أمس" and n == 1
     pol2, n2 = g.apply("استخدمت فلاش لايت أمس", target="polished")
     assert pol2 == "استخدمت فلاش لايت أمس" and n2 == 0
     pol3, _ = g.apply("جرافيك كارت جديد", target="polished")
@@ -248,7 +249,7 @@ def test_polish_prompt_contains_role_and_golden_rule(mods):
 
 
 def test_transcription_prompt_reflects_role_and_glossary(mods):
-    glossary, settings = mods[0], mods[2]
+    settings = mods[2]
     import transcriber
     from config import Config
     settings.set_role("devops")
@@ -308,7 +309,7 @@ def test_archive_append_last_count_find_and_banner_once(mods):
     assert archive.append("ثاني نص", model="gemini-3.5-transcribe", elapsed=4.0)
     assert archive.count_entries() == 2
     last = archive.last()
-    assert last["raw"] == "ثاني نص" and "gemini-3.5-transcribe" in last["meta"] and last["polished"] is None
+    assert last["raw"] == "ثاني نص" and "3.5-transcribe" in last["meta"] and last["polished"] is None
     with open(archive.all_path(), encoding="utf-8") as f:
         content = f.read()
     assert content.count("Verbatim Transcription") == 1       # البانر مرة واحدة في الرأس
@@ -330,7 +331,9 @@ def test_archive_entry_header_format(mods):
     archive = mods[1]
     archive.append("نص", model="gemini-3.6-flash", elapsed=2.5, session_name="اجتماع")
     meta = archive.last()["meta"]
-    assert "🎙️" in meta and "اجتماع" in meta and "gemini-3.6-flash" in meta and "ث" in meta
+    assert "اجتماع" in meta and "3.6-flash" in meta and meta.endswith("ث")
+    with open(archive.all_path(), encoding="utf-8") as f:
+        assert "## 🎙️ " + meta in f.read()                 # ترويسة المدخل بصيغة 08 §1
 
 
 # =====================================================================
@@ -601,6 +604,8 @@ def test_cmd_add_word_and_glossary_and_del(bot, mods):
     tb.handle_text("T", "1", {"message_id": 1}, "/add_word كيوبرنتس = Kubernetes spelling")
     assert glossary.get_glossary().find("كيوبرنتس")["scope"] == "both"
     tb.handle_text("T", "1", {"message_id": 1}, "/glossary")
+    assert "صفحة 1/2" in _last_text(sent) and "g_001" in _last_text(sent)
+    tb.handle_text("T", "1", {"message_id": 1}, "/glossary 2")
     assert "Claude" in _last_text(sent)
     tb.handle_text("T", "1", {"message_id": 1}, f"/del_word {e['id']} confirm")
     assert glossary.get_glossary().find("كلود") is None

@@ -92,7 +92,7 @@ class Glossary:
     # ------------------------------------------------------------------
     def reload(self):
         with self._lock:
-            def _corrupt(path, err):
+            def _corrupt(path, dest, err):   # توقيع store.load_json_tolerant: (path, dest, err)
                 self.corrupt_notice = f"⚠️ glossary.json تالف ({err}) — حُمِّل القاموس الافتراضي (النسخة التالفة محفوظة بجانبه)."
                 print(self.corrupt_notice)
                 if self._on_corrupt:
