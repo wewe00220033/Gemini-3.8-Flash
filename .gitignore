@@ -19,3 +19,4 @@ state/
 *.ndjson
 *.corrupt-*
 data/
+.smoke_failover/
