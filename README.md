@@ -116,7 +116,7 @@ python main.py
 ## 🧪 الاختبارات والتطوير
 ```bash
 pip install -r requirements-dev.txt
-python -m pytest        # 181 اختبار (بلا شبكة: FakeTelegram + FakeClock)
+python -m pytest        # 182 اختبار (بلا شبكة: FakeTelegram + FakeClock)
 python -m pyflakes *.py
 ```
 CI يعمل تلقائياً على كل PR (Python 3.10 و 3.12). الاختبارات تعمل على Linux و Windows.

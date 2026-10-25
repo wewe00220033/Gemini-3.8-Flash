@@ -118,9 +118,21 @@ class Watchdog:
         self.emergency_until = 0.0
         self._last_restart_mono = None
         self.restarts = 0
+        self._started_mono = clock.monotonic()
 
     # ------------------------------------------------------------------
+    def _is_stalled(self, name, threshold, now):
+        """
+        خيط لم ينبض قط لا يُعد عالقاً إلا بعد مرور العتبة من بدء الـ watchdog (سباق الإقلاع:
+        الـ watchdog قد يفحص قبل أول نبضة للـ poller — اكتُشف في اختبار دخان حقيقي).
+        """
+        a = heartbeat.age(name)
+        if a is None:
+            return (now - self._started_mono) > threshold
+        return a > threshold
+
     def start(self):
+        self._started_mono = clock.monotonic()
         self._thread = threading.Thread(target=self._run, daemon=True, name="watchdog")
         self._thread.start()
         return self._thread
@@ -168,7 +180,7 @@ class Watchdog:
             self.level = L3_PROTECT
             self._record(L3_PROTECT, "انتهى short-poll الطوارئ — عودة لوضع الحماية")
 
-        stalled = [n for n in self.watch if heartbeat.is_stale(n, threshold)]
+        stalled = [n for n in self.watch if self._is_stalled(n, threshold, now)]
         if not stalled:
             # تعافٍ: لو مرّت النافذة كاملة بلا L1 جديد → إطفاء الحماية
             if self.level in (L3_PROTECT, L3B_EMERGENCY) and self.l1_in_window() == 0:

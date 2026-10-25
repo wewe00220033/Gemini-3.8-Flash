@@ -143,3 +143,13 @@ def test_watchdog_thread_runs_and_stops_without_zombies():
     w.stop()
     assert not w.is_alive() and threading.active_count() == before
     heartbeat.reset()
+
+
+def test_no_spurious_l1_before_first_beat_at_boot(fc):
+    """سباق الإقلاع (اكتُشف في اختبار دخان): لا نبض بعد ≠ عالق؛ يصبح عالقاً فقط بعد مرور العتبة من البدء."""
+    h = Harness()
+    assert h.w.check() is None and h.restarts == 0          # فحص فوري قبل أي نبضة
+    fc.advance(30)
+    assert h.w.check() is None and h.restarts == 0
+    fc.advance(30)                                           # 60 > 55 ولا نبضة قط → الآن عالق فعلاً
+    assert h.w.check() == wd.L1_POLLER_RESTART and h.restarts == 1
