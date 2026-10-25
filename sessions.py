@@ -631,6 +631,81 @@ def propose_title(raw_text, session_id=None, generate_fn=None):
     return title
 
 
+def suggest_titles(raw_text=None, n=None, session_id=None, generate_fn=None):
+    """
+    «🎲 3 اقتراحات» (08 §2) — عند الطلب فقط: n نداءات flash-lite نصية، كل اقتراح 2–4 كلمات، مُنقّى ومُزال التكرار.
+    raw_text=None → آخر نص خام في الجلسة. يرجع قائمة (قد تكون أقصر من n أو فارغة). لا يغيّر الفهرس.
+    """
+    n = n or Config.TITLE_SUGGESTIONS_N
+    with _lock:
+        sid = session_id or current_id()
+        s = _find(sid) if sid else None
+        if s is None:
+            return []
+        if raw_text is None:
+            ents = _entries_of(s["id"])
+            raw_text = ents[-1]["raw"] if ents else ""
+    words = (raw_text or "").split()[:Config.SMART_TITLE_WORDS]
+    if len(words) < 3:
+        return []
+    if generate_fn is None:
+        import text_assist
+        generate_fn = text_assist.generate
+    out, seen = [], {sanitize_name(s.get("name") or "").lower()}
+    for i in range(n):
+        system = ("اقترح عنواناً قصيراً (2 إلى 4 كلمات، بلا علامات ترقيم ولا أقواس ولا شرح) يلخّص موضوع هذا النص المفرغ "
+                  f"من فويس عربي. هذا الاقتراح رقم {i + 1}؛ اجعله مختلفاً في الصياغة عن: {', '.join(out) or 'لا شيء'}. أخرج العنوان فقط.")
+        try:
+            text, _reason = generate_fn(system, " ".join(words))
+        except Exception:
+            text = None
+        t = sanitize_name((text or "").strip().split("\n")[0].strip("«»\"'.:- "))
+        if not t or len(t.split()) > 6 or t.lower() in seen:
+            continue
+        seen.add(t.lower())
+        out.append(t)
+    return out
+
+
+def remember_title_options(options, session_id=None):
+    """يحفظ آخر اقتراحات «🎲» في الفهرس ليعمل /pick_title بعد إعادة التشغيل."""
+    with _lock:
+        sid = session_id or current_id()
+        s = _find(sid) if sid else None
+        if s is None:
+            return False
+        s["title_options"] = list(options or [])[:10]
+        _write_index()
+        return True
+
+
+def title_options(session_id=None):
+    s = get(session_id) if session_id else current()
+    return list((s or {}).get("title_options") or [])
+
+
+def pick_title(index_1based, session_id=None):
+    """يعتمد الاقتراح رقم n من آخر «🎲» (إعادة تسمية + مسح المعلّق والخيارات). يرجع الاسم أو None."""
+    opts = title_options(session_id)
+    try:
+        i = int(index_1based) - 1
+    except (TypeError, ValueError):
+        return None
+    if i < 0 or i >= len(opts):
+        return None
+    with _lock:
+        sid = session_id or current_id()
+    new_name = rename(opts[i], sid)
+    if not new_name:
+        return None
+    with _lock:
+        s2 = _find(sid)
+        if s2 is not None:
+            s2["title_options"] = []
+            _write_index()
+    return new_name
+
+
 def accept_pending_title(session_id=None):
     """قبول صامت (08 §2 قرار المالك أ): يعتمد الاقتراح المعلّق اسماً للجلسة. يرجع الاسم أو None."""
     with _lock:
