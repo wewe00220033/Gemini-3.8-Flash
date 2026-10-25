@@ -68,6 +68,23 @@ def fresh_env(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def _no_network_polish(monkeypatch):
+    """مرحلة 3: المساعد النصي (flash-lite) لا يلمس الشبكة في الاختبارات أبداً.
+    الافتراضي: تنظيم وهمي حتمي. اختبارات المرحلة 3 تستبدله صراحةً عند الحاجة (فشل/نجاح)."""
+    import text_assist
+
+    def _stub_polish(raw_text, role_id=None, glossary=None):
+        return ("[منظم-اختبار] " + raw_text, None)
+
+    def _no_post(*a, **k):
+        raise AssertionError("text_assist: network call in tests is forbidden")
+
+    monkeypatch.setattr(text_assist, "polish", _stub_polish)
+    monkeypatch.setattr(text_assist.requests, "post", _no_post)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _stop_unified_queue():
     """1b: لا نترك خيط transcribe-N حياً بين الاختبارات (الطابور الموحّد singleton في telegram_bot)."""
     yield

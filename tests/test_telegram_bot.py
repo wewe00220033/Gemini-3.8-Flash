@@ -310,8 +310,11 @@ def test_handle_audio_uses_ex_and_footer(bot, monkeypatch):
     job = voice_queue.new_telegram_job("1", _msg(), "fid", "audio/ogg", "voice")
     job.meta["token"] = "T"
     tb.process_job(job)
-    body = sent[-1]["payload"]["text"]
-    assert "النص" in body and "⏱ 6.4 ث" in body and tb.STATE["processed"] >= 1
+    # مرحلة 3: الخام يُرسل أولاً (مع التذييل) ثم المنظم رداً عليه — نبحث عن رسالة الخام لا آخر رسالة
+    bodies = [x["payload"].get("text", "") for x in sent if x["url"].endswith("sendMessage")]
+    raw_bodies = [b for b in bodies if "⏱ 6.4 ث" in b]
+    assert raw_bodies and "النص" in raw_bodies[0] and tb.STATE["processed"] >= 1
+    assert any("[منظم-اختبار]" in b for b in bodies)   # المنظم (stub) وصل أيضاً في الوضع المزدوج
 
 
 def test_status_includes_resilience_line(bot):
