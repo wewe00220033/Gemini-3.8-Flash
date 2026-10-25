@@ -195,7 +195,7 @@ class Config:
     SUPERVISOR_BACKOFF = (5, 10, 20, 60)            # ثوانٍ بين إعادات الإطلاق بعد crash متتالٍ
     SUPERVISOR_MAX_PER_HOUR = int(os.environ.get("SUPERVISOR_MAX_PER_HOUR", "20"))
     SUPERVISOR_BEAT_MAX = int(os.environ.get("SUPERVISOR_BEAT_MAX", "60"))      # ملف النبض أقدم من هذا = عامل متجمد
-    WORKER_BEAT_INTERVAL = 5                        # العامل يلمس state/worker.beat كل 5ث
+    WORKER_BEAT_INTERVAL = int(os.environ.get("WORKER_BEAT_INTERVAL", "5"))   # العامل يلمس state/worker.beat كل 5ث (المشرف يقرأ نفس المتغير)
     WORKER_BEAT_FILE = os.path.join(DATA_DIR, "state", "worker.beat")
     RESTART_REASON_FILE = os.path.join(DATA_DIR, "state", "restart_reason.json")
     EXIT_CODE_RESTART = 3                           # L4: "أعد تشغيلي" (المشرف يعيد فوراً بلا backoff)
