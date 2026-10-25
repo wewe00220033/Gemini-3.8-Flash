@@ -89,8 +89,13 @@ def transcribe_audio_bytes_ex(audio_bytes, mime_type="audio/mp4"):
     b64_data = base64.b64encode(audio_bytes).decode("utf-8")
     timeout = (Config.GEMINI_CONNECT_TIMEOUT, dynamic_read_timeout(len(audio_bytes)))
 
-    info = {"skipped": [], "attempts": 0, "elapsed": 0.0, "hops": 0, "waited": 0, "rounds": 0}
+    info = {"skipped": [], "attempts": 0, "elapsed": 0.0, "hops": 0, "waited": 0, "rounds": 0,
+            "context": "off", "strikes": 0}
     last = None              # آخر Attempt
+    # المرحلة 4 (10 §2-3): L1 من الجلسة النشطة داخل طبقة A؛ الضربات بسبب السياق فقط (BLOCKED/400/فارغ/صدى)
+    ctx = {"text": _session_context_text(), "strikes": 0}
+    info["context"] = "full" if ctx["text"] else _session_context_mode()
+    strikes_limit = int(getattr(Config, "CONTEXT_STRIKES_TO_SIMPLE", 2))
     reasons = {}             # model -> سبب الفشل الأخير (للرسالة النهائية)
     network_retries = 0
     budget = max(0, float(getattr(Config, "RETRY_BUDGET_SECONDS", 45)))
@@ -101,7 +106,50 @@ def transcribe_audio_bytes_ex(audio_bytes, mime_type="audio/mp4"):
         key_manager.record_success(key_str, model=model)
         model_circuit.mark_success(model)          # يصفّر عداد ضربات 5xx للموديل
         info["elapsed"] = round(time.time() - started, 1)
+        _session_record_success(used_context=bool(ctx["text"]))
         return att.text, model, key_name, info
+
+    def _try(model, key_str, key_name, payload):
+        att = _attempt(model, key_str, payload, timeout)
+        info["attempts"] += 1
+        model_circuit.record_attempt(model, key_name, att.outcome, att.elapsed)
+        _log_attempt(model, key_name, att)
+        return att
+
+    def _context_strike(reason):
+        """ضربة سياق (10 §3). عند بلوغ الحد → المحاولات التالية بسيطة (بلا L1؛ L0 يبقى)."""
+        ctx["strikes"] += 1
+        info["strikes"] = ctx["strikes"]
+        _session_record_strike(reason)
+        if ctx["strikes"] >= strikes_limit:
+            ctx["text"] = ""
+            info["context"] = "simple"
+            print(f"⚙️ ضربتا سياق ({reason}) — الوضع البسيط: إعادة بلا سياق الجلسة")
+
+    def _context_retry(model, key_str, key_name, att):
+        """
+        10 §3: فشل قد يسببه السياق (BLOCKED/BAD_REQUEST/صدى) بينما L1 محقون →
+        ضربة، ثم إعادة فورية بنفس المفتاح (بالسياق لو ضربة واحدة، بسيطة لو بلغنا الحد).
+        يرجع Attempt الأخير (قد يكون SUCCESS غير صدى → ينجح المنادي).
+        """
+        while ctx["text"] or att.outcome == SUCCESS:
+            is_echo = att.outcome == SUCCESS and ctx["text"] and _is_echo(att.text, ctx["text"])
+            if att.outcome == SUCCESS and not is_echo:
+                return att
+            if not ctx["text"]:
+                return att
+            if att.outcome not in (SUCCESS, BAD_REQUEST, BLOCKED):
+                return att                                   # 503/429/… ليست ضربات
+            _context_strike("echo" if is_echo else att.outcome)
+            att = _try(model, key_str, key_name, _build_payload(b64_data, mime_type, model, context_text=ctx["text"]))
+            last_holder[0] = att
+            if att.outcome == SUCCESS and not (ctx["text"] and _is_echo(att.text, ctx["text"])):
+                return att
+            if not ctx["text"]:
+                return att                                   # المحاولة البسيطة هي الأخيرة
+        return att
+
+    last_holder = [None]
 
     rounds = 1 + max(0, int(Config.TRANSIENT_RETRY_ROUNDS))   # سقف أمان؛ الميزانية الزمنية هي الحاكم الفعلي
     for rnd in range(rounds):
@@ -116,7 +164,7 @@ def transcribe_audio_bytes_ex(audio_bytes, mime_type="audio/mp4"):
                 reasons[model] = f"مزدحم ({reason}) — يفتح بعد {_fmt_wait(left)}"
                 continue
 
-            payload = _build_payload(b64_data, mime_type, model)
+            payload = _build_payload(b64_data, mime_type, model, context_text=ctx["text"])
             keys = key_manager.get_active_keys(model=model)
             if not keys:
                 reasons.setdefault(model, "كل المفاتيح مقفولة/نفدت كوتاها لهذا الموديل")
@@ -151,6 +199,10 @@ def transcribe_audio_bytes_ex(audio_bytes, mime_type="audio/mp4"):
                     if att.outcome == NETWORK:
                         raise RuntimeError(_NETWORK_MSG)
                     # لو الإعادة رجّعت نوع تاني من الخطأ نكمّل بالتصنيف الجديد أدناه
+
+                if ctx["text"] and att.outcome in (SUCCESS, BAD_REQUEST, BLOCKED):
+                    att = _context_retry(model, key_str, key_name, att)
+                    last = last_holder[0] or att
 
                 if att.outcome == SUCCESS:
                     return _done(att, model, key_str, key_name)
@@ -330,14 +382,17 @@ def classify_response(resp):
 # ======================================================================
 # بناء الطلب
 # ======================================================================
-def _build_payload(b64_data, mime_type, model=None):
+def _build_payload(b64_data, mime_type, model=None, context_text=""):
     """
     الوضع الافتراضي (المجرَّب): القواعد كجزء نصي بجانب الصوت.
     الوضع الاختياري (Config.USE_SYSTEM_INSTRUCTION): القواعد في system_instruction.
     thinkingConfig يُرسل فقط لو الموديل مذكور في Config.MODEL_THINKING_LEVEL (قرار المالك: فاضي).
+    context_text (المرحلة 4، 10 §2): L1 سياق الجلسة — يُلحق بطبقة A عند وجوده فقط؛ "" = الوضع البسيط.
     """
     audio_part = {"inline_data": {"mime_type": mime_type, "data": b64_data}}
     prompt = transcription_prompt()
+    if context_text:
+        prompt = prompt + "\n\n" + context_text
     if Config.USE_SYSTEM_INSTRUCTION:
         payload = {
             "system_instruction": {"parts": [{"text": prompt}]},
@@ -355,6 +410,54 @@ def _build_payload(b64_data, mime_type, model=None):
     if gen:
         payload["generationConfig"] = gen
     return payload
+
+
+def _session_context_text():
+    """L1 من الجلسة النشطة — '' عند التعطيل/لا جلسة/وضع saver (10 §5: saver يعطّل L1)."""
+    try:
+        if not getattr(Config, "CONTEXT_ENABLED", True):
+            return ""
+        if key_manager.quota_mode() == "saver":
+            return ""
+        import sessions
+        return sessions.context_prompt_text()
+    except Exception as e:  # pragma: no cover
+        print(f"⚠️ سياق الجلسة: {e} — بلا سياق")
+        return ""
+
+
+def _session_context_mode():
+    try:
+        import sessions
+        return sessions.context_mode()
+    except Exception:  # pragma: no cover
+        return "off"
+
+
+def _session_record_strike(reason):
+    try:
+        import sessions
+        sessions.record_strike(reason)
+    except Exception:  # pragma: no cover
+        pass
+
+
+def _session_record_success(used_context):
+    try:
+        import sessions
+        sessions.record_success(used_context)
+    except Exception:  # pragma: no cover
+        pass
+
+
+def _is_echo(text, l1_prompt_text):
+    """كشف صدى السياق (10 §3) — نقارن بجسم L1 فقط (بلا سطر التعليمات)."""
+    try:
+        import sessions
+        body = l1_prompt_text.split("\n", 1)[1] if "\n" in l1_prompt_text else l1_prompt_text
+        return sessions.is_context_echo(text, body)
+    except Exception:  # pragma: no cover
+        return False
 
 
 def transcription_prompt():
