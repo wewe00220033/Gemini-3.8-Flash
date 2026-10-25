@@ -190,6 +190,19 @@ class Config:
     # إيقاف رشيق عند SIGTERM (Pterodactyl): انتظار المهام الجارية ≤ هذه الثواني ثم خروج 0
     SHUTDOWN_GRACE = int(os.environ.get("SHUTDOWN_GRACE", "20"))
 
+    # --- الطبقة 4 (1c): Supervisor/Worker اختياري [قرار-مالك ج3] — SUPERVISED=0 افتراضياً ---
+    SUPERVISED = os.environ.get("SUPERVISED", "0").strip() in ("1", "true", "True")
+    SUPERVISOR_BACKOFF = (5, 10, 20, 60)            # ثوانٍ بين إعادات الإطلاق بعد crash متتالٍ
+    SUPERVISOR_MAX_PER_HOUR = int(os.environ.get("SUPERVISOR_MAX_PER_HOUR", "20"))
+    SUPERVISOR_BEAT_MAX = int(os.environ.get("SUPERVISOR_BEAT_MAX", "60"))      # ملف النبض أقدم من هذا = عامل متجمد
+    WORKER_BEAT_INTERVAL = int(os.environ.get("WORKER_BEAT_INTERVAL", "5"))   # العامل يلمس state/worker.beat كل 5ث (المشرف يقرأ نفس المتغير)
+    WORKER_BEAT_FILE = os.path.join(DATA_DIR, "state", "worker.beat")
+    RESTART_REASON_FILE = os.path.join(DATA_DIR, "state", "restart_reason.json")
+    EXIT_CODE_RESTART = 3                           # L4: "أعد تشغيلي" (المشرف يعيد فوراً بلا backoff)
+    EXIT_AFTER_RESTARTS = int(os.environ.get("EXIT_AFTER_RESTARTS", "6"))      # L4: 6 × L1 خلال النافذة
+    EXIT_WINDOW_MINUTES = int(os.environ.get("EXIT_WINDOW_MINUTES", "15"))
+    L4_STALL_SECONDS = int(os.environ.get("L4_STALL_SECONDS", "300"))          # أو stall > 5 د رغم L1
+
     # ------------------------------------------------------------------
     # طابور الفويسات + سجل المهام (03 §2.3/§3، 19 §2) — المرحلة 1b
     # ------------------------------------------------------------------

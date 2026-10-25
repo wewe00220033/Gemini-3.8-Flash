@@ -11,7 +11,8 @@ watchdog — خيط مراقبة مستقل لا يلمس الشبكة أبدا�
   L1  stall للـ poller            → restart_poller(): stop_event القديم + خيط poller جديد (صامت، يُسجَّل).
   L3  3 × L1 خلال 10 دقائق        → وضع الحماية: poll 10ث مستمر + إشعار واحد للمالك.
   L3b بعد L3 إن استمر stall       → short-poll طوارئ (timeout=0 كل 2ث) لدقيقتين ثم عودة لـ L3 (19 §1).
-  L4  (os._exit) فقط مع SUPERVISED=1 — المرحلة 1c؛ هنا نبقى في L3 ونُخطر.
+  L4  6 × L1 خلال 15 د أو stall > 5 د رغم L1 → request_exit(reason) (os._exit(3) بعد restart_reason.json)
+      — **فقط** لو مُرّر request_exit (SUPERVISED=1، 1c)؛ وإلا نبقى في L3 ونُخطر مرة واحدة.
 
 كل شيء قابل للحقن: clock (FakeClock)، heartbeat، دوال التشغيل. لا استيراد لـ requests.
 """
@@ -26,6 +27,7 @@ import heartbeat
 L1_POLLER_RESTART = "L1"
 L3_PROTECT = "L3"
 L3B_EMERGENCY = "L3b"
+L4_PROCESS_EXIT = "L4"
 
 
 class Notifier:
@@ -101,10 +103,13 @@ class Watchdog:
     """
 
     def __init__(self, restart_poller, stall_after, notifier=None, set_protect=None, set_emergency=None,
-                 interval=None, watch=("poller",)):
+                 interval=None, watch=("poller",), request_exit=None):
         self._restart_poller = restart_poller
         self._stall_after = stall_after
         self._notifier = notifier
+        self._request_exit = request_exit            # L4: None = غير مسلّح (SUPERVISED=0)
+        self.l4_requested = False
+        self.l4_unarmed_notified = False
         self._set_protect = set_protect or (lambda on: None)
         self._set_emergency = set_emergency or (lambda on: None)
         self.interval = interval or Config.WATCHDOG_INTERVAL
@@ -208,6 +213,26 @@ class Watchdog:
         self._record(L1_POLLER_RESTART, f"{detail} → poller جديد {'✅' if restarted else '❌'}")
         heartbeat.beat("poller", note="L1 restart grace")   # نبض وكيل حتى يبدأ الخيط الجديد
 
+        # ---- L4 (1c) ----
+        l4 = self._l4_reason(now)
+        if l4:
+            if self._request_exit is not None and not self.l4_requested:
+                self.l4_requested = True
+                self._record(L4_PROCESS_EXIT, f"{l4} → طلب إعادة تشغيل العملية (SUPERVISED=1)")
+                try:
+                    self._request_exit(l4)
+                except Exception as e:
+                    self._record(L4_PROCESS_EXIT, f"فشل request_exit: {type(e).__name__}: {e}")
+                return L4_PROCESS_EXIT
+            if self._request_exit is None and not self.l4_unarmed_notified:
+                self.l4_unarmed_notified = True
+                self._record(L3_PROTECT, f"{l4} — L4 غير مفعّل (SUPERVISED=0): أبقى في الحماية وأُخطر المالك")
+                if self._notifier:
+                    self._notifier.notify(
+                        f"🧊 الاستقبال متعثر رغم كل المحاولات الداخلية ({l4}). أنا في وضع الحماية وسأكمل المحاولة. "
+                        f"لو تكرر هذا: فعّل SUPERVISED=1 ليعيد المشرف تشغيل العملية تلقائياً."
+                    )
+
         # ---- L3 / L3b ----
         n = self.l1_in_window()
         if n >= Config.PROTECT_AFTER_RESTARTS:
@@ -231,9 +256,36 @@ class Watchdog:
                 return L3B_EMERGENCY
         return L1_POLLER_RESTART
 
+    def _l4_reason(self, now):
+        """شرط L4 (03b §3): EXIT_AFTER_RESTARTS × L1 خلال EXIT_WINDOW_MINUTES، أو stall مستمر > L4_STALL_SECONDS رغم L1."""
+        window = Config.EXIT_WINDOW_MINUTES * 60
+        n = sum(1 for t in self._l1_times if now - t <= window)
+        if n >= Config.EXIT_AFTER_RESTARTS:
+            return f"{n} × L1 خلال {Config.EXIT_WINDOW_MINUTES} د"
+        first = self._first_l1_of_current_streak()
+        if first is not None and n >= 2 and now - first > Config.L4_STALL_SECONDS:
+            return f"stall مستمر {int(now - first)}ث رغم {n} × L1"
+        return None
+
+    def _first_l1_of_current_streak(self):
+        """أول L1 في سلسلة متصلة (فجوات ≤ ضعف العتبة) تنتهي بآخر L1 — تقدير لمدة الـ stall المستمر."""
+        if not self._l1_times:
+            return None
+        gap = max(60.0, 2 * float(self._stall_after()))
+        times = list(self._l1_times)
+        first = times[-1]
+        for t in reversed(times[:-1]):
+            if first - t <= gap:
+                first = t
+            else:
+                break
+        return first
+
     def snapshot(self):
         return {
             "level": self.level,
+            "l4_requested": self.l4_requested,
+            "l4_armed": self._request_exit is not None,
             "restarts": self.restarts,
             "l1_in_window": self.l1_in_window(),
             "emergency_remaining_s": max(0, int(self.emergency_until - clock.monotonic())) if self.level == L3B_EMERGENCY else 0,

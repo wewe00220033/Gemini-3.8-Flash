@@ -109,10 +109,14 @@ def run_preflight(key_manager, model_circuit=None, web_port=None, web_error=None
     # 6) القاطع
     if model_circuit is not None:
         try:
-            snap = model_circuit.snapshot(Config.MODELS)
-            paused = [m for m, st in snap.items() if isinstance(st, dict) and st.get("paused")]
+            snap = model_circuit.snapshot(Config.MODELS)      # list[{"model","paused","reason",...}]
+            if isinstance(snap, dict):                          # توافق لو تغيّرت الصيغة يوماً
+                snap = [dict(v, model=k) for k, v in snap.items() if isinstance(v, dict)]
+            paused = [x["model"].replace("gemini-", "") for x in snap if x.get("paused")]
             details["circuit"] = {"ok": not paused, "text": "circuit clear" if not paused else f"circuit paused {','.join(paused)}"}
-        except Exception:
+        except Exception as e:
+            # لا نبتلع بصمت: نطبع السبب (كان يطبع "circuit ?" دائماً بسبب .items() على list)
+            print(f"⚠️ preflight circuit check failed: {type(e).__name__}: {e}")
             details["circuit"] = {"ok": True, "text": "circuit ?"}
 
     all_ok = all(d["ok"] for d in details.values())

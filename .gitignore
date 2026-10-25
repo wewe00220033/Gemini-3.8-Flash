@@ -13,3 +13,9 @@ __pycache__/
 # OS generated files
 .DS_Store
 Thumbs.db
+
+# Runtime state (jobs journal, resume data) — never commit (ghost-job trap: a stale line gets resumed at boot)
+state/
+*.ndjson
+*.corrupt-*
+data/

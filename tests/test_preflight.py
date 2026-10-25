@@ -52,3 +52,28 @@ def test_preflight_flags_failures_without_raising(pf, monkeypatch, tmp_path):
     assert details["web"]["ok"] is False and "FAIL" in details["web"]["text"]
     assert details["data_dir"]["ok"] is False and "RO" in details["data_dir"]["text"]
     assert "❌" in line
+
+
+def test_preflight_circuit_clear_and_paused_use_real_snapshot_list(pf, monkeypatch):
+    """صيد المالك: snapshot() ترجع list؛ القديم استدعى .items() → AttributeError مبتلع → 'circuit ?' دائماً."""
+    import model_state
+    preflight, km = pf
+    km.add_key(VALID, "A")
+    monkeypatch.setattr(km, "get_telegram_config", lambda: ("1:t", "", "77"))
+    mc = model_state.model_circuit
+    ok, line, details = preflight.run_preflight(km, model_circuit=mc, web_port=8080)
+    assert details["circuit"]["text"] == "circuit clear" and "circuit ?" not in line and ok is True
+    mc.pause(preflight.Config.MODELS[0], 120, reason="503")
+    ok, line, details = preflight.run_preflight(km, model_circuit=mc, web_port=8080)
+    assert details["circuit"]["ok"] is False and "circuit paused" in line and "circuit ?" not in line
+
+
+def test_preflight_circuit_failure_is_logged_not_silent(pf, monkeypatch, capsys):
+    preflight, km = pf
+
+    class Broken:
+        def snapshot(self, models):
+            raise RuntimeError("boom")
+
+    _, line, details = preflight.run_preflight(km, model_circuit=Broken())
+    assert details["circuit"]["text"] == "circuit ?" and "preflight circuit check failed: RuntimeError: boom" in capsys.readouterr().out
