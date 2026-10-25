@@ -159,8 +159,32 @@ class Config:
     BOT_WORKERS = int(os.environ.get("BOT_WORKERS", "2"))
     # إشعار على تليجرام عند بدء التشغيل (يفيد لمعرفة إعادة تشغيل الاستضافة)
     NOTIFY_ON_START = os.environ.get("NOTIFY_ON_START", "1") not in ("0", "false", "False", "")
-    # Watchdog: كل كم ثانية يفحص أن البوت والويب أحياء ويعيد تشغيلهما
-    WATCHDOG_INTERVAL = int(os.environ.get("WATCHDOG_INTERVAL", "30"))
+    # Watchdog (03b الطبقة 3): خيط مستقل لا يلمس الشبكة، يفحص كل 10ث (لا 30).
+    WATCHDOG_INTERVAL = int(os.environ.get("WATCHDOG_INTERVAL", "10"))
+
+    # ------------------------------------------------------------------
+    # شبكة تليجرام والتعافي الذاتي (03b الطبقات 0.5–3) — المرحلة 1a
+    # ------------------------------------------------------------------
+    # مهلات tuples: (فتح الاتصال، القراءة). القراءة للـ long-poll = TG_POLL_TIMEOUT + TG_READ_MARGIN.
+    TG_CONNECT_TIMEOUT = int(os.environ.get("TG_CONNECT_TIMEOUT", "10"))
+    TG_POLL_TIMEOUT = int(os.environ.get("TG_POLL_TIMEOUT", "30"))
+    TG_READ_MARGIN = int(os.environ.get("TG_READ_MARGIN", "10"))
+    # وضع الحذر: بعد أي ReadTimeout يهبط long-poll إلى 10ث لمدة 5 دقائق ثم يعود (اكتشاف أسرع للتجمد).
+    TG_POLL_TIMEOUT_CAUTIOUS = int(os.environ.get("TG_POLL_TIMEOUT_CAUTIOUS", "10"))
+    CAUTIOUS_MODE_MINUTES = int(os.environ.get("CAUTIOUS_MODE_MINUTES", "5"))
+    # TCP keepalive على socket الـ poller (يكشف half-open خلال ~50ث؛ Linux فقط، يُتجاهل بأمان على غيره)
+    TCP_KEEPALIVE = os.environ.get("TCP_KEEPALIVE", "1") not in ("0", "false", "False", "")
+    # backoff أُسّي لأخطاء الشبكة المتتالية (DNS/ConnectionError) بدل 3ث ثابتة
+    NET_BACKOFF = (3, 6, 12, 30)
+    # stall للـ poller = poll + margin + STALL_MARGIN (≈55ث عادي، ≈35ث في وضع الحذر)
+    STALL_MARGIN = int(os.environ.get("STALL_MARGIN", "15"))
+    # سلم التصعيد: L3 وضع الحماية بعد N إعادة poller خلال نافذة؛ L3b short-poll طوارئ دقيقتين
+    PROTECT_AFTER_RESTARTS = int(os.environ.get("PROTECT_AFTER_RESTARTS", "3"))
+    PROTECT_WINDOW_MINUTES = int(os.environ.get("PROTECT_WINDOW_MINUTES", "10"))
+    EMERGENCY_SHORT_POLL_SECONDS = int(os.environ.get("EMERGENCY_SHORT_POLL_SECONDS", "120"))
+    EMERGENCY_SHORT_POLL_INTERVAL = 2
+    # إيقاف رشيق عند SIGTERM (Pterodactyl): انتظار المهام الجارية ≤ هذه الثواني ثم خروج 0
+    SHUTDOWN_GRACE = int(os.environ.get("SHUTDOWN_GRACE", "20"))
     # /health العميق (G26، 03b §3): يرجع 503 لو أي خيط حيوي لم ينبض خلال هذه المدة.
     # يُحسب افتراضياً من مهلة polling + هامش القراءة + 15 (≈55ث) — لا 90 ولا 120.
     HEALTH_STALE_AFTER = int(os.environ.get("HEALTH_STALE_AFTER", "55"))
