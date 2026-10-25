@@ -20,6 +20,7 @@ import archive
 import settings
 import prompts
 import glossary as glossary_mod
+import sessions
 
 
 class Sender:
@@ -37,15 +38,26 @@ def prepare_texts(raw_text, glossary=None):
     return raw, gl
 
 
-def raw_message_html(raw_text, footer_html=""):
-    """<pre>البانر(اختياري)+النص</pre> + التذييل — البانر داخل كتلة النسخ (06 §4 قرار المالك)."""
+def raw_message_html(raw_text, footer_html="", title=None, session_name=None):
+    """<pre>البانر(اختياري)+النص</pre> + التذييل — البانر داخل كتلة النسخ (06 §4 قرار المالك).
+    المرحلة 4: سطر ترويسة اختياري فوق الكتلة «🏷️ العنوان · 📂 الجلسة» (خارج كتلة النسخ حتى لا يلوّث النص)."""
     body = raw_text
     if settings.header_for("raw"):
         body = archive.banner_text() + "\n" + raw_text
-    out = f"<pre>{html.escape(body)}</pre>"
+    head = _entry_head_html(title, session_name)
+    out = (head + "\n" if head else "") + f"<pre>{html.escape(body)}</pre>"
     if footer_html:
         out += "\n" + footer_html
     return out
+
+
+def _entry_head_html(title, session_name):
+    parts = []
+    if title:
+        parts.append(f"🏷️ <b>{html.escape(title)}</b>")
+    if session_name:
+        parts.append(f"📂 {html.escape(session_name)}")
+    return " · ".join(parts)
 
 
 def polished_message_html(polished_text, role_id, session_name=None):
@@ -68,35 +80,85 @@ def prepare_for_web(raw_text, model=None, key_name=None, info=None):
     except Exception as e:
         print(f"⚠️ القاموس (ويب): {e}")
         raw = raw_text
+    session_name = _safe_session_name()
     try:
         archived = archive.append(raw, model=model, elapsed=info.get("elapsed"), key_name=key_name,
-                                  session_name=None)
+                                  session_name=session_name)
     except Exception as e:
         print(f"⚠️ الأرشفة (ويب): {e}")
         archived = False
+    if session_name:
+        sessions.append_entry(raw, model=model, elapsed=info.get("elapsed"), key_name=key_name)
     return raw, archived
 
 
+def _safe_session_name():
+    try:
+        return sessions.current_name()
+    except Exception as e:  # pragma: no cover
+        print(f"⚠️ الجلسات: {e}")
+        return None
+
+
+def _voice_title(raw, title_fn):
+    """عنوان ذكي للفويس (08 §3) — نصي فقط، بعد إرسال الخام لا قبله. أي فشل → None."""
+    try:
+        fn = title_fn if title_fn is not None else sessions.voice_title
+        return fn(raw)
+    except Exception as e:  # pragma: no cover
+        print(f"⚠️ التسمية: {e}")
+        return None
+
+
 def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn=None, glossary=None,
-            session_name=None, footer_html=""):
+            session_name=None, footer_html="", archive_entry=True, title_fn=None):
     """
-    ينفّذ خط الإنتاج كاملاً. يرجع قاموساً: {raw, polished, raw_msg_id, polished_msg_id, mode, archived, polish_error}.
+    ينفّذ خط الإنتاج كاملاً. يرجع قاموساً: {raw, polished, raw_msg_id, polished_msg_id, mode, archived, polish_error,
+    role, session, title, session_written, title_suggestion}.
     polish_fn(raw_text, role_id, glossary) -> (text|None, reason) — افتراضياً text_assist.polish (يُحقن في الاختبارات).
+    title_fn(raw) -> str|None — عنوان الفويس (افتراضياً sessions.voice_title عبر flash-lite؛ يُحقن في الاختبارات).
+    session_name: لو None تُستخدم الجلسة النشطة تلقائياً (المرحلة 4 — كتابة مزدوجة ALL.md + session_<id>.md).
     """
     mode = settings.delivery_mode()
     role_id = settings.role()
     raw, gl = prepare_texts(raw_text, glossary)
+    if session_name is None:
+        session_name = _safe_session_name()
     result = {"raw": raw, "polished": None, "raw_msg_id": None, "polished_msg_id": None, "mode": mode,
-              "archived": False, "polish_error": None, "role": role_id}
+              "archived": False, "polish_error": None, "role": role_id, "session": session_name, "title": None,
+              "session_written": False, "title_suggestion": None}
 
-    # 2) أرشفة قبل أي إرسال (outbox)
-    result["archived"] = archive.append(raw, model=model, elapsed=(info or {}).get("elapsed"), key_name=key_name,
-                                        session_name=session_name)
+    # 2) أرشفة قبل أي إرسال (outbox) — archive_entry=False للمكرر (dedup): سبق أرشفته
+    if archive_entry:
+        result["archived"] = archive.append(raw, model=model, elapsed=(info or {}).get("elapsed"), key_name=key_name,
+                                            session_name=session_name)
+        if session_name:
+            result["session_written"] = sessions.append_entry(raw, model=model, elapsed=(info or {}).get("elapsed"),
+                                                              key_name=key_name)
+
+    # 2b) عنوان الفويس (08 §3) — نصي؛ لا يؤخر الخام إلا بنداء lite واحد قصير؛ يُسجَّل append-only في الملفين
+    if archive_entry and Config.SMART_TITLE_ENABLED:
+        result["title"] = _voice_title(raw, title_fn)
+        if result["title"]:
+            archive.append_title(result["title"])
+            if session_name:
+                sessions.append_title(result["title"])
 
     # 3) الخام
     if mode in ("dual", "raw_only"):
-        result["raw_msg_id"] = _send_long(sender, raw_message_html(raw, footer_html), raw, reply_to_id,
+        result["raw_msg_id"] = _send_long(sender, raw_message_html(raw, footer_html, result["title"], session_name),
+                                          raw, reply_to_id,
                                           filename_prefix="transcript", caption="📄 التفريغ الخام (طويل → ملف)")
+
+    # 3b) اقتراح اسم الجلسة (08 §2): أول فويس في جلسة باسمها المؤقت → اقتراح معلّق (قبول صامت عند الفويس التالي)
+    if archive_entry and session_name:
+        try:
+            if sessions.needs_title_suggestion():
+                # توفير: لو حصلنا على عنوان الفويس للتو نعيد استخدامه اقتراحاً للجلسة (نداء lite واحد لا اثنان)
+                gen = (lambda sys_t, usr_t: (result["title"], None)) if result["title"] else None
+                result["title_suggestion"] = sessions.propose_title(raw, generate_fn=gen)
+        except Exception as e:  # pragma: no cover
+            print(f"⚠️ اقتراح اسم الجلسة: {e}")
 
     # 4) المنظم
     if mode in ("dual", "polished_only"):
@@ -110,7 +172,10 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
         anchor = result["raw_msg_id"] or reply_to_id
         if polished:
             result["polished"] = polished
-            archive.append_polished(polished)
+            if archive_entry:
+                archive.append_polished(polished)
+                if session_name:
+                    sessions.append_polished(polished)
             result["polished_msg_id"] = _send_long(sender, polished_message_html(polished, role_id, session_name),
                                                    polished, anchor, filename_prefix="polished",
                                                    caption="📝 النسخة المنظمة (طويلة → ملف)")

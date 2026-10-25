@@ -45,8 +45,12 @@ def fresh_env(monkeypatch, tmp_path):
     monkeypatch.setattr(config.Config, "GLOSSARY_FILE", str(tmp_path / "glossary.json"))
     monkeypatch.setattr(config.Config, "ROLES_FILE", str(tmp_path / "roles.json"))
     monkeypatch.setattr(config.Config, "SETTINGS_FILE", str(tmp_path / "settings.json"))
+    # مرحلة 4: الجلسات في المجلد المؤقت + تصفير كاش الجلسة النشطة
+    monkeypatch.setattr(config.Config, "SESSIONS_DIR", str(tmp_path / "sessions"))
+    monkeypatch.setattr(config.Config, "SESSIONS_INDEX_FILE", str(tmp_path / "sessions" / "sessions_index.json"))
+    monkeypatch.setattr(config.Config, "CURRENT_SESSION_FILE", str(tmp_path / "sessions" / "current_session.json"))
     # هذه الوحدات تحمل مرجعها الخاص لـ Config (from config import Config) — بعد reload(config) يصبح قديماً
-    for mod_name in ("glossary", "archive", "settings", "prompts", "text_assist", "transcriber"):
+    for mod_name in ("glossary", "archive", "settings", "prompts", "text_assist", "transcriber", "sessions", "delivery"):
         mod = sys.modules.get(mod_name)
         if mod is not None and hasattr(mod, "Config"):
             monkeypatch.setattr(mod, "Config", config.Config)
@@ -57,6 +61,9 @@ def fresh_env(monkeypatch, tmp_path):
     gl = sys.modules.get("glossary")
     if gl is not None:
         gl._singleton = None
+    ss = sys.modules.get("sessions")
+    if ss is not None:
+        ss.reset_cache()
     import key_manager
     importlib.reload(key_manager)
     # قاطع الموديلات singleton مشترك بين الوحدات — نبدأ كل اختبار بقواطع مفتوحة وبلا حفظ على القرص
@@ -81,6 +88,12 @@ def _no_network_polish(monkeypatch):
 
     monkeypatch.setattr(text_assist, "polish", _stub_polish)
     monkeypatch.setattr(text_assist.requests, "post", _no_post)
+    # مرحلة 4: التسمية الذكية (flash-lite نصياً) بلا شبكة أيضاً — عنوان حتمي قصير
+    try:
+        import sessions
+        monkeypatch.setattr(sessions, "voice_title", lambda raw, generate_fn=None: "عنوان-اختبار")
+    except ImportError:  # pragma: no cover
+        pass
     yield
 
 

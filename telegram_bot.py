@@ -28,6 +28,7 @@ import archive
 import settings
 import prompts
 import delivery
+import sessions
 import glossary as glossary_mod
 
 if sys.platform == "win32":
@@ -391,14 +392,21 @@ def process_job(job):
     chat_id, reply_to = job.chat_id, job.message_id
     cached = jobs.find_recent_result(job.file_unique_id) if job.file_unique_id else None
     if cached:
+        # مراجعة م3: المكرر يمر على خط الإنتاج نفسه (بانر/وضع/قاموس) — بلا تنظيم جديد لو المنظم محفوظ، وبلا أرشفة ثانية
         print(f"♻️ نفس الملف فُرِّغ قبل قليل — إعادة إرسال النتيجة المحفوظة ({job.job_id})")
-        send_transcript(token, chat_id, cached["text"], cached.get("model") or "cache", cached.get("key") or "cache",
-                        reply_to_id=reply_to, info={"elapsed": cached.get("elapsed")})
+        c_model, c_key = cached.get("model") or "cache", cached.get("key") or "cache"
+        c_info = {"elapsed": cached.get("elapsed")}
+        cached_polished = cached.get("polished_text")
+        polish_fn = (lambda raw, role, gl: (cached_polished, None)) if cached_polished else None
+        res = delivery.deliver(cached["text"], c_model, c_key, c_info, make_sender(token, chat_id), reply_to_id=reply_to,
+                               polish_fn=polish_fn, footer_html=_footer(c_model, c_key, c_info) + " · ♻️ مكرر",
+                               archive_entry=False)
         jobs.record(job.job_id, "sent", dedup_of=cached.get("job_id"), text=cached["text"][:2000],
-                    model=cached.get("model"), key=cached.get("key"))
+                    model=cached.get("model"), key=cached.get("key"), mode=res["mode"],
+                    polished=bool(res["polished"]), polished_text=(res["polished"] or "")[:2000] or None)
         if QUEUE:
             QUEUE.stats["deduped"] += 1
-        return {"text": cached["text"], "dedup": True}
+        return {"text": cached["text"], "dedup": True, "polished": res["polished"]}
 
     print(f"🎙️ بدء تفريغ ({job.label}) من {chat_id} [{job.source}:{job.job_id}]...")
     with ProgressKeeper(token, chat_id, reply_to_id=reply_to):
@@ -407,14 +415,24 @@ def process_job(job):
         text, model, key_name, info = transcribe_audio_bytes_ex(audio_bytes, job.mime_type)
     jobs.record(job.job_id, "transcribed", model=model, key=str(key_name), elapsed=info.get("elapsed"))
     print(f"✅ تم التفريغ عبر [{model}] بالمفتاح [{key_name}] في {info.get('elapsed')} ث: {text[:40]}...")
+    # المرحلة 4 (08 §2 قرار المالك أ): فويس جديد دون رد على الاقتراح = قبول صامت لاسم الجلسة المقترح
+    accepted = sessions.accept_pending_title()
+    if accepted:
+        print(f"📛 اعتُمد اسم الجلسة صامتاً: «{accepted}»")
     # المرحلة 3: قاموس → أرشفة (قبل الإرسال) → الخام → المنظم (07)
     res = delivery.deliver(text, model, key_name, info, make_sender(token, chat_id), reply_to_id=reply_to,
-                           footer_html=_footer(model, key_name, info))
+                           footer_html=_footer(model, key_name, info) + _context_footer(info))
     text = res["raw"]
+    if res.get("title_suggestion"):
+        send_telegram_message(token, chat_id,
+                              f"📛 اسم مقترح للجلسة: «{res['title_suggestion']}»\n"
+                              f"✅ يُعتمد تلقائياً مع الفويس القادم · ✏️ /rename_session <اسم> لتغييره · ❌ /reject_title لرفضه",
+                              reply_to_id=res.get("raw_msg_id") or reply_to)
     ok = bool(res["raw_msg_id"] or res["polished_msg_id"])
     if ok:
         jobs.record(job.job_id, "sent", model=model, key=str(key_name), elapsed=info.get("elapsed"), text=text[:2000],
-                    polished=bool(res["polished"]), mode=res["mode"])
+                    polished=bool(res["polished"]), mode=res["mode"],
+                    polished_text=(res["polished"] or "")[:2000] or None)   # للمكرر: لا نداء flash-lite ثانٍ
     else:
         jobs.record(job.job_id, "failed", error="send failed (archived — /last)", model=model)
     if res["polish_error"]:
@@ -610,6 +628,8 @@ def _help_text():
         "/glossary — القاموس · /add_word شلبي = ChatGPT · /del_word <id|لفظ> · /confirm_word <id> = المقصود · /glossary_export\n"
         "/last — إعادة إرسال آخر تفريغ من الأرشيف · /find <كلمة> — بحث في الأرشيف · /polish (رد على تفريغ) — تنظيم عند الطلب\n"
         "/header [both|raw|polished|off] — بانر «تفريغ آلي» فوق النص\n"
+        "/new_session [اسم] · /end · /sessions · /resume <id> · /rename_session <اسم> · /export [id] · /merge_sessions <id1> <id2> — الجلسات (كل فويس يُكتب في الجلسة وفي ALL.md)\n"
+        "/context [on|off] — سياق الفويسات السابقة داخل الجلسة (يسقط تلقائياً بعد ضربتين) · /stats — إحصاء\n"
         "/project_group <مفتاح> <مجموعة> — مفاتيح نفس مشروع Google تتشارك الحصة (والقفز عند 503 لمشروع آخر). اكتب - للإزالة\n"
         "/backup — نسخة احتياطية (أرشيف+جلسات+إعدادات) بلا أسرار\n"
         "/backup_secrets — نسخة keys.json بتأكيد صريح\n"
@@ -647,6 +667,23 @@ def _resilience_text():
         else f"حذر ({int(netsession.cautious.remaining_s())}ث)" if netsession.cautious.active() else "طبيعي"
     return (f"🛡️ التعافي الذاتي: الوضع {mode} | poller #{STATE['poller_generation']} | "
             f"أخطاء شبكة {STATE['net_errors']} (ReadTimeout {STATE['read_timeouts']}) | مهام جارية {queue_in_flight()}")
+
+
+def _context_footer(info):
+    """وسم 10 §3: «⚙️ تم التفريغ بالوضع البسيط» لو سقط السياق بعد ضربتين."""
+    if (info or {}).get("context") == "simple" and (info or {}).get("strikes"):
+        return " · ⚙️ بسيط (بلا سياق)"
+    return ""
+
+
+def _sessions_text():
+    """سطر الجلسات في /status (المرحلة 4): الجلسة النشطة + وضع السياق (10 §7.5)."""
+    cur = sessions.current()
+    if not cur:
+        return "📂 الجلسات: لا جلسة نشطة (الفويسات في ALL.md فقط) — /new_session لبدء واحدة"
+    extra = f" · ضربات {cur.get('strikes')}" if cur.get("strikes") else ""
+    pend = f" · اقتراح معلّق «{cur['pending_title']}»" if cur.get("pending_title") else ""
+    return f"📂 الجلسة النشطة: «{cur['name']}» [{cur['id']}] — {cur.get('count', 0)} فويس · السياق: {sessions.context_mode()}{extra}{pend}"
 
 
 def _pipeline_text():
@@ -741,7 +778,7 @@ def handle_text(token, chat_id, msg, msg_text):
     args = parts[1:]
 
     if cmd in ("/status", "حالة", "المفاتيح"):
-        send_telegram_message(token, chat_id, key_manager.get_status_summary() + "\n" + _models_state_text() + "\n" + _resilience_text() + "\n" + _pipeline_text(), reply_to_id=msg["message_id"])
+        send_telegram_message(token, chat_id, key_manager.get_status_summary() + "\n" + _models_state_text() + "\n" + _resilience_text() + "\n" + _pipeline_text() + "\n" + _sessions_text(), reply_to_id=msg["message_id"])
 
     elif cmd == "/reset":
         n = model_circuit.reset()
@@ -769,6 +806,91 @@ def handle_text(token, chat_id, msg, msg_text):
             send_telegram_message(token, chat_id, f"✏️ تمت إعادة التسمية إلى [{entry.get('name')}].", reply_to_id=msg["message_id"])
         else:
             send_telegram_message(token, chat_id, "لم أجد مفتاحاً بهذا الاسم. جرّب /keys.", reply_to_id=msg["message_id"])
+
+    # ---------------- المرحلة 4: الجلسات (08) + السياق (10) ----------------
+    elif cmd == "/sessions":
+        page = int(args[0]) if args and args[0].isdigit() else 1
+        send_telegram_message(token, chat_id, sessions.list_text(page), reply_to_id=msg["message_id"])
+
+    elif cmd == "/new_session":
+        s_ = sessions.start(" ".join(args) if args else None)
+        tip = "" if args else "\n(اسم مؤقت — بعد أول فويس سأقترح اسماً، أو /rename_session <اسم>)"
+        send_telegram_message(token, chat_id, f"🟢 بدأت جلسة «{s_['name']}» [{s_['id']}]. الفويسات القادمة تُكتب فيها وفي ALL.md.{tip}",
+                              reply_to_id=msg["message_id"])
+
+    elif cmd == "/end":
+        s_ = sessions.end()
+        if not s_:
+            send_telegram_message(token, chat_id, "لا جلسة نشطة.", reply_to_id=msg["message_id"])
+            return
+        send_telegram_message(token, chat_id, f"✅ اتحفظت. «{s_['name']}» — {s_.get('count', 0)} فويس.\n📥 /export {s_['id']} لتنزيل ملف .md الآن (اختياري).",
+                              reply_to_id=msg["message_id"])
+
+    elif cmd == "/resume":
+        if not args:
+            send_telegram_message(token, chat_id, sessions.list_text(1, status="ended") + "\nالاستخدام: /resume <id>", reply_to_id=msg["message_id"])
+            return
+        s_ = sessions.resume(args[0])
+        if not s_:
+            send_telegram_message(token, chat_id, "جلسة غير موجودة (أو مؤرشفة بعد دمج). /sessions للقائمة.", reply_to_id=msg["message_id"])
+            return
+        recap = sessions.last_entries(3)
+        body = f"▶️ {sessions.summary_card()}"
+        if recap:
+            body += "\n📝 آخر النصوص:\n" + "\n".join(f"• {html.escape(e['raw'][:160])}{'…' if len(e['raw']) > 160 else ''}" for e in recap)
+        body += "\n🎙️ سجّل فويساً جديداً — سيُضاف لهذه الجلسة."
+        send_telegram_message(token, chat_id, body, reply_to_id=msg["message_id"], parse_mode="HTML")
+
+    elif cmd == "/rename_session":
+        if not args:
+            send_telegram_message(token, chat_id, "الاستخدام: /rename_session <الاسم الجديد>", reply_to_id=msg["message_id"])
+            return
+        nm = sessions.rename(" ".join(args))
+        send_telegram_message(token, chat_id, f"✏️ الاسم الآن: «{nm}»" if nm else "لا جلسة نشطة أو اسم غير صالح.", reply_to_id=msg["message_id"])
+
+    elif cmd == "/reject_title":
+        ok_ = sessions.reject_pending_title()
+        send_telegram_message(token, chat_id, "❌ أُلغي الاقتراح — الاسم المؤقت يبقى (/rename_session لتسميتها)." if ok_ else "لا جلسة نشطة.",
+                              reply_to_id=msg["message_id"])
+
+    elif cmd in ("/export", "/export_session"):
+        s_ = sessions.get(args[0]) if args else sessions.current()
+        if not s_:
+            send_telegram_message(token, chat_id, "حدّد جلسة: /export <id> (أو بلا وسائط للجلسة النشطة). /sessions للقائمة.", reply_to_id=msg["message_id"])
+            return
+        data = sessions.export_bytes(s_["id"])
+        if not data:
+            send_telegram_message(token, chat_id, "ملف الجلسة غير موجود.", reply_to_id=msg["message_id"])
+            return
+        fname, mime = f"session_{s_['id']}.md", "text/markdown"
+        if len(data) > Config.SESSION_EXPORT_ZIP_MB * 1024 * 1024:
+            import io
+            import zipfile
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+                z.writestr(fname, data)
+            data, fname, mime = buf.getvalue(), f"session_{s_['id']}.zip", "application/zip"
+        _send_document(token, chat_id, fname, data, mime, f"📂 «{s_['name']}» — {s_.get('count', 0)} فويس", msg["message_id"])
+
+    elif cmd == "/merge_sessions":
+        if len(args) < 2:
+            send_telegram_message(token, chat_id, "الاستخدام: /merge_sessions <id1> <id2> [اسم] — دمج زمني في جلسة جديدة؛ الأصلان يُؤرشفان (لا حذف).", reply_to_id=msg["message_id"])
+            return
+        m_ = sessions.merge(args[0], args[1], name=" ".join(args[2:]) or None)
+        send_telegram_message(token, chat_id, f"🔗 دُمجتا في «{m_['name']}» [{m_['id']}] — {m_['count']} فويس." if m_ else "تعذر الدمج (تحقق من المعرّفين).",
+                              reply_to_id=msg["message_id"])
+
+    elif cmd == "/context":
+        if not args:
+            send_telegram_message(token, chat_id, f"السياق داخل الجلسة: {sessions.context_mode()} (ضربات: {sessions.strikes()})\n"
+                                                  "/context on|off — تفعيل/تعطيل سياق الفويسات السابقة للجلسة النشطة", reply_to_id=msg["message_id"])
+            return
+        on = args[0].lower() in ("on", "1", "تشغيل", "تفعيل")
+        ok_ = sessions.set_context_enabled(on)
+        send_telegram_message(token, chat_id, (f"🧠 السياق {'مفعّل' if on else 'معطّل'} لهذه الجلسة." if ok_ else "لا جلسة نشطة."), reply_to_id=msg["message_id"])
+
+    elif cmd == "/stats":
+        send_telegram_message(token, chat_id, sessions.stats_text() + f"\n📚 الأرشيف العام: {archive.count_entries()} تفريغ", reply_to_id=msg["message_id"])
 
     elif cmd == "/mode":
         if not args:
@@ -887,10 +1009,19 @@ def handle_text(token, chat_id, msg, msg_text):
             send_telegram_message(token, chat_id, "🔎 نتائج الأرشيف:\n" + "\n".join(f"• {h['meta']}\n  {h['line']}" for h in hits), reply_to_id=msg["message_id"])
 
     elif cmd == "/polish":
-        src = (msg.get("reply_to_message") or {}).get("text") or " ".join(args)
+        replied = msg.get("reply_to_message") or {}
+        src = replied.get("text") or " ".join(args)
+        doc = replied.get("document") or {}
+        if not src.strip() and doc.get("file_id"):
+            # مراجعة م3: الرد على تفريغ طويل أُرسل كملف .md → نحمّل الملف ونقرأ نصه
+            try:
+                src = _download_file(token, doc["file_id"]).decode("utf-8", errors="replace")
+            except Exception as e:
+                send_telegram_message(token, chat_id, f"⚠️ تعذر قراءة الملف المرفق ({e}).", reply_to_id=msg["message_id"])
+                return
         src = _strip_banner(src)
         if not src.strip():
-            send_telegram_message(token, chat_id, "رُدّ بـ /polish على رسالة تفريغ (أو اكتب النص بعد الأمر).", reply_to_id=msg["message_id"])
+            send_telegram_message(token, chat_id, "رُدّ بـ /polish على رسالة تفريغ أو ملف .md (أو اكتب النص بعد الأمر).", reply_to_id=msg["message_id"])
             return
         import text_assist
         polished, reason = text_assist.polish(src, settings.role(), glossary_mod.get_glossary())
