@@ -18,6 +18,9 @@ from config import Config
 from key_manager import key_manager
 from transcriber import transcribe_audio_bytes_ex
 from model_state import model_circuit
+import heartbeat
+import backup
+import preflight
 
 if sys.platform == "win32":
     try:
@@ -234,6 +237,7 @@ def _download_file(token, file_id):
 
 def handle_audio(token, chat_id, msg, file_id, mime_type, label):
     """يعمل داخل ThreadPool."""
+    heartbeat.beat("worker", note="job start")
     try:
         print(f"🎙️ تم استلام تسجيل صوتي ({label}) من {chat_id}...")
         with ProgressKeeper(token, chat_id, reply_to_id=msg["message_id"]):
@@ -258,7 +262,9 @@ def _help_text():
         "/keys — قائمة المفاتيح مرتبة (المتاح أولاً)\n"
         "/remove <اسم> — حذف مفتاح بالاسم أو بأول 8 أحرف منه\n"
         "/rename <قديم> <جديد> — إعادة تسمية مفتاح\n"
-        "/backup — إرسال نسخة احتياطية من keys.json لك هنا\n"
+        "/backup — نسخة احتياطية (أرشيف+جلسات+إعدادات) بلا أسرار\n"
+        "/backup_secrets — نسخة keys.json بتأكيد صريح\n"
+        "/version — رقم النسخة والبناء ومدة التشغيل\n"
         "/reset — فتح قواطع الموديلات المقفولة مؤقتاً (لو عايز تجرّب حالاً)\n"
         "/help — هذه الرسالة\n\n"
         f"🛡️ الموديلات: {key_manager.models_chain_text()}"
@@ -299,6 +305,18 @@ def _models_state_text():
         for a in recent:
             lines.append(f"  {a['at']} {_short(a['model'])} [{a['key']}] {a['outcome']} {a['elapsed_s']} ث")
     return "\n".join(lines)
+
+
+def _send_document(token, chat_id, filename, data_bytes, mime, caption, reply_to_id):
+    resp = requests.post(
+        f"https://api.telegram.org/bot{token}/sendDocument",
+        data={"chat_id": chat_id, "caption": caption, "reply_to_message_id": reply_to_id},
+        files={"document": (filename, data_bytes, mime)},
+        timeout=Config.TELEGRAM_TIMEOUT,
+    )
+    if resp.status_code != 200:
+        send_telegram_message(token, chat_id, f"⚠️ فشل إرسال الملف ({resp.status_code}).", reply_to_id=reply_to_id)
+    return resp
 
 
 def handle_text(token, chat_id, msg, msg_text):
@@ -353,20 +371,45 @@ def handle_text(token, chat_id, msg, msg_text):
             send_telegram_message(token, chat_id, "لم أجد مفتاحاً بهذا الاسم. جرّب /keys.", reply_to_id=msg["message_id"])
 
     elif cmd == "/backup":
-        # يرسل keys.json كمستند لشاتك المحمي (يحوي أسراراً — لا يُرسل إلا للـ chat_id المصرح به)
+        # نسخة عامة: الأرشيف + الجلسات + الحالة + القاموس/الإعدادات — **بلا keys.json أبداً** (13 S4)
         try:
-            with open(Config.KEYS_JSON_FILE, "rb") as f:
-                files = {"document": ("keys.json", f.read(), "application/json")}
-            resp = requests.post(
-                f"https://api.telegram.org/bot{token}/sendDocument",
-                data={"chat_id": chat_id, "caption": "🔐 نسخة احتياطية من keys.json — احتفظ بها في مكان آمن ولا تشاركها.",
-                      "reply_to_message_id": msg["message_id"]},
-                files=files, timeout=Config.TELEGRAM_TIMEOUT,
-            )
-            if resp.status_code != 200:
-                send_telegram_message(token, chat_id, f"⚠️ فشل إرسال النسخة الاحتياطية ({resp.status_code}).", reply_to_id=msg["message_id"])
+            zip_bytes, included = backup.build_public_backup()
+            if backup.contains_secret(zip_bytes):
+                # دفاع في العمق: لو تسرب ملف سري لأي سبب لا نرسل شيئاً
+                send_telegram_message(token, chat_id, "⛔ أُلغي الإرسال: النسخة العامة احتوت ملفاً سرياً — راجع الكود.", reply_to_id=msg["message_id"])
+                return
+            if not included:
+                send_telegram_message(token, chat_id, "ℹ️ لا توجد بيانات للنسخ بعد (لا أرشيف ولا جلسات). للأسرار: /backup_secrets", reply_to_id=msg["message_id"])
+                return
+            name = f"backup_{time.strftime('%Y-%m-%d_%H%M')}.zip"
+            caption = f"🗂️ نسخة احتياطية عامة — {len(included)} ملف، بلا أسرار.\nلمفاتيح API: /backup_secrets"
+            _send_document(token, chat_id, name, zip_bytes, "application/zip", caption, msg["message_id"])
         except Exception as e:
             send_telegram_message(token, chat_id, f"⚠️ تعذر إنشاء النسخة الاحتياطية: {e}", reply_to_id=msg["message_id"])
+
+    elif cmd == "/backup_secrets":
+        # الأسرار بأمر منفصل + تأكيد صريح بكلمة confirm (09 §4)
+        if not args or args[0].lower() != "confirm":
+            send_telegram_message(
+                token, chat_id,
+                "🔐 هذا الأمر يرسل keys.json (مفاتيح Gemini + توكن تليجرام) إلى هذا الشات.\n"
+                "لا تستخدمه إلا من جهازك الشخصي. للتأكيد اكتب:\n/backup_secrets confirm",
+                reply_to_id=msg["message_id"],
+            )
+            return
+        try:
+            zip_bytes, included = backup.build_secrets_backup()
+            if not included:
+                send_telegram_message(token, chat_id, "ℹ️ لا يوجد keys.json بعد.", reply_to_id=msg["message_id"])
+                return
+            name = f"secrets_{time.strftime('%Y-%m-%d_%H%M')}.zip"
+            caption = "🔐 نسخة الأسرار (keys.json). احذف هذه الرسالة بعد الحفظ ولا تشاركها."
+            _send_document(token, chat_id, name, zip_bytes, "application/zip", caption, msg["message_id"])
+        except Exception as e:
+            send_telegram_message(token, chat_id, f"⚠️ تعذر إنشاء نسخة الأسرار: {e}", reply_to_id=msg["message_id"])
+
+    elif cmd == "/version":
+        send_telegram_message(token, chat_id, preflight.version_line(), reply_to_id=msg["message_id"])
 
     elif cmd in ("/start", "/help", "مساعدة"):
         send_telegram_message(token, chat_id, _help_text(), reply_to_id=msg["message_id"])
@@ -412,6 +455,7 @@ def main(stop_event=None):
                     params=params,
                     timeout=40,
                 )
+                heartbeat.beat("poller", note=f"getUpdates {res.status_code}")
                 if res.status_code == 409:
                     print("⛔ 409 Conflict: نسخة أخرى من البوت تعمل بنفس التوكن (محلي + استضافة؟). أوقف إحداهما.")
                     STATE["last_error"] = "409 conflict: another instance is polling"
@@ -423,6 +467,7 @@ def main(stop_event=None):
                     continue
 
                 STATE["last_poll_ok"] = time.time()
+                heartbeat.beat("poller", note="getUpdates 200")
                 for up in res.json().get("result", []):
                     offset = up["update_id"] + 1          # نتقدم دائماً حتى لو فشلت معالجة الرسالة
                     msg = up.get("message")

@@ -161,6 +161,11 @@ class Config:
     NOTIFY_ON_START = os.environ.get("NOTIFY_ON_START", "1") not in ("0", "false", "False", "")
     # Watchdog: كل كم ثانية يفحص أن البوت والويب أحياء ويعيد تشغيلهما
     WATCHDOG_INTERVAL = int(os.environ.get("WATCHDOG_INTERVAL", "30"))
+    # /health العميق (G26، 03b §3): يرجع 503 لو أي خيط حيوي لم ينبض خلال هذه المدة.
+    # يُحسب افتراضياً من مهلة polling + هامش القراءة + 15 (≈55ث) — لا 90 ولا 120.
+    HEALTH_STALE_AFTER = int(os.environ.get("HEALTH_STALE_AFTER", "55"))
+    # الخيوط التي يراقبها /health (تُسجَّل عند بدء كل خيط عبر heartbeat.beat). فارغة = لا فحص stale.
+    HEALTH_WATCH_THREADS = tuple(t for t in os.environ.get("HEALTH_WATCH_THREADS", "poller").split(",") if t.strip())
     # مستوى السجلات: DEBUG | INFO | WARNING
     LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")
 

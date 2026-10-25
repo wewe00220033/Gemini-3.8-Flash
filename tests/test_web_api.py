@@ -237,3 +237,58 @@ def test_status_and_health_expose_models_state_and_reset(web):
     r = json.loads(urllib.request.urlopen(web + "/api/reset").read())
     assert r == {"ok": True, "reset": 1}
     assert not web_service.model_circuit.is_open("gemini-3.6-flash")
+
+
+# ---------- المرحلة 0 (v2): /health العميق — G26 ----------
+
+def test_health_deep_503_when_watched_thread_stale(web, monkeypatch):
+    """بوت مضبوط + خيط poller لم ينبض خلال HEALTH_STALE_AFTER → 503 و stale_threads يحوي الاسم."""
+    import clock
+    import heartbeat
+    import web_service
+    fc = clock.FakeClock()
+    prev = clock.use(fc)
+    heartbeat.reset()
+    try:
+        monkeypatch.setattr(web_service.key_manager, "get_telegram_config", lambda: ("123:tok", "", "1"))
+        monkeypatch.setattr(web_service.Config, "HEALTH_WATCH_THREADS", ("poller",))
+        monkeypatch.setattr(web_service.Config, "HEALTH_STALE_AFTER", 55)
+        heartbeat.beat("poller")
+        status, body = _get(web + "/health")
+        assert status == 200 and json.loads(body)["ok"] is True
+        fc.advance(56)
+        status, body = _get(web + "/health")
+        h = json.loads(body)
+        assert status == 503 and h["ok"] is False and h["stale_threads"] == ["poller"]
+        assert h["beats"]["poller"]["age_s"] >= 56
+    finally:
+        clock.use(prev)
+        heartbeat.reset()
+
+
+def test_health_deep_ok_when_bot_not_configured_even_without_beats(web):
+    """وضع ويب-فقط: لا بوت → لا حكم على خيوط البوت → 200."""
+    import heartbeat
+    heartbeat.reset()
+    status, body = _get(web + "/health")
+    h = json.loads(body)
+    assert status == 200 and h["ok"] is True and h["stale_threads"] == []
+    assert h["bot_configured"] is False
+
+
+def test_start_web_server_thread_raises_in_caller_when_port_busy(fresh_env, monkeypatch):
+    """G27: المنفذ مشغول → OSError تصل للمستدعي فوراً (لا خيط يموت بصمت)."""
+    import importlib
+    import web_service
+    importlib.reload(web_service)
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    s.listen(1)
+    port = s.getsockname()[1]
+    try:
+        monkeypatch.setattr(web_service.Config, "WEB_HOST", "127.0.0.1")
+        monkeypatch.setattr(web_service.Config, "WEB_PORT", port)
+        with pytest.raises(OSError):
+            web_service.start_web_server_thread()
+    finally:
+        s.close()
