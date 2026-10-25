@@ -308,3 +308,16 @@ def test_handle_audio_uses_ex_and_footer(bot, monkeypatch):
     tb.handle_audio("T", "1", _msg(), "fid", "audio/ogg", "voice")
     body = sent[-1]["payload"]["text"]
     assert "النص" in body and "⏱ 6.4 ث" in body and tb.STATE["processed"] >= 1
+
+
+def test_status_includes_resilience_line(bot):
+    tb, sent = bot
+    tb.key_manager.add_key(VALID_A, "A")
+    tb.handle_text("T", "1", {"message_id": 1}, "/status")
+    txt = sent[-1]["payload"]["text"]
+    assert "🛡️ التعافي الذاتي" in txt and "الوضع طبيعي" in txt and "poller #" in txt
+    tb.set_emergency_mode(True)
+    try:
+        assert "طوارئ" in tb._resilience_text()
+    finally:
+        tb.set_emergency_mode(False)

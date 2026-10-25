@@ -119,6 +119,7 @@ class Runtime:
             watch=Config.HEALTH_WATCH_THREADS,
         )
         self.watchdog.start()
+        web_service.RUNTIME["watchdog"] = self.watchdog
         return self.watchdog
 
     # ---- shutdown ----

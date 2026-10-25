@@ -350,6 +350,14 @@ def _keys_list_text():
     return "\n".join(lines)
 
 
+def _resilience_text():
+    """سطر التعافي الذاتي في /status (03b): جيل الـ poller، الوضع، أخطاء الشبكة، المهام الجارية."""
+    mode = "طوارئ (short-poll)" if STATE["emergency_mode"] else "حماية (poll قصير)" if STATE["protect_mode"] \
+        else f"حذر ({int(netsession.cautious.remaining_s())}ث)" if netsession.cautious.active() else "طبيعي"
+    return (f"🛡️ التعافي الذاتي: الوضع {mode} | poller #{STATE['poller_generation']} | "
+            f"أخطاء شبكة {STATE['net_errors']} (ReadTimeout {STATE['read_timeouts']}) | مهام جارية {STATE['in_flight']}")
+
+
 def _models_state_text():
     """حالة قواطع الموديلات + آخر المحاولات (للشفافية في /status)."""
     lines = ["─" * 30, "🚦 حالة الموديلات الآن:"]
@@ -400,7 +408,7 @@ def handle_text(token, chat_id, msg, msg_text):
     args = parts[1:]
 
     if cmd in ("/status", "حالة", "المفاتيح"):
-        send_telegram_message(token, chat_id, key_manager.get_status_summary() + "\n" + _models_state_text(), reply_to_id=msg["message_id"])
+        send_telegram_message(token, chat_id, key_manager.get_status_summary() + "\n" + _models_state_text() + "\n" + _resilience_text(), reply_to_id=msg["message_id"])
 
     elif cmd == "/reset":
         n = model_circuit.reset()
