@@ -81,7 +81,9 @@ cp .env.example .env   # واملأ القيم
 | `/new_role <id> \| <اسم> \| <تعليمات التنظيم> [\| سطر التفريغ]` · `/role_del <id>` | (م3) دور مخصص في `data/roles.json` |
 | `/glossary [صفحة]` · `/add_word X = Y [spelling]` · `/del_word <id> confirm` · `/confirm_word <id> = Y` · `/glossary_export` | (م3) قاموس المصطلحات `data/glossary.json` |
 | `/last` · `/find <كلمة>` | (م3) آخر تفريغ / بحث في الأرشيف `data/transcripts/ALL.md` |
-| `/polish` (رداً على نص) | (م3) تنظيم نص جاهز بالدور الحالي عبر flash-lite (نصي فقط) |
+| `/polish` (رداً على نص أو ملف .md) | (م3) تنظيم نص جاهز بالدور الحالي عبر flash-lite (نصي فقط) |
+| `/new_session [اسم]` · `/end` · `/sessions` · `/resume <id>` · `/rename_session <اسم>` · `/export [id]` · `/merge_sessions <id1> <id2>` | (م4) الجلسات في `data/sessions/` — كتابة مزدوجة مع `ALL.md`، تستمر بعد إعادة التشغيل، لا حذف (دمج = أرشفة) |
+| `/context [on\|off]` · `/stats` | (م4) سياق الفويسات السابقة داخل الجلسة (2-Strike → بسيط تلقائياً) · إحصاء |
 
 > كل رد تفريغ ينتهي بـ `⚡ الموديل | 🔑 المفتاح | ⏱ الزمن` + ما تم تخطيه. لو التفريغ أخد أكثر من 12 ث تظهر رسالة `⏳ لسه شغّال…` وتُحذف تلقائياً عند وصول النتيجة.
 
@@ -92,6 +94,7 @@ cp .env.example .env   # واملأ القيم
 4. لو ظهر `🤖 Gemini: ⏳ Google مزدحمة على كل الموديلات` → لا تفعل شيئاً: المهمة مؤجَّلة في الطابور وتُفرَّغ تلقائياً عند الفتح (`/queue` يعرض الموعد). `/reset` فقط لو مستعجل.
 4b. **المرحلة 2 (Failover v2):** متغيرات اختيارية — `MODEL_503_KEY_HOPS` (2: قفزات لمشاريع أخرى قبل القفل)، `RETRY_BUDGET_SECONDS` (45)، `KEY_GROUP_AUTODETECT` (1). القواطع تُحفظ في `state/circuit.json` ومجموعات المفاتيح المكتشفة في `state/key_groups.json` — كلاهما يُعاد بناؤه تلقائياً لو حُذف.
 4c. **المرحلة 3 (خط الإنتاج):** متغيرات اختيارية — `DELIVERY_MODE_DEFAULT` (dual)، `DEFAULT_ROLE` (general)، `TRANSCRIPT_HEADER_ENABLED` (1) و `TRANSCRIPT_HEADER_TARGET` (both)، `TEXT_ASSIST_MODEL` (`gemini-3.5-flash-lite` — **نصي فقط، لا يُستخدم للتفريغ**؛ اختبار يمنع أي lite في `Config.MODELS`). الملفات الجديدة تحت `DATA_DIR`: `transcripts/ALL.md` (أرشيف append-only)، `glossary.json`، `roles.json`، `settings.json` — كلها تُعاد بناؤها بالافتراضيات لو حُذفت أو تلفت (النسخة التالفة تُعزل بجانبها). **ضمّها في النسخ الاحتياطي** (`/backup` يشملها).
+4d. **المرحلة 4 (الجلسات والسياق):** متغيرات اختيارية — `SMART_TITLE_ENABLED` (1: عنوان لكل فويس + اقتراح اسم الجلسة عبر flash-lite نصياً)، `CONTEXT_ENABLED` (1: سياق آخر فويسين ≤ 800 حرف داخل الجلسة النشطة فقط). ملفات `DATA_DIR/sessions/` (`sessions_index.json`, `session_<id>.md`, `current_session.json`) تدخل في `/backup`؛ الفهرس يُعاد بناؤه تلقائياً من ملفات `.md` لو حُذف/تلف. بعد إعادة التشغيل الفويس التالي يذهب لنفس الجلسة بلا تدخل.
 5. لو ظهر `❌ مرفوض من Google` بجانب مفتاح في `/status` → المفتاح نفسه معطوب (مسرّب/ملغي): `/remove` ثم أضف مفتاحاً جديداً.
 6. تأكد أن مفاتيحك من **مشاريع Google Cloud مختلفة** (الكوتا لكل مشروع لا لكل مفتاح).
 
