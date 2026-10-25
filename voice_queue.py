@@ -109,6 +109,13 @@ class VoiceQueue:
     def is_alive(self):
         return any(t.is_alive() for t in self._threads)
 
+    def _key(self, job):
+        """
+        مفتاح الترتيب: وضع الحجب (الافتراضي) → ترتيب الوصول فقط (المؤجَّل يبقى في مكانه ويحجب ما بعده)؛
+        وضع التخطي → (ready_at, seq) فالجاهز يسبق المؤجَّل (19 §2).
+        """
+        return (job.ready_at if self.skip_deferred else 0.0, job.seq, job.job_id)
+
     # ------------------------------------------------------------------ إدخال
     def submit(self, job, journal_event="received"):
         with self._lock:
@@ -118,7 +125,7 @@ class VoiceQueue:
             job.enqueued_mono = clock.monotonic()
             job.state = "queued"
             self._jobs[job.job_id] = job
-            self._pq.put((job.ready_at, job.seq, job.job_id))
+            self._pq.put(self._key(job))
             self.stats["enqueued"] += 1
             position = self._position_locked(job)
             self._cv.notify()
@@ -154,7 +161,7 @@ class VoiceQueue:
 
     # ------------------------------------------------------------------ استعلام
     def _position_locked(self, job):
-        return 1 + sum(1 for o in self._jobs.values() if o is not job and (o.ready_at, o.seq) < (job.ready_at, job.seq))
+        return 1 + sum(1 for o in self._jobs.values() if o is not job and self._key(o) < self._key(job))
 
     def position(self, job_id):
         with self._lock:
@@ -172,7 +179,7 @@ class VoiceQueue:
 
     def snapshot(self):
         with self._lock:
-            items = sorted(self._jobs.values(), key=lambda j: (j.ready_at, j.seq))
+            items = sorted(self._jobs.values(), key=self._key)
             now = clock.monotonic()
             return {
                 "size": len(items), "in_flight": self._in_flight, "skip_deferred": self.skip_deferred,
@@ -188,7 +195,8 @@ class VoiceQueue:
         skipped_back = []
         while not self._stop.is_set():
             try:
-                ready_at, seq, job_id = self._pq.get(timeout=0.5)
+                key = self._pq.get(timeout=0.5)
+                job_id = key[2]
             except queue.Empty:
                 self._requeue(skipped_back)
                 skipped_back = []
@@ -203,13 +211,13 @@ class VoiceQueue:
                     jobs.record(job.job_id, "skipped", reason="owner") if self._journal else None
                     continue
                 now = clock.monotonic()
-                if ready_at > now:
+                if job.ready_at > now:
                     if self.skip_deferred:
-                        skipped_back.append((ready_at, seq, job_id))     # نكمل الجاهز
+                        skipped_back.append(key)                          # نكمل الجاهز
                         continue
                     # [قرار-مالك] الحجب: ننتظر حتى موعدها (أو إيقاف/تخطٍ)
-                    self._cv.wait(timeout=min(ready_at - now, 1.0))
-                    self._pq.put((ready_at, seq, job_id))
+                    self._cv.wait(timeout=min(job.ready_at - now, 1.0))
+                    self._pq.put(key)
                     self._requeue(skipped_back)
                     skipped_back = []
                     continue
@@ -275,7 +283,7 @@ class VoiceQueue:
             job.deferrals += 1
             job.ready_at = clock.monotonic() + wait_s
             job.state = "deferred"
-            self._pq.put((job.ready_at, job.seq, job.job_id))
+            self._pq.put(self._key(job))
             self.stats["deferred"] += 1
         if self._journal:
             jobs.record(job.job_id, "deferred", wait_s=wait_s, kind=kind, reason=str(err)[:200])
