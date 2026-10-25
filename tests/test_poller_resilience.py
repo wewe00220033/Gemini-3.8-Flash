@@ -127,3 +127,21 @@ def test_updates_dispatch_audio_to_pool_and_beat_poller(tb, monkeypatch):
     assert len(submitted) == 1 and submitted[0][0] == "handle_audio" and submitted[0][1][3] == "F1"
     snap = heartbeat.snapshot()
     assert "poller" in snap and snap["poller"]["count"] >= 2
+
+
+def test_protect_and_emergency_modes_change_poll_params(tb, monkeypatch):
+    """L3: poll قصير دائماً؛ L3b: timeout=0 + نَفَس 2ث بين الطلبات؛ الإطفاء يعيد الطبيعي."""
+    stop = threading.Event()
+    tb.set_protect_mode(True)
+    assert tb.current_poll_timeout() == tb.Config.TG_POLL_TIMEOUT_CAUTIOUS
+    assert tb.current_stall_after() == tb.Config.TG_POLL_TIMEOUT_CAUTIOUS + tb.Config.TG_READ_MARGIN + tb.Config.STALL_MARGIN
+    tb.set_emergency_mode(True)
+    assert tb.current_poll_timeout() == 0
+    ft = FakeTelegram([FakeResp(), FakeResp()], stop_event=stop).install(tb, monkeypatch)
+    tb.main(stop_event=stop)
+    polls = [c for c in ft.calls if "getUpdates" in c["url"]]
+    assert all(p["params"]["timeout"] == 0 for p in polls)
+    assert all(p["timeout"] == (tb.Config.TG_CONNECT_TIMEOUT, tb.Config.TG_READ_MARGIN) for p in polls)
+    assert tb._test_waits.count(tb.Config.EMERGENCY_SHORT_POLL_INTERVAL) == len(polls)
+    tb.set_emergency_mode(False); tb.set_protect_mode(False)
+    assert tb.current_poll_timeout() == tb.Config.TG_POLL_TIMEOUT

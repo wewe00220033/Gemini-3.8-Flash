@@ -42,8 +42,32 @@ STATE = {
     "read_timeouts": 0,       # ReadTimeout في getUpdates (L0)
     "stopped_reason": None,   # لماذا خرج الـ poller طوعاً (401 / stop_event)
     "in_flight": 0,           # مهام تفريغ جارية الآن (للإيقاف الرشيق)
+    "protect_mode": False,    # L3: poll قصير دائماً (يضبطه الـ watchdog)
+    "emergency_mode": False,  # L3b: short-poll timeout=0 كل 2ث
 }
 _in_flight_lock = threading.Lock()
+
+
+def set_protect_mode(on):
+    STATE["protect_mode"] = bool(on)
+
+
+def set_emergency_mode(on):
+    STATE["emergency_mode"] = bool(on)
+
+
+def current_poll_timeout():
+    """long-poll الحالي: 0 في الطوارئ (L3b)، قصير في الحماية (L3) أو الحذر (L0)، وإلا الطبيعي."""
+    if STATE["emergency_mode"]:
+        return 0
+    if STATE["protect_mode"]:
+        return Config.TG_POLL_TIMEOUT_CAUTIOUS
+    return netsession.cautious.poll_timeout()
+
+
+def current_stall_after():
+    """عتبة stall المتوافقة مع الوضع الحالي (يستخدمها الـ watchdog و/health)."""
+    return current_poll_timeout() + Config.TG_READ_MARGIN + Config.STALL_MARGIN
 
 
 def _api(token, method):
@@ -500,13 +524,15 @@ def main(stop_event=None, pool=None, poll_params=None):
     try:
         while not stop_event.is_set():
             try:
-                params = {"timeout": netsession.cautious.poll_timeout()}
+                poll_t = current_poll_timeout()
+                params = {"timeout": poll_t}
                 if poll_params:
                     params.update(poll_params)
                 if offset:
                     params["offset"] = offset
                 try:
-                    res = _http_get(_api(bot_token, "getUpdates"), params=params, timeout=netsession.cautious.timeouts())
+                    res = _http_get(_api(bot_token, "getUpdates"), params=params,
+                                    timeout=(Config.TG_CONNECT_TIMEOUT, poll_t + Config.TG_READ_MARGIN))
                 except requests.exceptions.ReadTimeout as e:
                     # L0: socket ميت/نصف مفتوح — netsession أغلق الـ Session بالفعل؛ نهبط لوضع الحذر بصمت
                     STATE["read_timeouts"] += 1
@@ -581,6 +607,9 @@ def main(stop_event=None, pool=None, poll_params=None):
                         except Exception as e:
                             print(f"⚠️ خطأ في معالجة أمر نصي: {e}")
                             STATE["last_error"] = str(e)
+                if poll_t == 0:
+                    # L3b short-poll: لا نغرق تليجرام — نفس قصير بين الطلبات
+                    _wait(stop_event, Config.EMERGENCY_SHORT_POLL_INTERVAL)
 
             except Exception as e:
                 # لا نبتلع الخطأ بصمت — نطبعه حتى يظهر في كونسول الاستضافة (P12)
