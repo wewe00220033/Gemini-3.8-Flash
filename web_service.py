@@ -18,6 +18,7 @@ from config import Config
 from key_manager import key_manager, KeyManager
 from transcriber import transcribe_audio_bytes_ex
 from model_state import model_circuit
+import heartbeat
 
 
 STATIC_DIR = os.path.join(Config.SCRIPT_DIR, "static")
@@ -106,8 +107,10 @@ class WebRequestHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/health":
-            # فحص صحة عام (بدون توكن) لمراقبة خارجية مثل UptimeRobot — لا يكشف أسراراً
-            return self._send_json(200, build_health())
+            # فحص صحة عام (بدون توكن) لمراقبة خارجية مثل UptimeRobot — لا يكشف أسراراً.
+            # عميق (G26): 503 لو أي خيط حيوي متوقف عن النبض — كي يكتشف المراقب الخارجي التجمد لا موت العملية فقط.
+            health = build_health()
+            return self._send_json(200 if health["ok"] else 503, health)
 
         if path == "/api/status":
             if not self._authorized():
@@ -194,17 +197,28 @@ def build_health():
     except Exception:
         bot_state = {}
     now = time.time()
+    bot_configured = bool(key_manager.get_telegram_config()[0])
     keys = key_manager.data.get("keys", [])
     keys_available = sum(
         1 for k in keys if any(key_manager.is_model_available(k, m, now) for m in Config.MODELS)
     )
     last_poll = bot_state.get("last_poll_ok")
     bot_alive = bool(bot_state.get("alive")) and (last_poll is not None and now - last_poll < 120)
+    # النبضات (monotonic) — الخيوط المسجلة فقط تُحكم؛ في وضع ويب-فقط (لا بوت) لا حكم على خيوط البوت
+    beats = heartbeat.snapshot()
+    stale = []
+    if bot_configured:
+        for name in Config.HEALTH_WATCH_THREADS:
+            if heartbeat.is_stale(name, Config.HEALTH_STALE_AFTER):
+                stale.append(name)
     return {
-        "ok": True,
+        "ok": not stale,
+        "stale_threads": stale,
+        "stale_after_s": Config.HEALTH_STALE_AFTER,
+        "beats": beats,
         "web_alive": True,
         "bot_alive": bot_alive,
-        "bot_configured": bool(key_manager.get_telegram_config()[0]),
+        "bot_configured": bot_configured,
         "bot_last_poll_age_s": int(now - last_poll) if last_poll else None,
         "bot_processed": bot_state.get("processed", 0),
         "bot_last_error": bot_state.get("last_error"),
