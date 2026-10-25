@@ -6,7 +6,6 @@
 - install_signal_handlers: SIGTERM يضبط stop_event فقط.
 """
 import importlib
-import os
 import signal
 import threading
 import time
@@ -114,7 +113,7 @@ def test_signal_handler_sets_stop_event_only(env):
     try:
         installed = main.install_signal_handlers(ev)
         assert signal.SIGTERM in installed
-        os.kill(os.getpid(), signal.SIGTERM)
+        signal.raise_signal(signal.SIGTERM)   # عابر للمنصات: os.kill على Windows = TerminateProcess
         assert ev.wait(2)
     finally:
         for s, h in prev.items():
@@ -141,3 +140,26 @@ def test_start_watchdog_wires_poller_modes_and_notifier(env, monkeypatch):
         assert sent == [("777", "ping")]
     finally:
         rt.shutdown("test")
+
+
+def test_idle_loop_reacts_to_stop_within_a_tick_not_watchdog_period(env, monkeypatch):
+    """1b (كشفه اختبار الدخان): الخيط الرئيسي ينام بنبضات قصيرة كي لا يتأخر SIGTERM حتى 30 ث."""
+    main, tb = env
+    monkeypatch.setattr(main.Config, "WATCHDOG_INTERVAL", 10)      # الفترة الدورية 30 ث
+    rt = main.Runtime("TOK", "777")
+    threading.Timer(0.3, rt.global_stop.set).start()
+    t0 = time.monotonic()
+    assert main._idle_loop(rt, None, "TOK", tick=0.1) is None
+    assert time.monotonic() - t0 < 2.0
+
+
+def test_idle_loop_restarts_dead_poller_only_on_period(env, monkeypatch):
+    main, tb = env
+    monkeypatch.setattr(main.Config, "WATCHDOG_INTERVAL", 0.1)     # الفترة 0.3 ث
+    rt = main.Runtime("TOK", "777")
+    calls = []
+    monkeypatch.setattr(rt, "poller_alive", lambda: False)
+    monkeypatch.setattr(rt, "restart_poller", lambda: calls.append(1))
+    threading.Timer(0.8, rt.global_stop.set).start()
+    main._idle_loop(rt, None, "TOK", tick=0.05)
+    assert 1 <= len(calls) <= 3                                      # لا كل 50 مللي ثانية

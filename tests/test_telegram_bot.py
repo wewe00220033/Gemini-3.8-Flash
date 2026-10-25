@@ -305,7 +305,11 @@ def test_handle_audio_uses_ex_and_footer(bot, monkeypatch):
     monkeypatch.setattr(tb, "_download_file", lambda t, f: b"abc")
     monkeypatch.setattr(tb, "transcribe_audio_bytes_ex",
                         lambda b, m: ("النص", "gemini-3.6-flash", "A", {"elapsed": 6.4, "skipped": []}))
-    tb.handle_audio("T", "1", _msg(), "fid", "audio/ogg", "voice")
+    # 1b: handle_audio يُدرج في الطابور؛ المعالجة الفعلية في process_job (نناديها مباشرة هنا)
+    import voice_queue
+    job = voice_queue.new_telegram_job("1", _msg(), "fid", "audio/ogg", "voice")
+    job.meta["token"] = "T"
+    tb.process_job(job)
     body = sent[-1]["payload"]["text"]
     assert "النص" in body and "⏱ 6.4 ث" in body and tb.STATE["processed"] >= 1
 

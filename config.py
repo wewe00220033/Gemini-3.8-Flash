@@ -121,7 +121,11 @@ class Config:
     GEMINI_CONNECT_TIMEOUT = 10          # فتح الاتصال — لو فشل = مشكلة شبكة من السيرفر
     GEMINI_READ_TIMEOUT_BASE = 15
     GEMINI_READ_TIMEOUT_PER_MB = 8
-    GEMINI_READ_TIMEOUT_MAX = 90
+    GEMINI_READ_TIMEOUT_MAX = 90         # (توافق) = سقف الملفات الصغيرة
+    # سقفان حسب الحجم (04 §2.5b): صغير ≤ 8MB → 90ث (اكتشاف تعليق سريع)؛ كبير > 8MB → 180ث (15MB يحتاج 135ث فعلاً)
+    GEMINI_READ_TIMEOUT_MAX_SMALL = int(os.environ.get("GEMINI_READ_TIMEOUT_MAX_SMALL", "90"))
+    GEMINI_READ_TIMEOUT_MAX_LARGE = int(os.environ.get("GEMINI_READ_TIMEOUT_MAX_LARGE", "180"))
+    GEMINI_LARGE_FILE_MB = 8
 
     # قاطع الدائرة على مستوى الموديل (بالثواني): لو موديل رجّع 5xx أو Timeout يُتخطّى للمدة دي
     # على كل المفاتيح (المشكلة في Google مش في المفتاح). 0 = معطّل. /reset يفتح القواطع يدوياً.
@@ -185,6 +189,31 @@ class Config:
     EMERGENCY_SHORT_POLL_INTERVAL = 2
     # إيقاف رشيق عند SIGTERM (Pterodactyl): انتظار المهام الجارية ≤ هذه الثواني ثم خروج 0
     SHUTDOWN_GRACE = int(os.environ.get("SHUTDOWN_GRACE", "20"))
+
+    # ------------------------------------------------------------------
+    # طابور الفويسات + سجل المهام (03 §2.3/§3، 19 §2) — المرحلة 1b
+    # ------------------------------------------------------------------
+    # عامل تفريغ واحد = FIFO حقيقي (رفعه لـ 2 يكسر الترتيب ويضاعف ذروة الذاكرة)
+    TRANSCRIBE_WORKERS = int(os.environ.get("TRANSCRIBE_WORKERS", "1"))
+    QUEUE_MAX = int(os.environ.get("QUEUE_MAX", "50"))
+    # [قرار-مالك] المؤجَّل يحجب ما بعده (سياق الفويسات المترابطة)؛ 1 = يتخطى المؤجل ويكمل الجاهز
+    QUEUE_SKIP_DEFERRED = os.environ.get("QUEUE_SKIP_DEFERRED", "0") not in ("0", "false", "False", "")
+    # فاصل RPM بين مهمتين متتاليتين (لا نضرب Gemini بدفعة 5 فويسات في ثانية واحدة)
+    QUEUE_PACING_SEC = float(os.environ.get("QUEUE_PACING_SEC", "2"))
+    # إعادة تحميل الملف من تليجرام (فشل التحميل ≠ فشل التفريغ)
+    DOWNLOAD_RETRIES = 3
+    DOWNLOAD_BACKOFF = (2, 5, 10)
+    # قبول الفيديو/video_note للتفريغ (N3) — حد getFile في Bot API = 20MB
+    ACCEPT_VIDEO = os.environ.get("ACCEPT_VIDEO", "1") not in ("0", "false", "False", "")
+    MAX_FILE_MB = 20
+    # سجل المهام (سطر لكل حدث، fsync) — استئناف pending بعد restart (P0) + idempotency بـ file_unique_id
+    JOBS_FILE = os.path.join(DATA_DIR, "state", "jobs.ndjson")
+    JOBS_RESUME_MAX_AGE_H = int(os.environ.get("JOBS_RESUME_MAX_AGE_H", "20"))   # تليجرام يحتفظ بـ file_id ساعات
+    JOBS_DEDUP_HOURS = 24
+    JOBS_COMPACT_KEEP = 2000   # عند تجاوز ضعفه يُضغط الملف لآخر هذا العدد من المهام
+    # ريأكشن فوري على الفويس (Bot API 7.0+، من القائمة المسموحة فقط؛ ⏳/✅ غير مسموحين)
+    REACTION_RECEIVED = "\U0001F440"   # 👀
+    REACTION_ENABLED = os.environ.get("REACTION_ENABLED", "1") not in ("0", "false", "False", "")
     # /health العميق (G26، 03b §3): يرجع 503 لو أي خيط حيوي لم ينبض خلال هذه المدة.
     # يُحسب افتراضياً من مهلة polling + هامش القراءة + 15 (≈55ث) — لا 90 ولا 120.
     HEALTH_STALE_AFTER = int(os.environ.get("HEALTH_STALE_AFTER", "55"))

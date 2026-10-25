@@ -21,6 +21,20 @@ from model_state import model_circuit
 import heartbeat
 
 
+def _transcribe(audio_bytes, mime_type):
+    """
+    1b [متطلب-مالك]: طلبات الويب تمر من الطابور الموحّد نفسه (telegram_bot.QUEUE) ليشملها in_flight
+    والإيقاف الرشيق وفاصل RPM. لو تعذّر استيراد وحدة البوت (بيئة ويب-فقط مكسورة) نرجع للنداء المباشر.
+    """
+    try:
+        import telegram_bot
+        # نمرر دالة التفريغ من هذه الوحدة: تُستبدل في الاختبارات ونحافظ على نقطة مرور واحدة للويب
+        return telegram_bot.transcribe_via_queue(audio_bytes, mime_type, label="web",
+                                                 transcribe_fn=transcribe_audio_bytes_ex)
+    except ImportError:
+        return transcribe_audio_bytes_ex(audio_bytes, mime_type)
+
+
 STATIC_DIR = os.path.join(Config.SCRIPT_DIR, "static")
 _INDEX_FILE = os.path.join(STATIC_DIR, "index.html")
 _FALLBACK_HTML = "<!DOCTYPE html><html lang='ar' dir='rtl'><body style='font-family:sans-serif;padding:40px'>" \
@@ -171,7 +185,7 @@ class WebRequestHandler(BaseHTTPRequestHandler):
                     # جسم خام بدون multipart
                     audio_bytes, mime_type = body, (self.headers.get("Content-Type") or "audio/webm")
 
-                text, model, key_name, info = transcribe_audio_bytes_ex(audio_bytes, mime_type)
+                text, model, key_name, info = _transcribe(audio_bytes, mime_type)
                 self._send_json(200, {"ok": True, "text": text, "model": model, "key_name": key_name,
                                       "elapsed": info.get("elapsed"), "skipped": info.get("skipped", [])})
             except Exception as e:
@@ -246,6 +260,14 @@ def build_health():
         "in_flight": bot_state.get("in_flight", 0),
         "stopped_reason": bot_state.get("stopped_reason"),
     }
+    queue_snap = None
+    try:
+        q = telegram_bot.QUEUE
+        if q is not None:
+            queue_snap = q.snapshot()
+            resilience["in_flight"] = queue_snap["in_flight"]      # العداد الموحّد (تليجرام + ويب)
+    except Exception:
+        pass
     try:
         import netsession
         resilience["cautious_remaining_s"] = int(netsession.cautious.remaining_s())
@@ -264,6 +286,7 @@ def build_health():
         "stale_after_s": stale_after,
         "beats": beats,
         "resilience": resilience,
+        "queue": queue_snap,
         "web_alive": True,
         "bot_alive": bot_alive,
         "bot_configured": bot_configured,

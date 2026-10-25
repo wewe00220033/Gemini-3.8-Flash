@@ -180,7 +180,38 @@ def transcribe_audio_bytes_ex(audio_bytes, mime_type="audio/mp4"):
             break
 
     info["elapsed"] = round(time.time() - started, 1)
-    raise RuntimeError(_final_message(reasons, last, tried_any=info["attempts"] > 0))
+    msg = _final_message(reasons, last, tried_any=info["attempts"] > 0)
+    wait_s, kind = _deferral(reasons, tried_any=info["attempts"] > 0)
+    if wait_s:
+        raise DeferredError(msg, wait_s=wait_s, kind=kind)
+    raise RuntimeError(msg)
+
+
+class DeferredError(RuntimeError):
+    """
+    فشل مؤقت معروف المدة (03 §2.3): الطابور يؤجل المهمة إلى ready_at = now + wait_s بدل إفشالها.
+    kind: "model" (قواطع 5xx/timeout — ثوانٍ/دقائق) أو "quota" (حصة/تهدئة مفاتيح — قد تكون ساعات → صمام سؤال المالك).
+    """
+
+    def __init__(self, message, wait_s, kind):
+        super().__init__(message)
+        self.wait_s = int(wait_s)
+        self.kind = kind
+
+
+def _deferral(reasons, tried_any):
+    """(wait_s, kind) لو الفشل مؤقت ومعروف المدة، وإلا (0, None)."""
+    if reasons and all(model_circuit.is_open(m) for m in Config.MODELS):
+        wait, _m = model_circuit.earliest_open(Config.MODELS)
+        return max(1, int(wait or 0)), "model"
+    if not tried_any:
+        keys = key_manager.data.get("keys", [])
+        if keys and all(k.get("status") == "invalid" for k in keys):
+            return 0, None
+        wait = key_manager.earliest_availability()
+        if wait:
+            return max(1, int(wait)), "quota"
+    return 0, None
 
 
 # ======================================================================
@@ -273,10 +304,15 @@ def _build_payload(b64_data, mime_type, model=None):
 
 
 def dynamic_read_timeout(size_bytes):
-    """مهلة القراءة تتناسب مع حجم الملف: min(MAX, BASE + PER_MB × MB)."""
+    """
+    مهلة القراءة تتناسب مع حجم الملف: min(cap, BASE + PER_MB × MB).
+    سقفان (04 §2.5b، 22 U3): ≤ 8MB → MAX_SMALL=90 (اكتشاف تعليق سريع للفويسات العادية)؛
+    > 8MB → MAX_LARGE=180 (ملف 15MB يحتاج 135ث فعلاً — كان يُقصّ إلى 90 → timeout زائف).
+    """
     mb = max(0.0, float(size_bytes)) / (1024 * 1024)
     t = Config.GEMINI_READ_TIMEOUT_BASE + Config.GEMINI_READ_TIMEOUT_PER_MB * mb
-    return int(min(Config.GEMINI_READ_TIMEOUT_MAX, max(Config.GEMINI_READ_TIMEOUT_BASE, t)))
+    cap = Config.GEMINI_READ_TIMEOUT_MAX_LARGE if mb > Config.GEMINI_LARGE_FILE_MB else Config.GEMINI_READ_TIMEOUT_MAX_SMALL
+    return int(min(cap, max(Config.GEMINI_READ_TIMEOUT_BASE, t)))
 
 
 # ======================================================================

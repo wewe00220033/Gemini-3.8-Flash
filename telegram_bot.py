@@ -22,6 +22,8 @@ import heartbeat
 import backup
 import preflight
 import netsession
+import jobs
+import voice_queue
 
 if sys.platform == "win32":
     try:
@@ -254,9 +256,12 @@ def _is_audio_message(msg):
     if msg.get("audio"):
         a = msg["audio"]
         return a["file_id"], a.get("mime_type", "audio/mpeg"), a.get("file_name", "audio")
-    if msg.get("video_note"):
+    if msg.get("video_note") and Config.ACCEPT_VIDEO:
         v = msg["video_note"]
         return v["file_id"], v.get("mime_type", "video/mp4"), "video_note"
+    if msg.get("video") and Config.ACCEPT_VIDEO:
+        v = msg["video"]
+        return v["file_id"], v.get("mime_type", "video/mp4"), v.get("file_name", "video")
     doc = msg.get("document")
     if doc:
         mime = (doc.get("mime_type") or "").lower()
@@ -283,32 +288,261 @@ def _download_file(token, file_id):
     return resp.content
 
 
-def handle_audio(token, chat_id, msg, file_id, mime_type, label):
-    """يعمل داخل ThreadPool."""
-    heartbeat.beat("worker", note="job start")
-    with _in_flight_lock:
-        STATE["in_flight"] += 1
-    try:
-        _handle_audio_inner(token, chat_id, msg, file_id, mime_type, label)
-    finally:
-        with _in_flight_lock:
-            STATE["in_flight"] -= 1
-        heartbeat.beat("worker", note="job end")
+# ======================================================================
+# الطابور الموحّد (1b): تليجرام + الويب عبر voice_queue واحد — in_flight واحد للإيقاف الرشيق
+# ======================================================================
+QUEUE = None                 # voice_queue.VoiceQueue — يُنشأ في start_queue()
+_queue_lock = threading.Lock()
+_quota_prompts = {}          # job_id -> (chat_id, prompt_message_id) لرسالة صمام الحصة
 
 
-def _handle_audio_inner(token, chat_id, msg, file_id, mime_type, label):
+def set_reaction(token, chat_id, message_id, emoji=None):
+    """👀 فوري على الفويس (Bot API 7.0+). فشله صامت — ليس جزءاً من المسار الحرج."""
+    if not Config.REACTION_ENABLED:
+        return False
+    emoji = emoji or Config.REACTION_RECEIVED
     try:
-        print(f"🎙️ تم استلام تسجيل صوتي ({label}) من {chat_id}...")
-        with ProgressKeeper(token, chat_id, reply_to_id=msg["message_id"]):
-            audio_bytes = _download_file(token, file_id)
-            text, model, key_name, info = transcribe_audio_bytes_ex(audio_bytes, mime_type)
-        print(f"✅ تم التفريغ عبر [{model}] بالمفتاح [{key_name}] في {info.get('elapsed')} ث: {text[:40]}...")
-        send_transcript(token, chat_id, text, model, key_name, reply_to_id=msg["message_id"], info=info)
+        resp = _tg_post(token, "setMessageReaction",
+                        {"chat_id": chat_id, "message_id": message_id,
+                         "reaction": [{"type": "emoji", "emoji": emoji}]}, timeout=10)
+        return resp.status_code == 200
+    except Exception:
+        return False
+
+
+def _download_with_retry(token, file_id):
+    """تحميل الملف من تليجرام مع إعادة محاولة ×DOWNLOAD_RETRIES وbackoff؛ يرفع RuntimeError مفهوماً."""
+    last = None
+    for i in range(max(1, Config.DOWNLOAD_RETRIES)):
+        try:
+            return _download_file(token, file_id)
+        except Exception as e:
+            last = e
+            if i + 1 < Config.DOWNLOAD_RETRIES:
+                delay = Config.DOWNLOAD_BACKOFF[min(i, len(Config.DOWNLOAD_BACKOFF) - 1)]
+                print(f"⚠️ تحميل الفويس فشل ({type(e).__name__}) — محاولة {i + 2}/{Config.DOWNLOAD_RETRIES} بعد {delay}ث")
+                time.sleep(delay)
+    raise RuntimeError(f"📡 تليجرام: تعذر تحميل الفويس بعد {Config.DOWNLOAD_RETRIES} محاولات ({type(last).__name__}: {last})")
+
+
+def _runtime_token():
+    token, _, _ = key_manager.get_telegram_config()
+    return token
+
+
+def process_job(job):
+    """
+    معالج الطابور (يعمل في خيط transcribe-N). يرفع DeferredError ليؤجل الطابور بدل الفشل.
+    - source == "web": البايتات في job.meta["audio_bytes"] — لا تحميل ولا إرسال؛ النتيجة تُعاد للمنادي.
+    - source == "telegram"/"resume": dedup → تحميل → تفريغ → إرسال، مع تسجيل كل خطوة في jobs.ndjson.
+    """
+    heartbeat.beat("worker", note=f"job start {job.job_id}")
+    if job.source == "web":
+        audio_bytes = job.meta.get("audio_bytes") or b""
+        fn = job.meta.get("transcribe_fn") or transcribe_audio_bytes_ex
+        text, model, key_name, info = fn(audio_bytes, job.mime_type)
+        jobs.record(job.job_id, "sent", model=model, key=str(key_name), elapsed=info.get("elapsed"), text=text[:2000])
         STATE["processed"] += 1
+        return {"text": text, "model": model, "key_name": key_name, "info": info}
+
+    token = job.meta.get("token") or _runtime_token()
+    chat_id, reply_to = job.chat_id, job.message_id
+    cached = jobs.find_recent_result(job.file_unique_id) if job.file_unique_id else None
+    if cached:
+        print(f"♻️ نفس الملف فُرِّغ قبل قليل — إعادة إرسال النتيجة المحفوظة ({job.job_id})")
+        send_transcript(token, chat_id, cached["text"], cached.get("model") or "cache", cached.get("key") or "cache",
+                        reply_to_id=reply_to, info={"elapsed": cached.get("elapsed")})
+        jobs.record(job.job_id, "sent", dedup_of=cached.get("job_id"), text=cached["text"][:2000],
+                    model=cached.get("model"), key=cached.get("key"))
+        if QUEUE:
+            QUEUE.stats["deduped"] += 1
+        return {"text": cached["text"], "dedup": True}
+
+    print(f"🎙️ بدء تفريغ ({job.label}) من {chat_id} [{job.source}:{job.job_id}]...")
+    with ProgressKeeper(token, chat_id, reply_to_id=reply_to):
+        audio_bytes = _download_with_retry(token, job.file_id)
+        jobs.record(job.job_id, "downloaded", bytes=len(audio_bytes))
+        text, model, key_name, info = transcribe_audio_bytes_ex(audio_bytes, job.mime_type)
+    jobs.record(job.job_id, "transcribed", model=model, key=str(key_name), elapsed=info.get("elapsed"))
+    print(f"✅ تم التفريغ عبر [{model}] بالمفتاح [{key_name}] في {info.get('elapsed')} ث: {text[:40]}...")
+    ok = send_transcript(token, chat_id, text, model, key_name, reply_to_id=reply_to, info=info)
+    if ok:
+        jobs.record(job.job_id, "sent", model=model, key=str(key_name), elapsed=info.get("elapsed"), text=text[:2000])
+    else:
+        jobs.record(job.job_id, "failed", error="send_transcript failed", model=model)
+    STATE["processed"] += 1
+    return {"text": text, "model": model, "key_name": key_name, "info": info}
+
+
+def _on_job_failed(job, err):
+    STATE["last_error"] = str(err)
+    print(f"❌ خطأ تفريغ [{job.job_id}]: {err}")
+    if job.source == "web" or not job.chat_id:
+        return
+    token = job.meta.get("token") or _runtime_token()
+    send_telegram_message(token, job.chat_id, f"❌ عذراً، فشل التفريغ:\n{err}", reply_to_id=job.message_id)
+
+
+def _on_job_deferred(job, wait_s, kind):
+    """تأجيل صامت (الاستراتيجية الصامتة): لوج فقط؛ المالك يُسأل عند الحصة فقط عبر _on_quota_deferral."""
+    print(f"⏳ تأجيل [{job.job_id}] {wait_s}ث ({kind}) — تأجيل #{job.deferrals}")
+
+
+def _on_quota_deferral(job, wait_s):
+    """صمام الحصة [قرار-مالك]: مرة واحدة لكل مهمة — [⏭ تخطَّ] [⏳ انتظر] (inline فقط؛ الافتراضي الانتظار)."""
+    if job.source == "web" or not job.chat_id:
+        return
+    token = job.meta.get("token") or _runtime_token()
+    mins = max(1, int(round(wait_s / 60)))
+    payload = {
+        "chat_id": job.chat_id,
+        "text": f"⏳ الحصة نفدت مؤقتاً على كل المفاتيح — المهمة هتتنفذ تلقائياً بعد ~{mins} د.\n"
+                f"لو مش مستعجل سيبها، أو تخطّاها:",
+        "reply_markup": {"inline_keyboard": [[
+            {"text": "⏭ تخطَّ", "callback_data": f"q:skip:{job.job_id}"},
+            {"text": "⏳ انتظر", "callback_data": f"q:wait:{job.job_id}"},
+        ]]},
+    }
+    if job.message_id:
+        payload["reply_to_message_id"] = job.message_id
+    try:
+        resp = _tg_post(token, "sendMessage", payload)
+        if resp.status_code == 200:
+            mid = resp.json().get("result", {}).get("message_id")
+            _quota_prompts[job.job_id] = (job.chat_id, mid)
     except Exception as e:
-        print(f"❌ خطأ تفريغ: {e}")
-        STATE["last_error"] = str(e)
-        send_telegram_message(token, chat_id, f"❌ عذراً، فشل التفريغ:\n{e}", reply_to_id=msg["message_id"])
+        print(f"⚠️ تعذر إرسال صمام الحصة: {e}")
+
+
+def handle_callback(token, cq):
+    """callback_query من الأزرار inline: q:skip:<id> / q:wait:<id>. يرد answerCallbackQuery دائماً."""
+    data = cq.get("data") or ""
+    cq_id = cq.get("id")
+    note = ""
+    parts = data.split(":")
+    if len(parts) == 3 and parts[0] == "q":
+        action, job_id = parts[1], parts[2]
+        if action == "skip":
+            ok = QUEUE.skip(job_id) if QUEUE else False
+            note = "⏭ تم التخطّي" if ok else "المهمة انتهت بالفعل"
+        elif action == "wait":
+            note = "⏳ تمام، هستنى وهنفّذها تلقائياً"
+        prompt = _quota_prompts.pop(job_id, None)
+        if prompt and prompt[1]:
+            delete_message(token, prompt[0], prompt[1])
+    try:
+        _tg_post(token, "answerCallbackQuery", {"callback_query_id": cq_id, "text": note[:200]}, timeout=10)
+    except Exception:
+        pass
+    return note
+
+
+def start_queue(resume=True):
+    """ينشئ الطابور الموحّد ويشغّله مرة واحدة؛ resume=True يعيد المهام المعلقة من jobs.ndjson (P0)."""
+    global QUEUE
+    with _queue_lock:
+        if QUEUE is None:
+            QUEUE = voice_queue.VoiceQueue(
+                process_job, on_deferred=_on_job_deferred, on_quota_deferral=_on_quota_deferral,
+                on_failed=_on_job_failed,
+            ).start()
+            if resume:
+                try:
+                    n = QUEUE.resume()
+                    if n:
+                        print(f"🔁 استئناف {n} مهمة معلقة من الجلسة السابقة (P0)")
+                except Exception as e:
+                    print(f"⚠️ فشل استئناف المهام المعلقة: {e}")
+        return QUEUE
+
+
+def stop_queue(timeout=2):
+    global QUEUE
+    with _queue_lock:
+        q, QUEUE = QUEUE, None
+    if q:
+        q.stop(timeout=timeout)
+
+
+def queue_in_flight():
+    """عداد المهام الجارية الموحّد (تليجرام + ويب) — يقرأه main.shutdown و/health."""
+    q = QUEUE
+    return q.in_flight if q else 0
+
+
+def transcribe_via_queue(audio_bytes, mime_type, label="web", timeout=None, transcribe_fn=None):
+    """
+    مسار الويب الموحّد [متطلب-مالك]: يُدرج Job(source="web") في نفس الطابور وينتظر النتيجة.
+    بذلك in_flight واحد للتليجرام والويب — SIGTERM لا يقطع تفريغاً جارياً من الويب.
+    يرجع (text, model, key_name, info) أو يرفع الاستثناء الأصلي (QueueFull / RuntimeError ...).
+    """
+    done = threading.Event()
+    job = voice_queue.Job(source="web", file_id=None, mime_type=mime_type, label=label,
+                          size=len(audio_bytes), meta={"audio_bytes": audio_bytes, "done": done,
+                                                       "transcribe_fn": transcribe_fn})
+    q = start_queue()
+    q.submit(job, journal_event=None)          # لا استئناف لمهام الويب: البايتات في الذاكرة فقط
+    # الطابور يضبط meta["done"] عند أي نهاية (done/failed/skipped) — نستيقظ فوراً
+    timeout = timeout or (Config.GEMINI_READ_TIMEOUT_MAX_LARGE * 3)
+    done.wait(timeout)
+    if job.state == "done" and job.result:
+        r = job.result
+        return r["text"], r["model"], r["key_name"], r["info"]
+    if job.state == "failed":
+        raise RuntimeError(job.error or "فشل التفريغ")
+    if job.state == "skipped":
+        raise RuntimeError("تم تخطّي المهمة")
+    raise RuntimeError(f"⏳ انتهت مهلة الانتظار في الطابور ({int(timeout)}ث) — المهمة لا تزال {job.state}")
+
+
+def enqueue_telegram_audio(token, chat_id, msg, file_id, mime_type, label):
+    """
+    يعمل في خيط الـ poller — سريع بلا شبكة ثقيلة:
+    حجم > MAX_FILE_MB → رسالة؛ 👀 فوراً؛ إدراج في الطابور؛ إيصال فقط لو الطابور > 1 [قرار-مالك].
+    """
+    media = msg.get("voice") or msg.get("audio") or msg.get("video_note") or msg.get("video") or msg.get("document") or {}
+    size = media.get("file_size") or 0
+    if size > Config.MAX_FILE_MB * 1024 * 1024:
+        send_telegram_message(token, chat_id,
+                              f"📦 الملف {size / 1024 / 1024:.1f}MB أكبر من حد تليجرام للبوتات ({Config.MAX_FILE_MB}MB). "
+                              f"قصّه أو ابعته كفويس أقصر.", reply_to_id=msg["message_id"])
+        return None
+    set_reaction(token, chat_id, msg["message_id"])
+    q = start_queue()
+    job = voice_queue.new_telegram_job(chat_id, msg, file_id, mime_type, label)
+    job.meta["token"] = token
+    try:
+        position = q.submit(job)
+    except voice_queue.QueueFull as e:
+        send_telegram_message(token, chat_id, f"🚦 {e}", reply_to_id=msg["message_id"])
+        return None
+    if q.size() > 1:
+        send_telegram_message(token, chat_id, f"📥 استلمت — ترتيبك في الطابور: {position} (قدّامك {position - 1})",
+                              reply_to_id=msg["message_id"])
+    return job
+
+
+def handle_audio(token, chat_id, msg, file_id, mime_type, label):
+    """توافق خلفي: يُدرج في الطابور الموحّد (كان ينفّذ مباشرة في ThreadPool)."""
+    return enqueue_telegram_audio(token, chat_id, msg, file_id, mime_type, label)
+
+
+def _queue_text():
+    q = QUEUE
+    if not q:
+        return "📭 الطابور غير مشغّل بعد (لا مهام)."
+    s = q.snapshot()
+    st = s["stats"]
+    mode = "تخطّي المؤجَّل" if s["skip_deferred"] else "حجب (ترتيب الوصول)"
+    lines = [f"📋 الطابور: {s['size']} مهمة | جارية {s['in_flight']} | الوضع: {mode}",
+             f"📈 منجز {st['done']} · فشل {st['failed']} · مؤجَّل {st['deferred']} · متخطّى {st['skipped']} · "
+             f"مستأنَف {st['resumed']} · مكرر {st['deduped']}"]
+    for i, it in enumerate(s["items"][:10], 1):
+        extra = f" — يفتح بعد {it['ready_in_s']}ث" if it["ready_in_s"] else ""
+        lines.append(f"  {i}. {it['label']} [{it['source']}] {it['state']} ({it['waiting_s']}ث){extra}")
+    if s["size"] > 10:
+        lines.append(f"  … و{s['size'] - 10} أخرى")
+    return "\n".join(lines)
 
 
 def _help_text():
@@ -324,6 +558,7 @@ def _help_text():
         "/backup — نسخة احتياطية (أرشيف+جلسات+إعدادات) بلا أسرار\n"
         "/backup_secrets — نسخة keys.json بتأكيد صريح\n"
         "/version — رقم النسخة والبناء ومدة التشغيل\n"
+        "/queue — الطابور الحالي وإحصاءاته\n"
         "/reset — فتح قواطع الموديلات المقفولة مؤقتاً (لو عايز تجرّب حالاً)\n"
         "/help — هذه الرسالة\n\n"
         f"🛡️ الموديلات: {key_manager.models_chain_text()}"
@@ -355,7 +590,7 @@ def _resilience_text():
     mode = "طوارئ (short-poll)" if STATE["emergency_mode"] else "حماية (poll قصير)" if STATE["protect_mode"] \
         else f"حذر ({int(netsession.cautious.remaining_s())}ث)" if netsession.cautious.active() else "طبيعي"
     return (f"🛡️ التعافي الذاتي: الوضع {mode} | poller #{STATE['poller_generation']} | "
-            f"أخطاء شبكة {STATE['net_errors']} (ReadTimeout {STATE['read_timeouts']}) | مهام جارية {STATE['in_flight']}")
+            f"أخطاء شبكة {STATE['net_errors']} (ReadTimeout {STATE['read_timeouts']}) | مهام جارية {queue_in_flight()}")
 
 
 def _models_state_text():
@@ -478,6 +713,9 @@ def handle_text(token, chat_id, msg, msg_text):
     elif cmd == "/version":
         send_telegram_message(token, chat_id, preflight.version_line(), reply_to_id=msg["message_id"])
 
+    elif cmd in ("/queue", "الطابور"):
+        send_telegram_message(token, chat_id, _queue_text(), reply_to_id=msg["message_id"])
+
     elif cmd in ("/start", "/help", "مساعدة"):
         send_telegram_message(token, chat_id, _help_text(), reply_to_id=msg["message_id"])
 
@@ -589,9 +827,19 @@ def main(stop_event=None, pool=None, poll_params=None):
                 heartbeat.beat("poller", note="getUpdates 200")
                 for up in res.json().get("result", []):
                     offset = up["update_id"] + 1          # نتقدم دائماً حتى لو فشلت معالجة الرسالة
+                    cq = up.get("callback_query")
+                    if cq:
+                        cq_chat = str((cq.get("message") or {}).get("chat", {}).get("id", ""))
+                        if allowed_chat_id and cq_chat == allowed_chat_id:
+                            try:
+                                handle_callback(bot_token, cq)
+                            except Exception as e:
+                                print(f"⚠️ خطأ في callback_query: {e}")
+                        continue
                     msg = up.get("message")
                     if not msg:
                         continue
+                    msg["_update_id"] = up["update_id"]
                     chat_id = str(msg["chat"]["id"])
 
                     if not allowed_chat_id or chat_id != allowed_chat_id:
@@ -601,7 +849,11 @@ def main(stop_event=None, pool=None, poll_params=None):
                     audio = _is_audio_message(msg)
                     if audio:
                         file_id, mime_type, label = audio
-                        pool.submit(handle_audio, bot_token, chat_id, msg, file_id, mime_type, label)
+                        try:
+                            enqueue_telegram_audio(bot_token, chat_id, msg, file_id, mime_type, label)
+                        except Exception as e:
+                            print(f"⚠️ فشل إدراج الفويس في الطابور: {e}")
+                            STATE["last_error"] = str(e)
                         continue
 
                     if msg.get("document"):

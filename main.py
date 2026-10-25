@@ -132,17 +132,24 @@ class Runtime:
         if self.watchdog is not None:
             self.watchdog.stop(timeout=1)
         deadline = time.monotonic() + Config.SHUTDOWN_GRACE
-        while telegram_bot.STATE["in_flight"] > 0 and time.monotonic() < deadline:
+        # 1b: عداد موحّد (تليجرام + ويب) من الطابور — لا نقطع تفريغاً جارياً من أي مصدر
+        while self._in_flight() > 0 and time.monotonic() < deadline:
             time.sleep(0.2)
-        left = telegram_bot.STATE["in_flight"]
+        left = self._in_flight()
+        pending = telegram_bot.QUEUE.size() if telegram_bot.QUEUE is not None else 0
+        telegram_bot.stop_queue(timeout=1)
         self.pool.shutdown(wait=False, cancel_futures=True)
         if self.notifier is not None:
             self.notifier.stop(timeout=1)
-        if left:
-            print(f"⚠️ {left} مهمة لم تكتمل خلال المهلة — ستُعاد بعد الإقلاع عند تفعيل jobs.ndjson (1b).")
+        if left or pending:
+            print(f"⚠️ {left} مهمة جارية لم تكتمل + {max(0, pending - left)} في الانتظار — مهام تليجرام ستُستأنف بعد الإقلاع من jobs.ndjson (P0).")
         else:
             print("👋 تم إيقاف المنظومة بنجاح (0 مهام معلقة).")
         return left
+
+    @staticmethod
+    def _in_flight():
+        return max(telegram_bot.queue_in_flight(), telegram_bot.STATE.get("in_flight", 0))
 
 
 def install_signal_handlers(stop_event):
@@ -184,6 +191,37 @@ def _startup_ping(bot_token, chat_id, web_error=None):
         print(f"⚠️ تعذر إرسال إشعار الإقلاع: {e}")
 
 
+def _idle_loop(rt, web_t, bot_token, tick=1.0):
+    """
+    حلقة الخيط الرئيسي: تنام بنبضات قصيرة (tick) لا بـ WATCHDOG_INTERVAL*3 دفعة واحدة.
+    السبب: SIGTERM قد تُسلَّم لخيط آخر، ومعالج بايثون لا يعمل إلا عندما يستيقظ الخيط الرئيسي —
+    نوم 30 ث يعني تأخر الإيقاف الرشيق حتى 30 ث (كشفه اختبار الدخان في 1b). الفحوصات الدورية تبقى كل 30 ث.
+    """
+    period = Config.WATCHDOG_INTERVAL * 3
+    next_check = time.monotonic() + period
+    web_restarts = 0
+    while not rt.global_stop.wait(tick):
+        if time.monotonic() < next_check:
+            continue
+        next_check = time.monotonic() + period
+        if web_t is not None and not web_t.is_alive():
+            web_restarts += 1
+            print(f"🩺 main: خادم الويب توقف — إعادة تشغيل (#{web_restarts})...")
+            try:
+                web_t = web_service.start_web_server_thread()
+            except Exception as e:
+                print(f"⚠️ فشل إعادة تشغيل الويب: {e}")
+        if rt.watchdog is not None and not rt.watchdog.is_alive():
+            rt.watchdog_restarts += 1
+            print(f"🩺 main: الـ watchdog توقف — إعادة إنشائه (#{rt.watchdog_restarts})")
+            rt.start_watchdog()
+        # 401 أوقف الـ poller طوعاً → لا نعيده (التوكن باطل)؛ أي خروج آخر غير متوقع → إعادة
+        if bot_token and not rt.poller_alive() and telegram_bot.STATE.get("stopped_reason") not in ("401",):
+            print("🩺 main: خيط الـ poller مات بلا سبب معروف — إعادة تشغيل")
+            rt.restart_poller()
+    return web_t
+
+
 def main():
     # على الاستضافة stdout غالباً pipe → بدون line buffering لا يظهر شيء في الكونسول إلا عند الامتلاء
     try:
@@ -212,6 +250,11 @@ def main():
     # 2. بوت تليجرام + watchdog مستقل (03b الطبقة 3) + معالجات SIGTERM (الطبقة 0.5)
     rt = Runtime(bot_token, chat_id)
     install_signal_handlers(rt.global_stop)
+    # 1b: الطابور الموحّد يبدأ قبل الـ poller ويستأنف المهام المعلقة من الجلسة السابقة (P0)
+    try:
+        telegram_bot.start_queue(resume=bool(bot_token))
+    except Exception as e:
+        print(f"⚠️ تعذر بدء الطابور الموحّد: {e}")
     if bot_token:
         rt.start_poller()
         rt.start_watchdog()
@@ -221,29 +264,12 @@ def main():
         print("ℹ️ لم يتم العثور على توكن تليجرام، المنظومة تعمل في وضع الويب فقط.")
 
     # 3. الخيط الرئيسي خامل: يراقب المراقب (watchdog) والويب فقط، وينتظر إشارة الإيقاف
-    web_restarts = 0
     try:
-        while not rt.global_stop.wait(Config.WATCHDOG_INTERVAL * 3):
-            if web_t is not None and not web_t.is_alive():
-                web_restarts += 1
-                print(f"🩺 main: خادم الويب توقف — إعادة تشغيل (#{web_restarts})...")
-                try:
-                    web_t = web_service.start_web_server_thread()
-                except Exception as e:
-                    print(f"⚠️ فشل إعادة تشغيل الويب: {e}")
-            if rt.watchdog is not None and not rt.watchdog.is_alive():
-                rt.watchdog_restarts += 1
-                print(f"🩺 main: الـ watchdog توقف — إعادة إنشائه (#{rt.watchdog_restarts})")
-                rt.start_watchdog()
-            # 401 أوقف الـ poller طوعاً → لا نعيده (التوكن باطل)؛ أي خروج آخر غير متوقع → إعادة
-            if bot_token and not rt.poller_alive() and telegram_bot.STATE.get("stopped_reason") not in ("401",):
-                print("🩺 main: خيط الـ poller مات بلا سبب معروف — إعادة تشغيل")
-                rt.restart_poller()
+        web_t = _idle_loop(rt, web_t, bot_token)
     except KeyboardInterrupt:
         rt.global_stop.set()
     code = 0
-    if bot_token:
-        rt.shutdown(reason="إيقاف")
+    rt.shutdown(reason="إيقاف")      # أيضاً في وضع الويب-فقط: ننتظر تفريغات الويب الجارية
     sys.exit(code)
 
 
