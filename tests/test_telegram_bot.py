@@ -33,7 +33,7 @@ def bot(fresh_env, monkeypatch):
             return FakeResp(400, "Bad Request: can't parse entities")
         return FakeResp(200, payload={"ok": True})
 
-    monkeypatch.setattr(telegram_bot.requests, "post", fake_post)
+    monkeypatch.setattr(telegram_bot, "_http_post", fake_post)
     return telegram_bot, sent
 
 
@@ -89,7 +89,7 @@ def test_send_returns_false_on_network_error(bot, monkeypatch):
     tb, _ = bot
     def boom(*a, **k):
         raise ConnectionError("down")
-    monkeypatch.setattr(tb.requests, "post", boom)
+    monkeypatch.setattr(tb, "_http_post", boom)
     assert tb.send_telegram_message("T", "1", "x") is False
 
 
@@ -160,7 +160,7 @@ def _capture_documents(tb, sent=None):
             sent.append({"url": url, "payload": json})
         return FakeResp(200, payload={"ok": True})
     import pytest as _p
-    mp = _p.MonkeyPatch(); mp.setattr(tb.requests, "post", fake_post)
+    mp = _p.MonkeyPatch(); mp.setattr(tb, "_http_post", fake_post)
     return captured, mp
 
 
@@ -277,7 +277,7 @@ def test_progress_keeper_sends_and_deletes_progress_message(bot, monkeypatch):
         if "sendMessage" in url:
             return FakeResp(200, payload={"ok": True, "result": {"message_id": 99}})
         return FakeResp(200, payload={"ok": True})
-    monkeypatch.setattr(tb.requests, "post", fake_post)
+    monkeypatch.setattr(tb, "_http_post", fake_post)
 
     import time as _t
     with tb.ProgressKeeper("T", "1", reply_to_id=5) as pk:

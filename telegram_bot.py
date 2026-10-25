@@ -21,6 +21,7 @@ from model_state import model_circuit
 import heartbeat
 import backup
 import preflight
+import netsession
 
 if sys.platform == "win32":
     try:
@@ -36,7 +37,31 @@ STATE = {
     "last_error": None,
     "processed": 0,
     "alive": False,
+    "poller_generation": 0,   # كم مرة أُنشئ خيط poller (1 = الأصلي)
+    "net_errors": 0,          # أخطاء شبكة متراكمة في الـ poller
+    "read_timeouts": 0,       # ReadTimeout في getUpdates (L0)
+    "stopped_reason": None,   # لماذا خرج الـ poller طوعاً (401 / stop_event)
+    "in_flight": 0,           # مهام تفريغ جارية الآن (للإيقاف الرشيق)
 }
+_in_flight_lock = threading.Lock()
+
+
+def _api(token, method):
+    return f"https://api.telegram.org/bot{token}/{method}"
+
+
+def _tg_timeout(read=None):
+    """مهلة tuple (فتح، قراءة) — كل نداء تليجرام يمر من هنا (03b §2 بند 3)."""
+    return (Config.TG_CONNECT_TIMEOUT, read or Config.TELEGRAM_TIMEOUT)
+
+
+def _http_post(url, **kw):
+    """نقطة المرور الوحيدة لـ POST (Session لكل خيط + إغلاق عند الخطأ). الاختبارات تستبدلها."""
+    return netsession.post(url, **kw)
+
+
+def _http_get(url, **kw):
+    return netsession.get_url(url, **kw)
 
 AUDIO_EXTS = (".ogg", ".oga", ".opus", ".mp3", ".m4a", ".mp4", ".wav", ".aac", ".flac", ".webm", ".amr")
 
@@ -61,8 +86,7 @@ def _chunk_text(text, limit):
 
 
 def _tg_post(token, method, payload, timeout=None):
-    url = f"https://api.telegram.org/bot{token}/{method}"
-    return requests.post(url, json=payload, timeout=timeout or Config.TELEGRAM_TIMEOUT)
+    return _http_post(_api(token, method), json=payload, timeout=_tg_timeout(timeout))
 
 
 def send_telegram_message(token, chat_id, text, reply_to_id=None, parse_mode=None):
@@ -219,17 +243,17 @@ def _is_audio_message(msg):
 
 
 def _download_file(token, file_id):
-    info = requests.get(
-        f"https://api.telegram.org/bot{token}/getFile",
+    info = _http_get(
+        _api(token, "getFile"),
         params={"file_id": file_id},
-        timeout=Config.TELEGRAM_TIMEOUT,
+        timeout=_tg_timeout(),
     ).json()
     file_path = info.get("result", {}).get("file_path")
     if not file_path:
         raise RuntimeError("تعذر الحصول على مسار الملف من تليجرام")
-    resp = requests.get(
+    resp = _http_get(
         f"https://api.telegram.org/file/bot{token}/{file_path}",
-        timeout=Config.TELEGRAM_DOWNLOAD_TIMEOUT,
+        timeout=_tg_timeout(Config.TELEGRAM_DOWNLOAD_TIMEOUT),
     )
     resp.raise_for_status()
     return resp.content
@@ -238,6 +262,17 @@ def _download_file(token, file_id):
 def handle_audio(token, chat_id, msg, file_id, mime_type, label):
     """يعمل داخل ThreadPool."""
     heartbeat.beat("worker", note="job start")
+    with _in_flight_lock:
+        STATE["in_flight"] += 1
+    try:
+        _handle_audio_inner(token, chat_id, msg, file_id, mime_type, label)
+    finally:
+        with _in_flight_lock:
+            STATE["in_flight"] -= 1
+        heartbeat.beat("worker", note="job end")
+
+
+def _handle_audio_inner(token, chat_id, msg, file_id, mime_type, label):
     try:
         print(f"🎙️ تم استلام تسجيل صوتي ({label}) من {chat_id}...")
         with ProgressKeeper(token, chat_id, reply_to_id=msg["message_id"]):
@@ -308,11 +343,11 @@ def _models_state_text():
 
 
 def _send_document(token, chat_id, filename, data_bytes, mime, caption, reply_to_id):
-    resp = requests.post(
-        f"https://api.telegram.org/bot{token}/sendDocument",
+    resp = _http_post(
+        _api(token, "sendDocument"),
         data={"chat_id": chat_id, "caption": caption, "reply_to_message_id": reply_to_id},
         files={"document": (filename, data_bytes, mime)},
-        timeout=Config.TELEGRAM_TIMEOUT,
+        timeout=_tg_timeout(Config.TELEGRAM_DOWNLOAD_TIMEOUT),
     )
     if resp.status_code != 200:
         send_telegram_message(token, chat_id, f"⚠️ فشل إرسال الملف ({resp.status_code}).", reply_to_id=reply_to_id)
@@ -418,7 +453,16 @@ def handle_text(token, chat_id, msg, msg_text):
 # ======================================================================
 # الحلقة الرئيسية
 # ======================================================================
-def main(stop_event=None):
+def main(stop_event=None, pool=None, poll_params=None):
+    """
+    حلقة الـ poller (03b الطبقات 1–2):
+    - Session لكل خيط + مهلات tuples؛ أي خطأ شبكي → netsession.reset() (قتل الـ socket) تلقائياً.
+    - L0: ReadTimeout → وضع الحذر (poll 10ث لـ 5 دقائق) صامت.
+    - backoff شبكي 3→6→12→30 بدل 3ث ثابتة؛ حدث net_degraded مرة واحدة.
+    - 409 يُبلَّغ مرة واحدة في اللوج؛ 401 يوقف الـ poller نهائياً (التوكن باطل — لا فائدة من التكرار).
+    - stop_event: يخرج بين الدورات (SIGTERM الرشيق في main.py)؛ pool يُمرَّر من الخارج ليبقى حياً عبر
+      إعادة تشغيل الـ poller (L1) ولا تضيع مهام جارية.
+    """
     bot_token, bot_user, allowed_chat_id = key_manager.get_telegram_config()
 
     if not bot_token:
@@ -431,41 +475,82 @@ def main(stop_event=None):
         print("⚠️ تحذير: TELEGRAM_CHAT_ID غير مضبوط — البوت سيرفض جميع الرسائل حتى تضبطه في البيئة أو .env")
         print("   (أرسل /start للبوت وسيُطبَع هنا Chat ID الخاص بك لتنسخه)")
 
+    STATE["poller_generation"] += 1
+    gen = STATE["poller_generation"]
     print("=" * 65)
-    print("🤖 جاري تشغيل بوت التليجرام للتفريغ الصوتي الفوري...")
+    print(f"🤖 جاري تشغيل بوت التليجرام للتفريغ الصوتي الفوري... (poller #{gen})")
     print(f"👤 البوت: {bot_user}")
     print(f"🔒 مخصص للمستخدم: {allowed_chat_id or '(غير مضبوط)'}")
     print(f"🧵 عمليات تفريغ متوازية: {Config.BOT_WORKERS}")
     print("=" * 65)
 
-    STATE["started_at"] = time.time()
+    if STATE["started_at"] is None:
+        STATE["started_at"] = time.time()
     STATE["alive"] = True
-    pool = ThreadPoolExecutor(max_workers=max(1, Config.BOT_WORKERS), thread_name_prefix="transcribe")
+    STATE["stopped_reason"] = None
+    own_pool = pool is None
+    pool = pool or ThreadPoolExecutor(max_workers=max(1, Config.BOT_WORKERS), thread_name_prefix="transcribe")
     offset = None
     stop_event = stop_event or threading.Event()
+    backoff = netsession.NetBackoff()
+    conflict_reported = False
+    degraded_reported = False
+    heartbeat.beat("poller", note=f"start #{gen}")
 
     try:
         while not stop_event.is_set():
             try:
-                params = {"timeout": 30}
+                params = {"timeout": netsession.cautious.poll_timeout()}
+                if poll_params:
+                    params.update(poll_params)
                 if offset:
                     params["offset"] = offset
-                res = requests.get(
-                    f"https://api.telegram.org/bot{bot_token}/getUpdates",
-                    params=params,
-                    timeout=40,
-                )
-                heartbeat.beat("poller", note=f"getUpdates {res.status_code}")
-                if res.status_code == 409:
-                    print("⛔ 409 Conflict: نسخة أخرى من البوت تعمل بنفس التوكن (محلي + استضافة؟). أوقف إحداهما.")
-                    STATE["last_error"] = "409 conflict: another instance is polling"
-                    time.sleep(10)
+                try:
+                    res = _http_get(_api(bot_token, "getUpdates"), params=params, timeout=netsession.cautious.timeouts())
+                except requests.exceptions.ReadTimeout as e:
+                    # L0: socket ميت/نصف مفتوح — netsession أغلق الـ Session بالفعل؛ نهبط لوضع الحذر بصمت
+                    STATE["read_timeouts"] += 1
+                    STATE["net_errors"] += 1
+                    STATE["last_error"] = f"ReadTimeout: {e}"
+                    netsession.cautious.enter()
+                    heartbeat.beat("poller", note="L0 read timeout → cautious")
+                    print(f"⏱️ getUpdates ReadTimeout — Session جديدة + وضع الحذر (poll {Config.TG_POLL_TIMEOUT_CAUTIOUS}ث لـ {Config.CAUTIOUS_MODE_MINUTES} د)")
+                    _wait(stop_event, backoff.next_delay())
                     continue
-                if res.status_code != 200:
-                    STATE["last_error"] = f"getUpdates {res.status_code}"
-                    time.sleep(2)
+                except netsession.NETWORK_ERRORS as e:
+                    STATE["net_errors"] += 1
+                    STATE["last_error"] = f"{type(e).__name__}: {e}"
+                    delay = backoff.next_delay()
+                    heartbeat.beat("poller", note=f"net error → backoff {delay}s")
+                    if backoff.degraded and not degraded_reported:
+                        degraded_reported = True
+                        print(f"📉 net_degraded: أخطاء شبكة متتالية ({type(e).__name__}) — backoff حتى {max(Config.NET_BACKOFF)}ث")
+                    else:
+                        print(f"⚠️ خطأ شبكة في getUpdates: {type(e).__name__}: {e} — إعادة بعد {delay}ث")
+                    _wait(stop_event, delay)
                     continue
 
+                heartbeat.beat("poller", note=f"getUpdates {res.status_code}")
+                if res.status_code == 409:
+                    if not conflict_reported:
+                        conflict_reported = True
+                        print("⛔ 409 Conflict: نسخة أخرى من البوت تعمل بنفس التوكن (محلي + استضافة؟). أوقف إحداهما. (يُبلَّغ مرة واحدة)")
+                    STATE["last_error"] = "409 conflict: another instance is polling"
+                    _wait(stop_event, 10)
+                    continue
+                if res.status_code == 401:
+                    STATE["last_error"] = "401 Unauthorized: التوكن باطل"
+                    STATE["stopped_reason"] = "401"
+                    print("🛑 401 Unauthorized: توكن تليجرام باطل — إيقاف الـ poller (صحّح TELEGRAM_BOT_TOKEN وأعد التشغيل).")
+                    return
+                if res.status_code != 200:
+                    STATE["last_error"] = f"getUpdates {res.status_code}"
+                    _wait(stop_event, 2)
+                    continue
+
+                backoff.succeed()
+                degraded_reported = False
+                conflict_reported = False
                 STATE["last_poll_ok"] = time.time()
                 heartbeat.beat("poller", note="getUpdates 200")
                 for up in res.json().get("result", []):
@@ -501,10 +586,19 @@ def main(stop_event=None):
                 # لا نبتلع الخطأ بصمت — نطبعه حتى يظهر في كونسول الاستضافة (P12)
                 STATE["last_error"] = f"{type(e).__name__}: {e}"
                 print(f"⚠️ خطأ في حلقة البوت: {type(e).__name__}: {e} — إعادة المحاولة بعد 3 ثوانٍ...")
-                time.sleep(3)
+                _wait(stop_event, 3)
+        if STATE["stopped_reason"] is None:
+            STATE["stopped_reason"] = "stop_event"
     finally:
         STATE["alive"] = False
-        pool.shutdown(wait=False)
+        netsession.reset(reason=f"poller #{gen} exit")
+        if own_pool:
+            pool.shutdown(wait=False)
+
+
+def _wait(stop_event, seconds):
+    """نوم قابل للمقاطعة: يعود فوراً عند stop_event (لا نحجز SIGTERM خلف time.sleep)."""
+    stop_event.wait(seconds)
 
 
 if __name__ == "__main__":
