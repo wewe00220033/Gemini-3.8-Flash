@@ -180,7 +180,38 @@ def transcribe_audio_bytes_ex(audio_bytes, mime_type="audio/mp4"):
             break
 
     info["elapsed"] = round(time.time() - started, 1)
-    raise RuntimeError(_final_message(reasons, last, tried_any=info["attempts"] > 0))
+    msg = _final_message(reasons, last, tried_any=info["attempts"] > 0)
+    wait_s, kind = _deferral(reasons, tried_any=info["attempts"] > 0)
+    if wait_s:
+        raise DeferredError(msg, wait_s=wait_s, kind=kind)
+    raise RuntimeError(msg)
+
+
+class DeferredError(RuntimeError):
+    """
+    فشل مؤقت معروف المدة (03 §2.3): الطابور يؤجل المهمة إلى ready_at = now + wait_s بدل إفشالها.
+    kind: "model" (قواطع 5xx/timeout — ثوانٍ/دقائق) أو "quota" (حصة/تهدئة مفاتيح — قد تكون ساعات → صمام سؤال المالك).
+    """
+
+    def __init__(self, message, wait_s, kind):
+        super().__init__(message)
+        self.wait_s = int(wait_s)
+        self.kind = kind
+
+
+def _deferral(reasons, tried_any):
+    """(wait_s, kind) لو الفشل مؤقت ومعروف المدة، وإلا (0, None)."""
+    if reasons and all(model_circuit.is_open(m) for m in Config.MODELS):
+        wait, _m = model_circuit.earliest_open(Config.MODELS)
+        return max(1, int(wait or 0)), "model"
+    if not tried_any:
+        keys = key_manager.data.get("keys", [])
+        if keys and all(k.get("status") == "invalid" for k in keys):
+            return 0, None
+        wait = key_manager.earliest_availability()
+        if wait:
+            return max(1, int(wait)), "quota"
+    return 0, None
 
 
 # ======================================================================
