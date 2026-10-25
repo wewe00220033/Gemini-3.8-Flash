@@ -171,6 +171,25 @@ class Config:
     POLISH_FILE_THRESHOLD = 12000          # 07 §4: نص > ~3 رسائل → يُرسل كملف .md + معاينة
     PANEL_PAGE_SIZE = 5
 
+    # ==============================================================
+    # المرحلة 4 — الجلسات والتسمية والسياق (مواصفتا 08 و10)
+    # ==============================================================
+    SESSIONS_DIR = os.path.join(DATA_DIR, "sessions")                 # sessions_index.json + session_<uuid8>.md + current_session.json
+    SESSIONS_INDEX_FILE = os.path.join(SESSIONS_DIR, "sessions_index.json")
+    CURRENT_SESSION_FILE = os.path.join(SESSIONS_DIR, "current_session.json")
+    SESSION_NAME_MAX = 60                  # 08 §3: تنقية الاسم + حد 60 حرفاً (الملف يبقى session_<uuid8>.md)
+    SESSION_EXPORT_ZIP_MB = 50             # 08 §2: /export يرسل .zip لو الملف > 50MB
+    SMART_TITLE_ENABLED = os.environ.get("SMART_TITLE_ENABLED", "1") not in ("0", "false", "False", "")
+    SMART_TITLE_WORDS = 100                # 08 §2: الاقتراح من أول 100 كلمة عبر flash-lite (نصياً)
+    # السياق (10 §2): L1 = آخر N فويسات خام من الجلسة النشطة، مقتطعة إلى CONTEXT_MAX_CHARS — داخل طبقة A فقط
+    CONTEXT_ENABLED = os.environ.get("CONTEXT_ENABLED", "1") not in ("0", "false", "False", "")
+    CONTEXT_LAST_N = 2
+    CONTEXT_MAX_CHARS = 800
+    CONTEXT_TERMS_MAX = 20                 # L0: الأسماء التقنية التي ظهرت في الجلسة (محلياً بلا AI)
+    CONTEXT_ECHO_RATIO = 0.60              # 10 §3: ≥60% من الناتج موجود حرفياً في L1 → "صدى السياق" = strike
+    CONTEXT_STRIKES_TO_SIMPLE = 2          # بعد ضربتين → المحاولة التالية بسيطة (بلا L1)
+    SIMPLE_MODE_COOLDOWN = 3               # 10 §3: بعد الوصول لضربتين تبدأ الفويسات التالية بسيطة لـ 3 فويسات
+
     # لو كل الموديلات وقعت في نفس اللحظة: جولات إضافية محدودة مع انتظار ذكي (min(أقرب فتح, الميزانية))
     TRANSIENT_RETRY_ROUNDS = 2           # إجمالي 3 جولات كحد أقصى
     TRANSIENT_RETRY_BACKOFF = (2, 4)     # حد أدنى للانتظار بين الجولات
