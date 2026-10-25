@@ -235,6 +235,12 @@ class VoiceQueue:
     def _finish_locked(self, job, state):
         job.state = state
         self._jobs.pop(job.job_id, None)
+        ev = job.meta.get("done") if isinstance(job.meta, dict) else None
+        if ev is not None:
+            try:
+                ev.set()                      # يوقظ منتظر الويب فوراً (transcribe_via_queue)
+            except Exception:
+                pass
 
     def _pace(self):
         if self.pacing_s and self._last_job_end_mono is not None:
@@ -253,10 +259,10 @@ class VoiceQueue:
             job.attempts += 1
             try:
                 result = self._processor(job)
+                job.result = result                    # قبل تغيير الحالة: من يراقب state==done يجد النتيجة جاهزة
                 with self._lock:
                     self._finish_locked(job, "done")
                     self.stats["done"] += 1
-                job.result = result
                 self._safe(self._on_done, job, result)
             except Exception as e:
                 wait_s = getattr(e, "wait_s", None)
@@ -264,10 +270,10 @@ class VoiceQueue:
                 if wait_s:
                     self._defer(job, wait_s, kind, e)
                 else:
+                    job.error = str(e)
                     with self._lock:
                         self._finish_locked(job, "failed")
                         self.stats["failed"] += 1
-                    job.error = str(e)
                     if self._journal:
                         jobs.record(job.job_id, "failed", error=str(e)[:300], attempts=job.attempts)
                     self._safe(self._on_failed, job, e)

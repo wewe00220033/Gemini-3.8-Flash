@@ -339,7 +339,8 @@ def process_job(job):
     heartbeat.beat("worker", note=f"job start {job.job_id}")
     if job.source == "web":
         audio_bytes = job.meta.get("audio_bytes") or b""
-        text, model, key_name, info = transcribe_audio_bytes_ex(audio_bytes, job.mime_type)
+        fn = job.meta.get("transcribe_fn") or transcribe_audio_bytes_ex
+        text, model, key_name, info = fn(audio_bytes, job.mime_type)
         jobs.record(job.job_id, "sent", model=model, key=str(key_name), elapsed=info.get("elapsed"), text=text[:2000])
         STATE["processed"] += 1
         return {"text": text, "model": model, "key_name": key_name, "info": info}
@@ -467,6 +468,31 @@ def queue_in_flight():
     """عداد المهام الجارية الموحّد (تليجرام + ويب) — يقرأه main.shutdown و/health."""
     q = QUEUE
     return q.in_flight if q else 0
+
+
+def transcribe_via_queue(audio_bytes, mime_type, label="web", timeout=None, transcribe_fn=None):
+    """
+    مسار الويب الموحّد [متطلب-مالك]: يُدرج Job(source="web") في نفس الطابور وينتظر النتيجة.
+    بذلك in_flight واحد للتليجرام والويب — SIGTERM لا يقطع تفريغاً جارياً من الويب.
+    يرجع (text, model, key_name, info) أو يرفع الاستثناء الأصلي (QueueFull / RuntimeError ...).
+    """
+    done = threading.Event()
+    job = voice_queue.Job(source="web", file_id=None, mime_type=mime_type, label=label,
+                          size=len(audio_bytes), meta={"audio_bytes": audio_bytes, "done": done,
+                                                       "transcribe_fn": transcribe_fn})
+    q = start_queue()
+    q.submit(job, journal_event=None)          # لا استئناف لمهام الويب: البايتات في الذاكرة فقط
+    # الطابور يضبط meta["done"] عند أي نهاية (done/failed/skipped) — نستيقظ فوراً
+    timeout = timeout or (Config.GEMINI_READ_TIMEOUT_MAX_LARGE * 3)
+    done.wait(timeout)
+    if job.state == "done" and job.result:
+        r = job.result
+        return r["text"], r["model"], r["key_name"], r["info"]
+    if job.state == "failed":
+        raise RuntimeError(job.error or "فشل التفريغ")
+    if job.state == "skipped":
+        raise RuntimeError("تم تخطّي المهمة")
+    raise RuntimeError(f"⏳ انتهت مهلة الانتظار في الطابور ({int(timeout)}ث) — المهمة لا تزال {job.state}")
 
 
 def enqueue_telegram_audio(token, chat_id, msg, file_id, mime_type, label):

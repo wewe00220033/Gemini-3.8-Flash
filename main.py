@@ -132,17 +132,24 @@ class Runtime:
         if self.watchdog is not None:
             self.watchdog.stop(timeout=1)
         deadline = time.monotonic() + Config.SHUTDOWN_GRACE
-        while telegram_bot.STATE["in_flight"] > 0 and time.monotonic() < deadline:
+        # 1b: عداد موحّد (تليجرام + ويب) من الطابور — لا نقطع تفريغاً جارياً من أي مصدر
+        while self._in_flight() > 0 and time.monotonic() < deadline:
             time.sleep(0.2)
-        left = telegram_bot.STATE["in_flight"]
+        left = self._in_flight()
+        pending = telegram_bot.QUEUE.size() if telegram_bot.QUEUE is not None else 0
+        telegram_bot.stop_queue(timeout=1)
         self.pool.shutdown(wait=False, cancel_futures=True)
         if self.notifier is not None:
             self.notifier.stop(timeout=1)
-        if left:
-            print(f"⚠️ {left} مهمة لم تكتمل خلال المهلة — ستُعاد بعد الإقلاع عند تفعيل jobs.ndjson (1b).")
+        if left or pending:
+            print(f"⚠️ {left} مهمة جارية لم تكتمل + {max(0, pending - left)} في الانتظار — مهام تليجرام ستُستأنف بعد الإقلاع من jobs.ndjson (P0).")
         else:
             print("👋 تم إيقاف المنظومة بنجاح (0 مهام معلقة).")
         return left
+
+    @staticmethod
+    def _in_flight():
+        return max(telegram_bot.queue_in_flight(), telegram_bot.STATE.get("in_flight", 0))
 
 
 def install_signal_handlers(stop_event):
@@ -212,6 +219,11 @@ def main():
     # 2. بوت تليجرام + watchdog مستقل (03b الطبقة 3) + معالجات SIGTERM (الطبقة 0.5)
     rt = Runtime(bot_token, chat_id)
     install_signal_handlers(rt.global_stop)
+    # 1b: الطابور الموحّد يبدأ قبل الـ poller ويستأنف المهام المعلقة من الجلسة السابقة (P0)
+    try:
+        telegram_bot.start_queue(resume=bool(bot_token))
+    except Exception as e:
+        print(f"⚠️ تعذر بدء الطابور الموحّد: {e}")
     if bot_token:
         rt.start_poller()
         rt.start_watchdog()
@@ -242,8 +254,7 @@ def main():
     except KeyboardInterrupt:
         rt.global_stop.set()
     code = 0
-    if bot_token:
-        rt.shutdown(reason="إيقاف")
+    rt.shutdown(reason="إيقاف")      # أيضاً في وضع الويب-فقط: ننتظر تفريغات الويب الجارية
     sys.exit(code)
 
 
