@@ -629,7 +629,7 @@ def _help_text():
         "/last — إعادة إرسال آخر تفريغ من الأرشيف · /find <كلمة> — بحث في الأرشيف · /polish (رد على تفريغ) — تنظيم عند الطلب\n"
         "/header [both|raw|polished|off] — بانر «تفريغ آلي» فوق النص\n"
         "/new_session [اسم] · /end · /sessions · /resume <id> · /rename_session <اسم> · /export [id] · /merge_sessions <id1> <id2> — الجلسات (كل فويس يُكتب في الجلسة وفي ALL.md)\n"
-        "/context [on|off] — سياق الفويسات السابقة داخل الجلسة (يسقط تلقائياً بعد ضربتين) · /stats — إحصاء\n"
+        "/context [on|off] — سياق الفويسات السابقة داخل الجلسة (يسقط تلقائياً بعد ضربتين) · /session_role <id|-> — دور خاص بالجلسة · /stats — إحصاء\n"
         "/project_group <مفتاح> <مجموعة> — مفاتيح نفس مشروع Google تتشارك الحصة (والقفز عند 503 لمشروع آخر). اكتب - للإزالة\n"
         "/backup — نسخة احتياطية (أرشيف+جلسات+إعدادات) بلا أسرار\n"
         "/backup_secrets — نسخة keys.json بتأكيد صريح\n"
@@ -683,7 +683,8 @@ def _sessions_text():
         return "📂 الجلسات: لا جلسة نشطة (الفويسات في ALL.md فقط) — /new_session لبدء واحدة"
     extra = f" · ضربات {cur.get('strikes')}" if cur.get("strikes") else ""
     pend = f" · اقتراح معلّق «{cur['pending_title']}»" if cur.get("pending_title") else ""
-    return f"📂 الجلسة النشطة: «{cur['name']}» [{cur['id']}] — {cur.get('count', 0)} فويس · السياق: {sessions.context_mode()}{extra}{pend}"
+    ro = f" · دور الجلسة {cur['role_override']}" if cur.get("role_override") else ""
+    return f"📂 الجلسة النشطة: «{cur['name']}» [{cur['id']}] — {cur.get('count', 0)} فويس · السياق: {sessions.context_mode()}{extra}{pend}{ro}"
 
 
 def _pipeline_text():
@@ -880,6 +881,29 @@ def handle_text(token, chat_id, msg, msg_text):
         send_telegram_message(token, chat_id, f"🔗 دُمجتا في «{m_['name']}» [{m_['id']}] — {m_['count']} فويس." if m_ else "تعذر الدمج (تحقق من المعرّفين).",
                               reply_to_id=msg["message_id"])
 
+    elif cmd == "/session_role":
+        cur_ = sessions.current()
+        if not cur_:
+            send_telegram_message(token, chat_id, "لا جلسة نشطة — /new_session أولاً.", reply_to_id=msg["message_id"])
+            return
+        if not args:
+            ov = sessions.role_override()
+            send_telegram_message(token, chat_id, f"🎭 دور الجلسة «{cur_['name']}»: {ov or 'الافتراضي (' + settings.role() + ')'}\n"
+                                                  "/session_role <id> لتجاوز الدور لهذه الجلسة فقط · /session_role - للعودة للدور العام · /roles للقائمة",
+                                  reply_to_id=msg["message_id"])
+            return
+        rid = args[0].lower()
+        if rid in ("-", "off", "reset", "الافتراضي"):
+            sessions.set_role_override(None)
+            send_telegram_message(token, chat_id, f"🎭 عادت الجلسة إلى الدور العام ({settings.role()}).", reply_to_id=msg["message_id"])
+            return
+        r_ = prompts.get_role(rid)
+        if not r_:
+            send_telegram_message(token, chat_id, f"دور غير معروف: {rid} — /roles للقائمة", reply_to_id=msg["message_id"])
+            return
+        sessions.set_role_override(rid)
+        send_telegram_message(token, chat_id, f"🎭 دور هذه الجلسة الآن: {rid} ({r_.get('name', '?')}) — يُطبَّق على التفريغ والتنظيم في الجلسة فقط.", reply_to_id=msg["message_id"])
+
     elif cmd == "/context":
         if not args:
             send_telegram_message(token, chat_id, f"السياق داخل الجلسة: {sessions.context_mode()} (ضربات: {sessions.strikes()})\n"
@@ -1024,9 +1048,9 @@ def handle_text(token, chat_id, msg, msg_text):
             send_telegram_message(token, chat_id, "رُدّ بـ /polish على رسالة تفريغ أو ملف .md (أو اكتب النص بعد الأمر).", reply_to_id=msg["message_id"])
             return
         import text_assist
-        polished, reason = text_assist.polish(src, settings.role(), glossary_mod.get_glossary())
+        polished, reason = text_assist.polish(src, settings.effective_role(), glossary_mod.get_glossary())
         if polished:
-            send_telegram_message(token, chat_id, delivery.polished_message_html(polished, settings.role()), reply_to_id=msg["message_id"], parse_mode="HTML")
+            send_telegram_message(token, chat_id, delivery.polished_message_html(polished, settings.effective_role()), reply_to_id=msg["message_id"], parse_mode="HTML")
         else:
             send_telegram_message(token, chat_id, f"⚠️ تعذر التنظيم الآن ({reason}).", reply_to_id=msg["message_id"])
 

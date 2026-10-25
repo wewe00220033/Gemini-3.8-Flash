@@ -517,7 +517,7 @@ def _parse_block(block):
             cur = pol
         elif ln.startswith(_TITLE_MARK):
             cur = title
-        elif ln.startswith(("⏹️ ", "▶️ ", "✏️ ", "📛 ", "📦 ")):
+        elif ln.startswith(("⏹️ ", "▶️ ", "✏️ ", "📛 ", "📦 ", "🎭 ")):
             cur = None
         elif cur is not None:
             cur.append(ln)
@@ -680,6 +680,39 @@ def voice_title(raw_text, generate_fn=None):
     if not t or len(t.split()) > 8:
         return None
     return t
+
+
+# ======================================================================
+# دور الجلسة (06 §2 / 08 §1): session.role_override
+# ======================================================================
+def set_role_override(role_id, session_id=None):
+    """تعيين/إلغاء تجاوز الدور لجلسة (None أو "" = الدور الافتراضي). يُعاد False إن لم توجد جلسة."""
+    with _lock:
+        sid = session_id or current_id()
+        s = _find(sid) if sid else None
+        if s is None:
+            return False
+        s["role_override"] = (role_id or "").strip().lower() or None
+        _write_index()
+        try:
+            _append_file(session_file(s["id"]), f"🎭 دور الجلسة: {s['role_override'] or 'الافتراضي'}\n\n")
+        except OSError:
+            pass
+        return True
+
+
+def role_override(session_id=None):
+    """الدور المتجاوز للجلسة (الحالية افتراضياً) أو None."""
+    s = get(session_id) if session_id else current()
+    return (s or {}).get("role_override") or None
+
+
+def terms_hint(session_id=None):
+    """L0 (10 §2): سطر تلميح إملائي من مصطلحات الجلسة لطبقة A. فارغ إن لا جلسة/لا مصطلحات."""
+    terms = session_terms(session_id)
+    if not terms:
+        return ""
+    return "أسماء ظهرت في هذه الجلسة، اكتبها كما هي: " + ", ".join(terms)
 
 
 # ======================================================================

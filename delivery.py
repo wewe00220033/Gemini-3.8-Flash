@@ -120,7 +120,7 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
     session_name: لو None تُستخدم الجلسة النشطة تلقائياً (المرحلة 4 — كتابة مزدوجة ALL.md + session_<id>.md).
     """
     mode = settings.delivery_mode()
-    role_id = settings.role()
+    role_id = settings.effective_role()
     raw, gl = prepare_texts(raw_text, glossary)
     if session_name is None:
         session_name = _safe_session_name()
