@@ -39,6 +39,24 @@ def fresh_env(monkeypatch, tmp_path):
     # مرحلة 2: ملفا القاطع ومجموعات المفاتيح في المجلد المؤقت أيضاً (لا نلمس state/ الحقيقي)
     monkeypatch.setattr(config.Config, "CIRCUIT_FILE", str(tmp_path / "state" / "circuit.json"))
     monkeypatch.setattr(config.Config, "KEY_GROUPS_FILE", str(tmp_path / "state" / "key_groups.json"))
+    # مرحلة 3: الأرشيف/القاموس/الأدوار/الإعدادات في المجلد المؤقت + تصفير الكاشات (singletons)
+    monkeypatch.setattr(config.Config, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(config.Config, "TRANSCRIPTS_DIR", str(tmp_path / "transcripts"))
+    monkeypatch.setattr(config.Config, "GLOSSARY_FILE", str(tmp_path / "glossary.json"))
+    monkeypatch.setattr(config.Config, "ROLES_FILE", str(tmp_path / "roles.json"))
+    monkeypatch.setattr(config.Config, "SETTINGS_FILE", str(tmp_path / "settings.json"))
+    # هذه الوحدات تحمل مرجعها الخاص لـ Config (from config import Config) — بعد reload(config) يصبح قديماً
+    for mod_name in ("glossary", "archive", "settings", "prompts", "text_assist", "transcriber"):
+        mod = sys.modules.get(mod_name)
+        if mod is not None and hasattr(mod, "Config"):
+            monkeypatch.setattr(mod, "Config", config.Config)
+    for mod_name in ("settings", "prompts"):
+        mod = sys.modules.get(mod_name)
+        if mod is not None:
+            mod.reset_cache()
+    gl = sys.modules.get("glossary")
+    if gl is not None:
+        gl._singleton = None
     import key_manager
     importlib.reload(key_manager)
     # قاطع الموديلات singleton مشترك بين الوحدات — نبدأ كل اختبار بقواطع مفتوحة وبلا حفظ على القرص
@@ -47,6 +65,23 @@ def fresh_env(monkeypatch, tmp_path):
     model_state.model_circuit.reset()
     model_state.model_circuit._history.clear()
     return key_manager
+
+
+@pytest.fixture(autouse=True)
+def _no_network_polish(monkeypatch):
+    """مرحلة 3: المساعد النصي (flash-lite) لا يلمس الشبكة في الاختبارات أبداً.
+    الافتراضي: تنظيم وهمي حتمي. اختبارات المرحلة 3 تستبدله صراحةً عند الحاجة (فشل/نجاح)."""
+    import text_assist
+
+    def _stub_polish(raw_text, role_id=None, glossary=None):
+        return ("[منظم-اختبار] " + raw_text, None)
+
+    def _no_post(*a, **k):
+        raise AssertionError("text_assist: network call in tests is forbidden")
+
+    monkeypatch.setattr(text_assist, "polish", _stub_polish)
+    monkeypatch.setattr(text_assist.requests, "post", _no_post)
+    yield
 
 
 @pytest.fixture(autouse=True)

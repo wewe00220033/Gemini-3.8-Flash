@@ -173,14 +173,16 @@ def test_default_payload_keeps_prompt_as_text_part(engine, monkeypatch):
     monkeypatch.setattr(engine.Config, "TEMPERATURE", None)
     p = engine._build_payload("QUJD", "audio/ogg")
     assert "system_instruction" not in p and "generationConfig" not in p
-    assert p["contents"][0]["parts"][1]["text"] == engine.Config.SYSTEM_PROMPT
+    # المرحلة 3: طبقة A = SYSTEM_PROMPT + (سطر الدور + تلميح القاموس) — تبدأ دائماً بالقواعد الأساسية
+    assert p["contents"][0]["parts"][1]["text"] == engine.transcription_prompt()
+    assert p["contents"][0]["parts"][1]["text"].startswith(engine.Config.SYSTEM_PROMPT)
 
 
 def test_optional_system_instruction_and_temperature(engine, monkeypatch):
     monkeypatch.setattr(engine.Config, "USE_SYSTEM_INSTRUCTION", True)
     monkeypatch.setattr(engine.Config, "TEMPERATURE", 0.0)
     p = engine._build_payload("QUJD", "audio/ogg")
-    assert p["system_instruction"]["parts"][0]["text"] == engine.Config.SYSTEM_PROMPT
+    assert p["system_instruction"]["parts"][0]["text"] == engine.transcription_prompt()
     assert p["generationConfig"] == {"temperature": 0.0}
     assert p["contents"][0]["parts"][0]["inline_data"]["mime_type"] == "audio/ogg"
 
@@ -275,7 +277,10 @@ def test_all_models_down_bounded_rounds_then_clear_message(engine, monkeypatch):
     # Failover v2 (04 §2.3): انتظار ذكي = أقرب فتح قاطع (20) لا backoff أعمى (2)، ثم جولة ثانية تضرب الشبكة
     # لأن sleep وهمي (القاطع لا يزال مقفولاً فعلياً → تُتخطّى كل الموديلات بلا طلبات) والميزانية تمنع المزيد
     assert len(calls) == 2
-    assert sleeps == [engine.Config.MODEL_PAUSE_LADDER_5XX[0]]
+    # remaining() = int(until - now) + 1 بساعة حقيقية: على لينكس يمر كسر ثانية → 20، وعلى ويندوز (دقة ~15ms)
+    # القراءتان في نفس التكة → 21. الاختبار يقبل كليهما (test_failover_v2 يستخدم ساعة وهمية ويثبّت 21).
+    ladder0 = engine.Config.MODEL_PAUSE_LADDER_5XX[0]
+    assert len(sleeps) == 1 and ladder0 <= sleeps[0] <= ladder0 + 1, sleeps
     assert isinstance(ei.value, engine.DeferredError) and ei.value.kind == "model"
     msg = str(ei.value)
     assert "مزدحمة" in msg and "/reset" in msg and msg.startswith("🤖 Gemini:")

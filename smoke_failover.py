@@ -4,6 +4,7 @@
  503 حقيقي (mock HTTP) → DeferredError → الطابور يؤجل → القاطع يفتح → تفريغ تلقائي بلا /reset."""
 import os, sys, time, json
 SMOKE_DIR = os.environ.get("SMOKE_DIR") or os.path.join(os.path.dirname(os.path.abspath(__file__)), ".smoke_failover")
+os.makedirs(os.path.join(SMOKE_DIR, "data", "state"), exist_ok=True)   # جهاز نظيف: لا FileNotFoundError
 os.environ["DATA_DIR"] = os.path.join(SMOKE_DIR, "data"); os.environ["RETRY_BUDGET_SECONDS"] = "3"
 os.environ["KEYS_JSON_FILE"] = os.path.join(SMOKE_DIR, "keys.json")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))

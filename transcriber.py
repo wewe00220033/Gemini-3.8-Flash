@@ -337,13 +337,14 @@ def _build_payload(b64_data, mime_type, model=None):
     thinkingConfig يُرسل فقط لو الموديل مذكور في Config.MODEL_THINKING_LEVEL (قرار المالك: فاضي).
     """
     audio_part = {"inline_data": {"mime_type": mime_type, "data": b64_data}}
+    prompt = transcription_prompt()
     if Config.USE_SYSTEM_INSTRUCTION:
         payload = {
-            "system_instruction": {"parts": [{"text": Config.SYSTEM_PROMPT}]},
+            "system_instruction": {"parts": [{"text": prompt}]},
             "contents": [{"parts": [audio_part, {"text": "فرّغ هذا التسجيل الصوتي."}]}],
         }
     else:
-        payload = {"contents": [{"parts": [audio_part, {"text": Config.SYSTEM_PROMPT}]}]}
+        payload = {"contents": [{"parts": [audio_part, {"text": prompt}]}]}
 
     gen = {}
     if Config.TEMPERATURE is not None:
@@ -354,6 +355,22 @@ def _build_payload(b64_data, mime_type, model=None):
     if gen:
         payload["generationConfig"] = gen
     return payload
+
+
+def transcription_prompt():
+    """
+    طبقة A (06 §1): Config.SYSTEM_PROMPT + سطر الدور الحالي + تلميح القاموس الإملائي (05 §5).
+    بدون دور/قاموس = SYSTEM_PROMPT حرفياً (لا تغيير في السلوك المجرَّب). أي فشل → SYSTEM_PROMPT.
+    """
+    try:
+        import prompts
+        import settings
+        import glossary
+        hints = glossary.get_glossary().hints_for_prompt()
+        return prompts.compose_prompt("transcribe", settings.role(), hints)
+    except Exception as e:  # pragma: no cover
+        print(f"⚠️ مركّب البرومبت: {e} — استخدام SYSTEM_PROMPT الأساسي")
+        return Config.SYSTEM_PROMPT
 
 
 def dynamic_read_timeout(size_bytes):

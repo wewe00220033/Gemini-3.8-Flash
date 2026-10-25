@@ -24,6 +24,11 @@ import preflight
 import netsession
 import jobs
 import voice_queue
+import archive
+import settings
+import prompts
+import delivery
+import glossary as glossary_mod
 
 if sys.platform == "win32":
     try:
@@ -181,6 +186,40 @@ def send_chat_action(token, chat_id, action="typing"):
         _tg_post(token, "sendChatAction", {"chat_id": chat_id, "action": action}, timeout=10)
     except Exception:
         pass
+
+
+def send_html_get_id(token, chat_id, text, reply_to_id=None):
+    """يرسل HTML (مقسماً لو طويل) ويرجع message_id لأول قطعة (لربط المنظم بالخام) أو None. fallback نص خام."""
+    first_id = None
+    limit = Config.TELEGRAM_MAX_MSG - 50
+    for i, chunk in enumerate(_chunk_text(text, limit)):
+        payload = {"chat_id": chat_id, "text": chunk, "parse_mode": "HTML"}
+        if reply_to_id and i == 0:
+            payload["reply_to_message_id"] = reply_to_id
+        try:
+            resp = _tg_post(token, "sendMessage", payload)
+            if resp.status_code != 200:
+                payload.pop("parse_mode", None)
+                payload["text"] = html.unescape(chunk)
+                resp = _tg_post(token, "sendMessage", payload)
+            if resp.status_code == 200 and first_id is None:
+                try:
+                    first_id = resp.json().get("result", {}).get("message_id")
+                except Exception:
+                    first_id = None
+            elif resp.status_code != 200:
+                print(f"⚠️ تليجرام رفض الرسالة ({resp.status_code}): {resp.text[:120]}")
+        except Exception as e:
+            print(f"⚠️ فشل إرسال رسالة لتليجرام: {e}")
+    return first_id
+
+
+def make_sender(token, chat_id):
+    """Sender لخط الإنتاج (delivery.deliver) فوق دوال تليجرام الحقيقية."""
+    return delivery.Sender(
+        send_text=lambda text, reply_to, parse_mode=None: send_html_get_id(token, chat_id, text, reply_to),
+        send_document=lambda fn, data, mime, caption, reply_to: _send_document(token, chat_id, fn, data, mime, caption, reply_to),
+    )
 
 
 def delete_message(token, chat_id, message_id):
@@ -341,9 +380,12 @@ def process_job(job):
         audio_bytes = job.meta.get("audio_bytes") or b""
         fn = job.meta.get("transcribe_fn") or transcribe_audio_bytes_ex
         text, model, key_name, info = fn(audio_bytes, job.mime_type)
-        jobs.record(job.job_id, "sent", model=model, key=str(key_name), elapsed=info.get("elapsed"), text=text[:2000])
+        # مرحلة 3: الويب يمر بالقاموس (هدف الخام) ويُؤرشف في ALL.md مثل تليجرام — بلا تنظيم (توفير حصة flash-lite)
+        text, archived = delivery.prepare_for_web(text, model=model, key_name=key_name, info=info)
+        jobs.record(job.job_id, "sent", model=model, key=str(key_name), elapsed=info.get("elapsed"),
+                    text=text[:2000], archived=archived)
         STATE["processed"] += 1
-        return {"text": text, "model": model, "key_name": key_name, "info": info}
+        return {"text": text, "model": model, "key_name": key_name, "info": info, "archived": archived}
 
     token = job.meta.get("token") or _runtime_token()
     chat_id, reply_to = job.chat_id, job.message_id
@@ -365,13 +407,20 @@ def process_job(job):
         text, model, key_name, info = transcribe_audio_bytes_ex(audio_bytes, job.mime_type)
     jobs.record(job.job_id, "transcribed", model=model, key=str(key_name), elapsed=info.get("elapsed"))
     print(f"✅ تم التفريغ عبر [{model}] بالمفتاح [{key_name}] في {info.get('elapsed')} ث: {text[:40]}...")
-    ok = send_transcript(token, chat_id, text, model, key_name, reply_to_id=reply_to, info=info)
+    # المرحلة 3: قاموس → أرشفة (قبل الإرسال) → الخام → المنظم (07)
+    res = delivery.deliver(text, model, key_name, info, make_sender(token, chat_id), reply_to_id=reply_to,
+                           footer_html=_footer(model, key_name, info))
+    text = res["raw"]
+    ok = bool(res["raw_msg_id"] or res["polished_msg_id"])
     if ok:
-        jobs.record(job.job_id, "sent", model=model, key=str(key_name), elapsed=info.get("elapsed"), text=text[:2000])
+        jobs.record(job.job_id, "sent", model=model, key=str(key_name), elapsed=info.get("elapsed"), text=text[:2000],
+                    polished=bool(res["polished"]), mode=res["mode"])
     else:
-        jobs.record(job.job_id, "failed", error="send_transcript failed", model=model)
+        jobs.record(job.job_id, "failed", error="send failed (archived — /last)", model=model)
+    if res["polish_error"]:
+        print(f"⚠️ التنظيم: {res['polish_error']}")
     STATE["processed"] += 1
-    return {"text": text, "model": model, "key_name": key_name, "info": info}
+    return {"text": text, "model": model, "key_name": key_name, "info": info, "polished": res["polished"]}
 
 
 def _on_job_failed(job, err):
@@ -555,6 +604,12 @@ def _help_text():
         "/keys — قائمة المفاتيح مرتبة (المتاح أولاً)\n"
         "/remove <اسم> — حذف مفتاح بالاسم أو بأول 8 أحرف منه\n"
         "/rename <قديم> <جديد> — إعادة تسمية مفتاح\n"
+        "/mode [dual|raw|polished] — وضع الإرسال: خام + منظم (افتراضي) / خام فقط / منظم فقط\n"
+        "/roles · /role <id> — الأدوار (عام/DevOps/معلم/حرفي/شيخ/أطفال/طبيب) والدور الحالي\n"
+        "/new_role <id> | <الاسم> | <تعليمات التنظيم> — دور مخصص · /role_del <id>\n"
+        "/glossary — القاموس · /add_word شلبي = ChatGPT · /del_word <id|لفظ> · /confirm_word <id> = المقصود · /glossary_export\n"
+        "/last — إعادة إرسال آخر تفريغ من الأرشيف · /find <كلمة> — بحث في الأرشيف · /polish (رد على تفريغ) — تنظيم عند الطلب\n"
+        "/header [both|raw|polished|off] — بانر «تفريغ آلي» فوق النص\n"
         "/project_group <مفتاح> <مجموعة> — مفاتيح نفس مشروع Google تتشارك الحصة (والقفز عند 503 لمشروع آخر). اكتب - للإزالة\n"
         "/backup — نسخة احتياطية (أرشيف+جلسات+إعدادات) بلا أسرار\n"
         "/backup_secrets — نسخة keys.json بتأكيد صريح\n"
@@ -594,6 +649,15 @@ def _resilience_text():
             f"أخطاء شبكة {STATE['net_errors']} (ReadTimeout {STATE['read_timeouts']}) | مهام جارية {queue_in_flight()}")
 
 
+def _pipeline_text():
+    """سطر خط الإنتاج في /status (المرحلة 3): الدور، وضع الإرسال، البانر، حجم الأرشيف، القاموس."""
+    r = prompts.get_role(settings.role()) or {}
+    gl = glossary_mod.get_glossary()
+    pend = sum(1 for e in gl.entries(False) if e.get("status") == "pending")
+    return (f"🏭 خط الإنتاج: دور {settings.role()} ({r.get('name', '?')}) | إرسال {settings.delivery_mode()} | بانر {settings.header_target()} | "
+            f"أرشيف {archive.count_entries()} تفريغ | قاموس {len(gl.entries(False))} مدخل" + (f" ({pend} معلَّق — /glossary)" if pend else ""))
+
+
 def _models_state_text():
     """حالة قواطع الموديلات + آخر المحاولات (للشفافية في /status)."""
     lines = ["─" * 30, "🚦 حالة الموديلات الآن:"]
@@ -622,6 +686,39 @@ def _send_document(token, chat_id, filename, data_bytes, mime, caption, reply_to
     return resp
 
 
+def _glossary_text(page="1"):
+    gl = glossary_mod.get_glossary()
+    ents = gl.entries()
+    if not ents:
+        return "القاموس فارغ. أضف: /add_word شلبي = ChatGPT"
+    size = Config.PANEL_PAGE_SIZE
+    try:
+        pg = max(1, int(page))
+    except ValueError:
+        pg = 1
+    pages = max(1, (len(ents) + size - 1) // size)
+    pg = min(pg, pages)
+    lines = [f"📖 القاموس ({len(ents)} مدخل) — صفحة {pg}/{pages}:"]
+    for e in ents[(pg - 1) * size: pg * size]:
+        st = "⏳ معلَّق" if e.get("status") == "pending" else ("خام+منظم" if e.get("scope") == "both" else "منظم فقط")
+        lines.append(f"• [{e['id']}] {' / '.join(e.get('patterns', []))} → {e.get('replacement')}  ({e.get('kind')}, {st}, ×{e.get('hits', 0)})")
+        if e.get("note"):
+            lines.append(f"    ℹ️ {e['note']} — أكّد: /confirm_word {e['id']} = المقصود")
+    if pages > 1:
+        lines.append(f"الصفحة التالية: /glossary {pg + 1}")
+    if gl.corrupt_notice:
+        lines.append(gl.corrupt_notice)
+    return "\n".join(lines)
+
+
+def _strip_banner(text):
+    """يزيل البانر من نص منسوخ من رسالة تفريغ قبل تنظيمه."""
+    marker = "───────────────"
+    if marker in text:
+        text = text.split(marker, 1)[1]
+    return text.strip()
+
+
 def handle_text(token, chat_id, msg, msg_text):
     # 1) مفتاح Gemini جديد؟
     extracted_key, extracted_name = key_manager.extract_key_from_text(msg_text)
@@ -644,7 +741,7 @@ def handle_text(token, chat_id, msg, msg_text):
     args = parts[1:]
 
     if cmd in ("/status", "حالة", "المفاتيح"):
-        send_telegram_message(token, chat_id, key_manager.get_status_summary() + "\n" + _models_state_text() + "\n" + _resilience_text(), reply_to_id=msg["message_id"])
+        send_telegram_message(token, chat_id, key_manager.get_status_summary() + "\n" + _models_state_text() + "\n" + _resilience_text() + "\n" + _pipeline_text(), reply_to_id=msg["message_id"])
 
     elif cmd == "/reset":
         n = model_circuit.reset()
@@ -672,6 +769,135 @@ def handle_text(token, chat_id, msg, msg_text):
             send_telegram_message(token, chat_id, f"✏️ تمت إعادة التسمية إلى [{entry.get('name')}].", reply_to_id=msg["message_id"])
         else:
             send_telegram_message(token, chat_id, "لم أجد مفتاحاً بهذا الاسم. جرّب /keys.", reply_to_id=msg["message_id"])
+
+    elif cmd == "/mode":
+        if not args:
+            send_telegram_message(token, chat_id, f"وضع الإرسال الحالي: {settings.delivery_mode()}\nالاستخدام: /mode dual | raw | polished", reply_to_id=msg["message_id"])
+            return
+        m = settings.set_delivery_mode(args[0])
+        send_telegram_message(token, chat_id, f"✅ وضع الإرسال: {m}" if m else "قيمة غير معروفة. المتاح: dual | raw | polished", reply_to_id=msg["message_id"])
+
+    elif cmd == "/header":
+        if not args:
+            send_telegram_message(token, chat_id, f"البانر: {settings.header_target()}\nالاستخدام: /header both | raw | polished | off", reply_to_id=msg["message_id"])
+            return
+        t = settings.set_header_target(args[0])
+        send_telegram_message(token, chat_id, f"✅ البانر: {t}" if t else "قيمة غير معروفة. المتاح: both | raw | polished | off", reply_to_id=msg["message_id"])
+
+    elif cmd == "/roles":
+        send_telegram_message(token, chat_id, prompts.roles_list_text(settings.role()), reply_to_id=msg["message_id"])
+
+    elif cmd == "/role":
+        if not args:
+            r = prompts.get_role(settings.role()) or {}
+            send_telegram_message(token, chat_id, f"الدور الحالي: {settings.role()} — {r.get('name', '?')}\n/roles للقائمة · /role <id> للتفعيل", reply_to_id=msg["message_id"])
+            return
+        rid = args[0].lower()
+        if prompts.get_role(rid) is None:
+            send_telegram_message(token, chat_id, "دور غير معروف. /roles للقائمة.", reply_to_id=msg["message_id"])
+            return
+        settings.set_role(rid)
+        send_telegram_message(token, chat_id, f"🎭 الدور الآن: {rid} — {prompts.get_role(rid)['name']} (يسري على الفويس القادم بلا إعادة تشغيل).", reply_to_id=msg["message_id"])
+
+    elif cmd == "/new_role":
+        parts3 = [x.strip() for x in " ".join(args).split("|")]
+        if len(parts3) < 3 or not all(parts3[:3]):
+            send_telegram_message(token, chat_id, "الاستخدام: /new_role <id> | <الاسم> | <تعليمات التنظيم> [| <سطر لطبقة التفريغ>]\nمثال: /new_role lawyer | محامي | نظّم النص قانونياً في بنود", reply_to_id=msg["message_id"])
+            return
+        try:
+            r, created = prompts.add_role(parts3[0], parts3[1], parts3[3] if len(parts3) > 3 else "", parts3[2])
+            send_telegram_message(token, chat_id, f"{'✅ أُنشئ' if created else '✏️ حُدِّث'} الدور [{parts3[0]}] — {r['name']}. فعّله بـ /role {parts3[0]}", reply_to_id=msg["message_id"])
+        except ValueError as e:
+            send_telegram_message(token, chat_id, f"❌ {e}", reply_to_id=msg["message_id"])
+
+    elif cmd == "/role_del":
+        if not args:
+            send_telegram_message(token, chat_id, "الاستخدام: /role_del <id>", reply_to_id=msg["message_id"])
+            return
+        r = prompts.remove_role(args[0].lower())
+        if r is None:
+            send_telegram_message(token, chat_id, "لا يمكن: الدور غير موجود أو افتراضي محمي.", reply_to_id=msg["message_id"])
+        else:
+            if settings.role() == args[0].lower():
+                settings.set_role(Config.DEFAULT_ROLE)
+            send_telegram_message(token, chat_id, f"🗑️ حُذف الدور [{args[0]}].", reply_to_id=msg["message_id"])
+
+    elif cmd == "/glossary":
+        send_telegram_message(token, chat_id, _glossary_text(args[0] if args else "1"), reply_to_id=msg["message_id"])
+
+    elif cmd == "/add_word":
+        parsed = glossary_mod.Glossary.parse_add_args(" ".join(args))
+        if not parsed:
+            send_telegram_message(token, chat_id, "الاستخدام: /add_word شلبي = ChatGPT   (لقب → يظهر في المنظم فقط)\n/add_word جرافيك = Antigravity spelling   (تصحيح إملائي → الخام والمنظم)", reply_to_id=msg["message_id"])
+            return
+        lhs, rhs = parsed
+        kind = "alias"
+        rhs_parts = rhs.split()
+        if rhs_parts and rhs_parts[-1].lower() in ("spelling", "إملائي", "تصحيح"):
+            kind, rhs = "spelling", " ".join(rhs_parts[:-1])
+        try:
+            e, created = glossary_mod.get_glossary().add(lhs, rhs, kind=kind)
+            scope_txt = "الخام والمنظم" if e["scope"] == "both" else "المنظم فقط"
+            send_telegram_message(token, chat_id, f"{'✅ أُضيف' if created else '✏️ أُلحق بـ'} [{e['id']}] {lhs} → {e['replacement']} ({e['kind']}، {scope_txt}).", reply_to_id=msg["message_id"])
+        except ValueError as err:
+            send_telegram_message(token, chat_id, f"❌ {err}", reply_to_id=msg["message_id"])
+
+    elif cmd == "/del_word":
+        if not args:
+            send_telegram_message(token, chat_id, "الاستخدام: /del_word <id أو لفظ> — ثم أكّد بـ /del_word <id> confirm", reply_to_id=msg["message_id"])
+            return
+        gl = glossary_mod.get_glossary()
+        if args[-1].lower() == "confirm":
+            e = gl.remove(" ".join(args[:-1]))
+            send_telegram_message(token, chat_id, f"🗑️ حُذف [{e['id']}] {e['replacement']}." if e else "لم أجد المدخل.", reply_to_id=msg["message_id"])
+        else:
+            e = gl.find(" ".join(args))
+            if e is None:
+                send_telegram_message(token, chat_id, "لم أجد المدخل. /glossary للقائمة.", reply_to_id=msg["message_id"])
+            else:
+                send_telegram_message(token, chat_id, f"⚠️ حذف [{e['id']}] {'/'.join(e['patterns'])} → {e['replacement']}؟\nأكّد: /del_word {e['id']} confirm", reply_to_id=msg["message_id"])
+
+    elif cmd == "/confirm_word":
+        parsed = glossary_mod.Glossary.parse_add_args(" ".join(args))
+        target, repl = (parsed if parsed else ((args[0] if args else ""), None))
+        e = glossary_mod.get_glossary().confirm(target, repl)
+        send_telegram_message(token, chat_id, f"✅ مؤكد: {'/'.join(e['patterns'])} → {e['replacement']}" if e else "الاستخدام: /confirm_word g_006 = Claude Code  (المدخل المعلَّق يحتاج المقصود)", reply_to_id=msg["message_id"])
+
+    elif cmd == "/glossary_export":
+        _send_document(token, chat_id, "glossary.json", glossary_mod.get_glossary().export_bytes(), "application/json", "📖 القاموس المخصص", msg["message_id"])
+
+    elif cmd == "/last":
+        entry = archive.last()
+        if not entry:
+            send_telegram_message(token, chat_id, "الأرشيف فارغ بعد.", reply_to_id=msg["message_id"])
+            return
+        body = f"🕓 {html.escape(entry['meta'])}\n<pre>{html.escape(entry['raw'])}</pre>"
+        if entry.get("polished"):
+            body += f"\n<b>📝 المنظم</b>\n<pre>{html.escape(entry['polished'])}</pre>"
+        send_telegram_message(token, chat_id, body, reply_to_id=msg["message_id"], parse_mode="HTML")
+
+    elif cmd == "/find":
+        if not args:
+            send_telegram_message(token, chat_id, "الاستخدام: /find <كلمة>", reply_to_id=msg["message_id"])
+            return
+        hits = archive.find(" ".join(args))
+        if not hits:
+            send_telegram_message(token, chat_id, "لا نتائج في الأرشيف.", reply_to_id=msg["message_id"])
+        else:
+            send_telegram_message(token, chat_id, "🔎 نتائج الأرشيف:\n" + "\n".join(f"• {h['meta']}\n  {h['line']}" for h in hits), reply_to_id=msg["message_id"])
+
+    elif cmd == "/polish":
+        src = (msg.get("reply_to_message") or {}).get("text") or " ".join(args)
+        src = _strip_banner(src)
+        if not src.strip():
+            send_telegram_message(token, chat_id, "رُدّ بـ /polish على رسالة تفريغ (أو اكتب النص بعد الأمر).", reply_to_id=msg["message_id"])
+            return
+        import text_assist
+        polished, reason = text_assist.polish(src, settings.role(), glossary_mod.get_glossary())
+        if polished:
+            send_telegram_message(token, chat_id, delivery.polished_message_html(polished, settings.role()), reply_to_id=msg["message_id"], parse_mode="HTML")
+        else:
+            send_telegram_message(token, chat_id, f"⚠️ تعذر التنظيم الآن ({reason}).", reply_to_id=msg["message_id"])
 
     elif cmd in ("/project_group", "/group"):
         # مرحلة 2 (04 §2.4): تثبيت مجموعة المشروع صراحةً في keys.json
