@@ -24,7 +24,7 @@ from config import Config
 _lock = threading.RLock()
 _ENTRY_MARK = "## 🎙️ "
 _ENTRY_RE = re.compile(r"^## 🎙️ ", re.M)
-_RAW_MARK, _POL_MARK = "### الخام", "### المنظم"
+_RAW_MARK, _POL_MARK, _TITLE_MARK = "### الخام", "### المنظم", "### العنوان"
 
 
 def all_path():
@@ -103,6 +103,23 @@ def append_polished(polished_text):
         return False
 
 
+def append_title(title):
+    """المرحلة 4 (08 §3): يلحق «### العنوان» بآخر مدخل (append-only؛ العنوان يصل بعد الخام). بلا تكرار."""
+    title = (title or "").strip()
+    if not title:
+        return False
+    try:
+        with _lock:
+            block = _read_last_block()
+            if block is None or _TITLE_MARK in block:
+                return False
+            _append_text(_TITLE_MARK + "\n" + title + "\n\n")
+        return True
+    except Exception as e:  # pragma: no cover
+        print(f"⚠️ الأرشفة: تعذّر إلحاق العنوان ({e})")
+        return False
+
+
 def _read_last_block(tail_bytes=65536):
     path = all_path()
     if not os.path.exists(path):
@@ -125,15 +142,18 @@ def last():
         return None
     lines = block.strip("\n").split("\n")
     meta = lines[0][len(_ENTRY_MARK):].strip()
-    raw, polished, cur = [], [], None
+    raw, polished, title, cur = [], [], [], None
     for ln in lines[1:]:
         if ln.startswith(_RAW_MARK):
             cur = raw
         elif ln.startswith(_POL_MARK):
             cur = polished
+        elif ln.startswith(_TITLE_MARK):
+            cur = title
         elif cur is not None:
             cur.append(ln)
-    return {"meta": meta, "raw": "\n".join(raw).strip(), "polished": "\n".join(polished).strip() or None}
+    return {"meta": meta, "raw": "\n".join(raw).strip(), "polished": "\n".join(polished).strip() or None,
+            "title": "\n".join(title).strip() or None}
 
 
 def count_entries():

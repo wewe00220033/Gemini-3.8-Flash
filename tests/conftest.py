@@ -88,6 +88,12 @@ def _no_network_polish(monkeypatch):
 
     monkeypatch.setattr(text_assist, "polish", _stub_polish)
     monkeypatch.setattr(text_assist.requests, "post", _no_post)
+    # مرحلة 4: التسمية الذكية (flash-lite نصياً) بلا شبكة أيضاً — عنوان حتمي قصير
+    try:
+        import sessions
+        monkeypatch.setattr(sessions, "voice_title", lambda raw, generate_fn=None: "عنوان-اختبار")
+    except ImportError:  # pragma: no cover
+        pass
     yield
 
 
