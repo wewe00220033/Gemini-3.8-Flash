@@ -10,8 +10,10 @@
 - مهيأ للعمل محلياً أو على خوادم الاستضافة (24/7 Hosting)
 """
 
+import os
 import sys
 import time
+import json
 import signal
 import logging
 import threading
@@ -22,6 +24,7 @@ import web_service
 import telegram_bot
 import preflight
 import watchdog
+import supervisor
 from model_state import model_circuit
 
 
@@ -76,6 +79,10 @@ class Runtime:
         self.poller_thread = None
         self.global_stop = threading.Event()
         self.notifier = None
+        self.exit_code = 0                      # 3 = L4 "أعد تشغيلي" (المشرف يعيد فوراً)
+        self.exit_reason = None
+        self._beat_stop = threading.Event()
+        self._beat_thread = None
         self.watchdog = None
         self.watchdog_restarts = 0
         self._lock = threading.Lock()
@@ -117,10 +124,38 @@ class Runtime:
             set_protect=telegram_bot.set_protect_mode,
             set_emergency=telegram_bot.set_emergency_mode,
             watch=Config.HEALTH_WATCH_THREADS,
+            request_exit=self.request_exit if Config.SUPERVISED else None,   # L4 مسلّح فقط مع SUPERVISED=1
         )
         self.watchdog.start()
         web_service.RUNTIME["watchdog"] = self.watchdog
         return self.watchdog
+
+    # ---- L4 (1c) ----
+    def request_exit(self, reason):
+        """
+        L4: يكتب state/restart_reason.json ثم يطلب خروج العملية بكود 3. المشرف (SUPERVISED=1) يعيد الإطلاق
+        فوراً، والعامل الجديد يقرأ الملف ويُخطر المالك. لا نستدعي os._exit هنا مباشرة: نضبط global_stop
+        فيمر الخيط الرئيسي بـ shutdown() الرشيق (≤ SHUTDOWN_GRACE) ثم sys.exit(3)؛ ولو تجمد كل شيء فعلاً
+        يتكفل المشرف بالقتل عبر ملف النبض (worker.beat).
+        """
+        self.exit_code = Config.EXIT_CODE_RESTART
+        self.exit_reason = reason
+        _write_restart_reason("L4", reason)
+        print(f"🔁 L4: {reason} → طلب إعادة تشغيل العملية (exit {Config.EXIT_CODE_RESTART})")
+        self.global_stop.set()
+
+    # ---- نبض العامل للمشرف (ملف، لا شبكة) ----
+    def start_worker_beat(self):
+        if not os.environ.get("SUPERVISED_CHILD"):
+            return None
+
+        def _run():
+            while not self._beat_stop.wait(Config.WORKER_BEAT_INTERVAL):
+                supervisor.touch_beat(Config.WORKER_BEAT_FILE)
+        supervisor.touch_beat(Config.WORKER_BEAT_FILE)
+        self._beat_thread = threading.Thread(target=_run, daemon=True, name="worker-beat")
+        self._beat_thread.start()
+        return self._beat_thread
 
     # ---- shutdown ----
     def shutdown(self, reason="SIGTERM"):
@@ -141,6 +176,7 @@ class Runtime:
         self.pool.shutdown(wait=False, cancel_futures=True)
         if self.notifier is not None:
             self.notifier.stop(timeout=1)
+        self._beat_stop.set()
         if left or pending:
             print(f"⚠️ {left} مهمة جارية لم تكتمل + {max(0, pending - left)} في الانتظار — مهام تليجرام ستُستأنف بعد الإقلاع من jobs.ndjson (P0).")
         else:
@@ -169,6 +205,35 @@ def install_signal_handlers(stop_event):
     return installed
 
 
+def _write_restart_reason(kind, detail):
+    """state/restart_reason.json — يقرأه العامل الجديد عند الإقلاع ليُخطر المالك (03b الطبقة 4)."""
+    try:
+        os.makedirs(os.path.dirname(Config.RESTART_REASON_FILE), exist_ok=True)
+        tmp = Config.RESTART_REASON_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"ts": time.time(), "reason": kind, "detail": detail,
+                       "generation": os.environ.get("WORKER_GENERATION")}, f, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, Config.RESTART_REASON_FILE)
+    except OSError as e:
+        print(f"⚠️ تعذر كتابة restart_reason.json: {e}")
+
+
+def _restart_notice():
+    """لو أُعيد تشغيلنا (L4 أو crash أو تجمد) — سطر للمالك يُلحق برسالة الإقلاع. يحذف الملف بعد القراءة."""
+    data = supervisor.read_and_clear_restart_reason(Config.RESTART_REASON_FILE)
+    if not data:
+        return ""
+    reason = data.get("reason")
+    labels = {"L4": "L4 — تعثر الاستقبال رغم كل الطبقات", "restart_requested": "L4 — طلب إعادة تشغيل",
+              "crash": "انهيار العملية", "frozen": "تجمد كامل (قتله المشرف)", "gave_up": "المشرف استسلم"}
+    age = int(time.time() - float(data.get("ts") or time.time()))
+    gen = os.environ.get("WORKER_GENERATION")
+    gen_txt = f" (العامل #{gen})" if gen else ""
+    return f"\n🔁 أعدت تشغيل نفسي قبل {age}ث{gen_txt} — السبب: {labels.get(reason, reason)}: {data.get('detail') or ''}".rstrip(": ")
+
+
 def _startup_ping(bot_token, chat_id, web_error=None):
     """
     تقرير الإقلاع بسطر واحد (22 Z6): يُطبع دائماً في اللوج، ويُرسل على تليجرام إن NOTIFY_ON_START.
@@ -180,9 +245,9 @@ def _startup_ping(bot_token, chat_id, web_error=None):
         )
         print(f"🚀 preflight: {line}")
         if Config.NOTIFY_ON_START and bot_token and chat_id:
-            extra = ""
+            extra = _restart_notice()
             if not ok and web_error:
-                extra = f"\n⚠️ الويب لم يشتغل: {web_error} — البوت شغال طبيعي؛ /health غير متاح حتى يُصلح المنفذ."
+                extra += f"\n⚠️ الويب لم يشتغل: {web_error} — البوت شغال طبيعي؛ /health غير متاح حتى يُصلح المنفذ."
             telegram_bot.send_telegram_message(
                 bot_token, chat_id,
                 f"🚀 المنظومة اشتغلت.\n{line}{extra}\n🕛 تصفير الكوتا: {key_manager.next_reset_display()} ({Config.DISPLAY_TZ})",
@@ -250,6 +315,9 @@ def main():
     # 2. بوت تليجرام + watchdog مستقل (03b الطبقة 3) + معالجات SIGTERM (الطبقة 0.5)
     rt = Runtime(bot_token, chat_id)
     install_signal_handlers(rt.global_stop)
+    rt.start_worker_beat()                 # فقط تحت المشرف (SUPERVISED_CHILD=1) — ملف نبض، لا شبكة
+    if Config.SUPERVISED and not os.environ.get("SUPERVISED_CHILD"):
+        print("ℹ️ SUPERVISED=1 لكن العملية ليست تحت المشرف (شُغّلت بـ --worker يدوياً؟) — L4 سيخرج بكود 3 بلا من يعيد الإطلاق.")
     # 1b: الطابور الموحّد يبدأ قبل الـ poller ويستأنف المهام المعلقة من الجلسة السابقة (P0)
     try:
         telegram_bot.start_queue(resume=bool(bot_token))
@@ -268,10 +336,25 @@ def main():
         web_t = _idle_loop(rt, web_t, bot_token)
     except KeyboardInterrupt:
         rt.global_stop.set()
-    code = 0
-    rt.shutdown(reason="إيقاف")      # أيضاً في وضع الويب-فقط: ننتظر تفريغات الويب الجارية
-    sys.exit(code)
+    rt.shutdown(reason="إيقاف" if rt.exit_code == 0 else f"L4 ({rt.exit_reason})")   # أيضاً في وضع الويب-فقط
+    sys.exit(rt.exit_code)
+
+
+def entry(argv=None):
+    """
+    نقطة الدخول (1c): SUPERVISED=0 (افتراضي) → main() مباشرة كما كان تماماً (لا عملية إضافية).
+    SUPERVISED=1 وبدون --worker → نعمل كمشرف نحيف يطلق "main.py --worker" ويراقبه (الطبقة 4).
+    --worker → العامل الحقيقي (تحت المشرف أو يدوياً).
+    """
+    argv = sys.argv[1:] if argv is None else argv
+    if "--worker" in argv or not Config.SUPERVISED:
+        return main()
+    try:
+        sys.stdout.reconfigure(line_buffering=True, encoding="utf-8")
+    except Exception:
+        pass
+    return sys.exit(supervisor.Supervisor().run())
 
 
 if __name__ == "__main__":
-    main()
+    entry()
