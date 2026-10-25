@@ -112,21 +112,34 @@ def test_stop_event_exits_cleanly_without_shutting_shared_pool(tb, monkeypatch):
     assert tb.STATE["poller_generation"] == 2 and tb.STATE["started_at"] == started
 
 
-def test_updates_dispatch_audio_to_pool_and_beat_poller(tb, monkeypatch):
-    submitted = []
+def test_updates_dispatch_audio_to_queue_and_beat_poller(tb, monkeypatch):
+    """1b: الفويس يُدرج في الطابور الموحّد (لا pool.submit)؛ الغريب يُحجب؛ update_id يُمرّر مع الرسالة."""
+    enq = []
+    monkeypatch.setattr(tb, "enqueue_telegram_audio", lambda tok, cid, m, fid, mime, lab: enq.append((cid, fid, m)))
 
     class Pool:
         def submit(self, fn, *a):
-            submitted.append((fn.__name__, a))
+            raise AssertionError("1b: لا يجب استخدام pool.submit للفويس")
 
     msg = {"message_id": 5, "chat": {"id": 777}, "voice": {"file_id": "F1", "mime_type": "audio/ogg"}}
     stranger = {"message_id": 6, "chat": {"id": 999}, "voice": {"file_id": "F2", "mime_type": "audio/ogg"}}
     stop = threading.Event()
     FakeTelegram([updates(msg, stranger)], stop_event=stop).install(tb, monkeypatch)
     tb.main(stop_event=stop, pool=Pool())
-    assert len(submitted) == 1 and submitted[0][0] == "handle_audio" and submitted[0][1][3] == "F1"
+    assert len(enq) == 1 and enq[0][0] == "777" and enq[0][1] == "F1" and "_update_id" in enq[0][2]
     snap = heartbeat.snapshot()
     assert "poller" in snap and snap["poller"]["count"] >= 2
+
+
+def test_callback_query_routed_only_for_allowed_chat(tb, monkeypatch):
+    handled = []
+    monkeypatch.setattr(tb, "handle_callback", lambda tok, cq: handled.append(cq["data"]))
+    ok = {"update_id": 10, "callback_query": {"id": "c1", "data": "q:wait:abc", "message": {"chat": {"id": 777}}}}
+    bad = {"update_id": 11, "callback_query": {"id": "c2", "data": "q:skip:abc", "message": {"chat": {"id": 999}}}}
+    stop = threading.Event()
+    FakeTelegram([FakeResp(200, {"ok": True, "result": [ok, bad]})], stop_event=stop).install(tb, monkeypatch)
+    tb.main(stop_event=stop)
+    assert handled == ["q:wait:abc"]
 
 
 def test_protect_and_emergency_modes_change_poll_params(tb, monkeypatch):
