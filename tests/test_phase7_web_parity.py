@@ -181,3 +181,18 @@ def test_api_sessions_read_only(web):
     assert _req(base + "/api/sessions/nope")[0] == 404
     # لا مسار كتابة للجلسات عبر الويب
     assert _req(base + f"/api/sessions/{s['id']}", "POST", b"{}")[0] == 404
+
+
+# =====================================================================
+# 7: transcribe_tool يمر بالـ pipeline اختيارياً (--plain) — 17 المرحلة 7
+# =====================================================================
+
+def test_transcribe_tool_pipeline_optional(fresh_env):
+    import importlib
+    import archive
+    import transcribe_tool
+    importlib.reload(transcribe_tool)
+    raw, archived = transcribe_tool.apply_pipeline("فتحت جرافيك", plain=False)
+    assert raw == "فتحت Antigravity" and archived and "💻 أداة" in archive.last()["meta"]
+    raw, archived = transcribe_tool.apply_pipeline("فتحت جرافيك", plain=True)
+    assert raw == "فتحت جرافيك" and archived is False
