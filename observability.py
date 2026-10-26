@@ -159,10 +159,11 @@ def persist_probe_check():
     return OK, "DATA_DIR مستمر (.persist_probe موجود)" if existed else "DATA_DIR جديد (.persist_probe كُتب الآن)"
 
 
-def doctor_report(bot_state=None, queue=None, watchdog=None, now=None):
+def doctor_report(bot_state=None, queue=None, watchdog=None, now=None, check_telegram=True):
     """
     يرجع (lines: [str], worst: ok|warn|fail). bot_state/queue/watchdog تُحقن (telegram_bot.STATE/QUEUE, RUNTIME watchdog)
     — تُقرأ تلقائياً لو لم تُمرَّر. لا نداء لـ Gemini إطلاقاً (12 §3.1: recent_attempts بدلاً منه).
+    check_telegram: فحص getMe الخفيف (12 §3.1) — النداء الشبكي الوحيد؛ False في الفحص الدوري الصامت وفي الاختبارات.
     """
     now = now or time.time()
     if bot_state is None or queue is None:
@@ -280,7 +281,10 @@ def doctor_report(bot_state=None, queue=None, watchdog=None, now=None):
         all_md = os.path.join(Config.TRANSCRIPTS_DIR, "ALL.md")
         arch_b = os.path.getsize(all_md) if os.path.exists(all_md) else 0
         cap = Config.LOG_TOTAL_MAX_MB * 1024 * 1024
-        txt = f"logs {_mb(logs_b)}/{Config.LOG_TOTAL_MAX_MB}MB · sessions {_mb(sess_b)} · ALL.md {_mb(arch_b)} · jobs {_mb(jobs_b)} · incidents {_mb(inc_b)}"
+        bk_b = _dir_size(Config.BACKUPS_DIR) if os.path.isdir(Config.BACKUPS_DIR) else 0
+        aud_b = os.path.getsize(Config.AUDIT_FILE) if os.path.exists(Config.AUDIT_FILE) else 0
+        txt = (f"logs {_mb(logs_b)}/{Config.LOG_TOTAL_MAX_MB}MB · sessions {_mb(sess_b)} · ALL.md {_mb(arch_b)} · jobs {_mb(jobs_b)}"
+               f" · incidents {_mb(inc_b)} · backups {_mb(bk_b)} · audit {_mb(aud_b)}")
         if logs_b > cap or arch_b > 50 * 1024 * 1024:
             return WARN, txt
         return OK, txt
@@ -305,7 +309,47 @@ def doctor_report(bot_state=None, queue=None, watchdog=None, now=None):
         return WARN, "آخر الحوادث: " + " · ".join(os.path.basename(p) for p in recent)
     add("الحوادث", _incidents)
 
-    # 9) العملية
+    # 9) تليجرام getMe (12 §3.1) — نداء واحد خفيف بمهلة قصيرة؛ لا يُنفَّذ في الدوري الصامت
+    def _telegram():
+        if not check_telegram:
+            return OK, "getMe لم يُنفَّذ (فحص محلي صامت)"
+        import telegram_bot
+        token = telegram_bot._runtime_token()
+        if not token:
+            return WARN, "لا توكن تليجرام — لا يمكن فحص getMe"
+        t0 = time.monotonic()
+        r = telegram_bot._http_get(telegram_bot._api(token, "getMe"), timeout=(Config.TG_CONNECT_TIMEOUT, Config.DOCTOR_TG_TIMEOUT))
+        ms = int((time.monotonic() - t0) * 1000)
+        if r.status_code != 200:
+            return FAIL, f"getMe → HTTP {r.status_code} في {ms}ms"
+        try:
+            uname = (r.json().get("result") or {}).get("username")
+        except Exception:
+            uname = None
+        txt = f"getMe {ms}ms" + (f" · @{uname}" if uname else "")
+        return (WARN if ms > Config.DOCTOR_TG_SLOW_MS else OK), txt
+    add("تليجرام", _telegram)
+
+    # 10) النسخ الاحتياطي الأسبوعي (09 §5)
+    def _backup():
+        import backup
+        if not Config.BACKUP_WEEKLY_ENABLED:
+            return WARN, "النسخ الأسبوعي معطّل (BACKUP_WEEKLY_ENABLED=0)"
+        st = backup.load_state()
+        local = backup.list_local()
+        sched = f"كل {backup.weekday_name_ar()} {Config.BACKUP_HOUR:02d}:00 · محلي {len(local)}/{Config.BACKUPS_KEEP}"
+        if not st.get("last_ts"):
+            return OK, sched + " · لم تُنفَّذ بعد"
+        age_d = (now - st["last_ts"]) / 86400
+        last = f"آخر نسخة منذ {age_d:.1f} يوم" + ("" if st.get("last_ok") else f" ❌ {st.get('last_error')}")
+        if not st.get("last_ok"):
+            return FAIL, sched + " · " + last
+        if age_d > 8:
+            return WARN, sched + " · " + last
+        return OK, sched + " · " + last
+    add("النسخ الاحتياطي", _backup)
+
+    # 11) العملية
     def _process():
         started = (bot_state or {}).get("started_at")
         up = int(now - started) if started else None
