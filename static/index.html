@@ -507,7 +507,7 @@
 
             if (data.ok) {
                 document.getElementById('statusText').innerText = "✅ تم التفريغ بنجاح! اضغط نسخ بالأعلى لاستخدامه.";
-                document.getElementById('transcriptionResult').innerText = data.text;
+                document.getElementById('transcriptionResult').innerText = data.polished ? (data.text + "\n\n— 📝 المنظم —\n" + data.polished) : data.text;
                 document.getElementById('modelUsed').innerText = `🤖 الموديل: ${data.model}`;
                 document.getElementById('keyUsed').innerText = `🔑 المفتاح: ${data.key_name}`;
                 let t = data.elapsed != null ? `⏱ ${data.elapsed} ث` : '⏱ -';
@@ -567,7 +567,7 @@
 
         async function resetCircuits() {
             try {
-                const resp = await apiFetch('/api/reset');
+                const resp = await apiFetch('/api/reset', { method: 'POST' });
                 const res = await resp.json();
                 if (res.ok) { toast(`🔓 تم فتح ${res.reset} قاطع`, 'ok'); loadKeysStatus(); }
             } catch (e) { toast('تعذر الاتصال بالخادم'); }
