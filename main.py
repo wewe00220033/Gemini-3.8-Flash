@@ -60,6 +60,12 @@ def _setup_logging():
     root = logging.getLogger()
     root.handlers[:] = [handler]
     root.setLevel(level)
+    # المرحلة 5 (09 §2–3): حجب الأسرار على كل القنوات + ملف يومي logs/app_YYYY-MM-DD.log مع تدوير واحتفاظ
+    try:
+        import logkit
+        logkit.install(root, level)
+    except Exception as e:  # pragma: no cover
+        print(f"⚠️ logkit: {e}")
     sys.stdout = _PrintToLog(logging.getLogger("app"), logging.INFO)
     sys.stderr = _PrintToLog(logging.getLogger("app"), logging.ERROR)
 
