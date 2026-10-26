@@ -11,11 +11,16 @@
 import sys
 import time
 import html
+import os
 import threading
 import requests
 from concurrent.futures import ThreadPoolExecutor
 from config import Config
 from key_manager import key_manager
+import incidents
+import logkit
+import observability
+import transcriber
 from transcriber import transcribe_audio_bytes_ex
 from model_state import model_circuit
 import heartbeat
@@ -350,14 +355,17 @@ def set_reaction(token, chat_id, message_id, emoji=None):
         return False
 
 
-def _download_with_retry(token, file_id):
-    """تحميل الملف من تليجرام مع إعادة محاولة ×DOWNLOAD_RETRIES وbackoff؛ يرفع RuntimeError مفهوماً."""
+def _download_with_retry(token, file_id, job_id=None):
+    """تحميل الملف من تليجرام مع إعادة محاولة ×DOWNLOAD_RETRIES وbackoff؛ يرفع RuntimeError مفهوماً.
+    كل محاولة فاشلة تُسجَّل في jobs.ndjson (download_fail) لأمر /trace (09 §7 بند 4)."""
     last = None
     for i in range(max(1, Config.DOWNLOAD_RETRIES)):
         try:
             return _download_file(token, file_id)
         except Exception as e:
             last = e
+            if job_id:
+                jobs.record(job_id, "download_fail", attempt=i + 1, error=f"{type(e).__name__}: {e}"[:200])
             if i + 1 < Config.DOWNLOAD_RETRIES:
                 delay = Config.DOWNLOAD_BACKOFF[min(i, len(Config.DOWNLOAD_BACKOFF) - 1)]
                 print(f"⚠️ تحميل الفويس فشل ({type(e).__name__}) — محاولة {i + 2}/{Config.DOWNLOAD_RETRIES} بعد {delay}ث")
@@ -411,9 +419,13 @@ def process_job(job):
 
     print(f"🎙️ بدء تفريغ ({job.label}) من {chat_id} [{job.source}:{job.job_id}]...")
     with ProgressKeeper(token, chat_id, reply_to_id=reply_to):
-        audio_bytes = _download_with_retry(token, job.file_id)
+        audio_bytes = _download_with_retry(token, job.file_id, job_id=job.job_id)
         jobs.record(job.job_id, "downloaded", bytes=len(audio_bytes))
-        text, model, key_name, info = transcribe_audio_bytes_ex(audio_bytes, job.mime_type)
+        transcriber.set_current_job(job.job_id)
+        try:
+            text, model, key_name, info = transcribe_audio_bytes_ex(audio_bytes, job.mime_type)
+        finally:
+            transcriber.set_current_job(None)
     jobs.record(job.job_id, "transcribed", model=model, key=str(key_name), elapsed=info.get("elapsed"))
     print(f"✅ تم التفريغ عبر [{model}] بالمفتاح [{key_name}] في {info.get('elapsed')} ث: {text[:40]}...")
     # المرحلة 4 (08 §2 قرار المالك أ): فويس جديد دون رد على الاقتراح = قبول صامت لاسم الجلسة المقترح
@@ -443,9 +455,21 @@ def process_job(job):
     return {"text": text, "model": model, "key_name": key_name, "info": info, "polished": res["polished"]}
 
 
+def _on_job_done(job, result):
+    """نجاح → تصفير سلسلة الفشل (المرحلة 5، 12 §3.3)."""
+    try:
+        incidents.on_job_result(True, queue=QUEUE)
+    except Exception:
+        pass
+
+
 def _on_job_failed(job, err):
     STATE["last_error"] = str(err)
     print(f"❌ خطأ تفريغ [{job.job_id}]: {err}")
+    try:
+        incidents.on_job_result(False, error=str(err), queue=QUEUE)        # ≥3 متتالية → تقرير حادث
+    except Exception:
+        pass
     if job.source == "web" or not job.chat_id:
         return
     token = job.meta.get("token") or _runtime_token()
@@ -513,7 +537,7 @@ def start_queue(resume=True):
         if QUEUE is None:
             QUEUE = voice_queue.VoiceQueue(
                 process_job, on_deferred=_on_job_deferred, on_quota_deferral=_on_quota_deferral,
-                on_failed=_on_job_failed,
+                on_failed=_on_job_failed, on_done=_on_job_done,
             ).start()
             if resume:
                 try:
@@ -632,6 +656,7 @@ def _help_text():
         "/header [both|raw|polished|off] — بانر «تفريغ آلي» فوق النص\n"
         "/new_session [اسم] · /end · /sessions · /resume <id> · /rename_session <اسم> · /export [id] · /merge_sessions <id1> <id2> — الجلسات (كل فويس يُكتب في الجلسة وفي ALL.md)\n"
         "/context [on|off] — سياق الفويسات السابقة داخل الجلسة (يسقط تلقائياً بعد ضربتين) · /session_role <id|-> — دور خاص بالجلسة · /suggest_titles → /pick_title <n> — 🎲 3 اقتراحات لاسم الجلسة · /stats — إحصاء\n"
+        "/logs [N|errors|YYYY-MM-DD] — السجل (أسرار محجوبة) · /trace <job_id> أو رداً على فويس — رحلة الفويس · /doctor — فحص صحي محلي · /incidents — تقارير الحوادث\n"
         "/project_group <مفتاح> <مجموعة> — مفاتيح نفس مشروع Google تتشارك الحصة (والقفز عند 503 لمشروع آخر). اكتب - للإزالة\n"
         "/backup — نسخة احتياطية (أرشيف+جلسات+إعدادات) بلا أسرار\n"
         "/backup_secrets — نسخة keys.json بتأكيد صريح\n"
@@ -1155,6 +1180,59 @@ def handle_text(token, chat_id, msg, msg_text):
 
     elif cmd == "/version":
         send_telegram_message(token, chat_id, preflight.version_line(), reply_to_id=msg["message_id"])
+
+    # ---- المرحلة 5 (09 §4 / 12 §3) ----
+    elif cmd == "/logs":
+        arg = args[0] if args else None
+        if arg and len(arg) == 10 and arg[4] == "-" and arg[7] == "-":
+            lines = logkit.read_day(arg)
+            if not lines:
+                send_telegram_message(token, chat_id, f"📭 لا سجل ليوم {arg}.", reply_to_id=msg["message_id"])
+                return
+            _send_document(token, chat_id, f"app_{arg}.log", ("\n".join(lines) + "\n").encode("utf-8"), "text/plain",
+                           f"🧾 سجل {arg} ({len(lines)} سطر، الأسرار محجوبة)", msg["message_id"])
+            return
+        send_telegram_message(token, chat_id, f"<pre>{html.escape(observability.logs_text(arg))}</pre>", reply_to_id=msg["message_id"], parse_mode="HTML")
+
+    elif cmd == "/trace":
+        jid = args[0] if args else None
+        if not jid:
+            reply = msg.get("reply_to_message") or {}
+            if reply.get("message_id"):
+                jid = jobs.find_by_message(chat_id, reply["message_id"])
+        if not jid:
+            send_telegram_message(token, chat_id, "الاستخدام: /trace <job_id> — أو رد بـ /trace على الفويس نفسه. المعرّف يظهر في /queue وفي رسالة الفشل.", reply_to_id=msg["message_id"])
+            return
+        txt = observability.trace_text(jid)
+        send_telegram_message(token, chat_id, f"<pre>{html.escape(txt)}</pre>" if txt else f"لا أثر لمهمة {jid} في سجل المهام (قد تكون ضُغطت أو المعرّف غير دقيق).",
+                              reply_to_id=msg["message_id"], parse_mode="HTML" if txt else None)
+
+    elif cmd == "/doctor":
+        wd = None
+        try:
+            import web_service
+            wd = web_service.RUNTIME.get("watchdog")
+        except Exception:
+            pass
+        send_telegram_message(token, chat_id, observability.doctor_text(bot_state=STATE, queue=QUEUE, watchdog=wd), reply_to_id=msg["message_id"])
+
+    elif cmd == "/incidents":
+        if args and args[0].lower() in ("test", "اختبار"):
+            path = incidents.write_report("manual", "تقرير تجريبي بطلب المالك", queue=QUEUE, force=True)
+            send_telegram_message(token, chat_id, f"📄 كُتب: {os.path.basename(path)}" if path else "تعذر كتابة التقرير.", reply_to_id=msg["message_id"])
+            return
+        recent = incidents.list_recent(5)
+        if not recent:
+            send_telegram_message(token, chat_id, "✅ لا حوادث مسجلة. (/incidents test لتقرير تجريبي)", reply_to_id=msg["message_id"])
+            return
+        latest = incidents.latest_text()
+        head = "🚨 آخر الحوادث:\n" + "\n".join(f"• {os.path.basename(p)}" for p in recent) + "\n\n"
+        send_telegram_message(token, chat_id, head + f"<pre>{html.escape(latest or '')}</pre>", reply_to_id=msg["message_id"], parse_mode="HTML")
+        try:
+            with open(recent[0], "rb") as f:
+                _send_document(token, chat_id, os.path.basename(recent[0]), f.read(), "text/markdown", "📄 التقرير الكامل", msg["message_id"])
+        except OSError:
+            pass
 
     elif cmd in ("/queue", "الطابور"):
         send_telegram_message(token, chat_id, _queue_text(), reply_to_id=msg["message_id"])

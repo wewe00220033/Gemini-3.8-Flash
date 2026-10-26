@@ -298,6 +298,23 @@ class Config:
     # مستوى السجلات: DEBUG | INFO | WARNING
     LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")
 
+    # --- المرحلة 5 (09 §1–3): سجل CCTV بملفات يومية + حجب الأسرار + احتفاظ دوّار ---
+    LOGS_DIR = os.path.join(DATA_DIR, "logs")
+    LOG_TO_FILE = os.environ.get("LOG_TO_FILE", "1") not in ("0", "false", "False", "")
+    LOG_RETENTION_DAYS = int(os.environ.get("LOG_RETENTION_DAYS", "90"))     # 09 §1: أحدث قرار (90) يغلب
+    LOG_TOTAL_MAX_MB = int(os.environ.get("LOG_TOTAL_MAX_MB", "500"))         # السقف الكلي — الأقدم يُحذف أولاً
+    LOG_FILE_MAX_MB = 20                                                      # 09 §2: تدوير داخل اليوم عند 20MB
+    LOG_TAIL_DEFAULT = 20                                                     # /logs N (افتراضي)
+    LOG_ERRORS_TAIL = 50                                                      # /logs errors
+    # --- المرحلة 5 (12 §3): الطبيب الذاتي + تقارير الحوادث ---
+    INCIDENTS_DIR = os.path.join(DATA_DIR, "incidents")
+    INCIDENTS_KEEP = 50                                                       # أقدم التقارير تُحذف بعد هذا العدد
+    INCIDENT_FAIL_STREAK = 3                                                  # ≥3 فشل متتالٍ → تقرير
+    INCIDENT_COOLDOWN_S = 600                                                 # لا تقريرين لنفس النوع خلال 10 د
+    DOCTOR_INTERVAL_MIN = int(os.environ.get("DOCTOR_INTERVAL_MIN", "60"))    # فحص دوري صامت (0 = معطّل)
+    DISK_LOW_MB = 200                                                         # ⚠️ لو المساحة الحرة أقل
+    PERSIST_PROBE_FILE = os.path.join(DATA_DIR, ".persist_probe")             # 09 §6
+
     # المستخدم المصرح له في تليجرام (حماية البوت من التطفل).
     # فاضي = البوت يرفض الجميع حتى تضبط TELEGRAM_CHAT_ID في البيئة أو .env
     DEFAULT_CHAT_ID = ""

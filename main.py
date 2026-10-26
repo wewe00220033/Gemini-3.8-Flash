@@ -25,6 +25,10 @@ import telegram_bot
 import preflight
 import watchdog
 import supervisor
+import incidents
+import jobs
+import logkit
+import observability
 from model_state import model_circuit
 
 
@@ -60,6 +64,12 @@ def _setup_logging():
     root = logging.getLogger()
     root.handlers[:] = [handler]
     root.setLevel(level)
+    # المرحلة 5 (09 §2–3): حجب الأسرار على كل القنوات + ملف يومي logs/app_YYYY-MM-DD.log مع تدوير واحتفاظ
+    try:
+        import logkit
+        logkit.install(root, level)
+    except Exception as e:  # pragma: no cover
+        print(f"⚠️ logkit: {e}")
     sys.stdout = _PrintToLog(logging.getLogger("app"), logging.INFO)
     sys.stderr = _PrintToLog(logging.getLogger("app"), logging.ERROR)
 
@@ -128,6 +138,9 @@ class Runtime:
         )
         self.watchdog.start()
         web_service.RUNTIME["watchdog"] = self.watchdog
+        # المرحلة 5: تقارير الحوادث تُخطر المالك عبر نفس طابور الإشعارات (لا شبكة داخل الـ watchdog)
+        if self.notifier is not None:
+            incidents.set_notifier(self.notifier.notify)
         return self.watchdog
 
     # ---- L4 (1c) ----
@@ -225,6 +238,10 @@ def _restart_notice():
     data = supervisor.read_and_clear_restart_reason(Config.RESTART_REASON_FILE)
     if not data:
         return ""
+    try:
+        incidents.on_boot_restart(data)                      # المرحلة 5 (12 §3.3): تقرير حادث لإعادة التشغيل
+    except Exception as e:
+        print(f"⚠️ incidents boot: {e}")
     reason = data.get("reason")
     labels = {"L4": "L4 — تعثر الاستقبال رغم كل الطبقات", "restart_requested": "L4 — طلب إعادة تشغيل",
               "crash": "انهيار العملية", "frozen": "تجمد كامل (قتله المشرف)", "gave_up": "المشرف استسلم"}
@@ -244,6 +261,10 @@ def _startup_ping(bot_token, chat_id, web_error=None):
             key_manager, model_circuit=model_circuit, web_port=Config.WEB_PORT, web_error=web_error,
         )
         print(f"🚀 preflight: {line}")
+        st, txt = observability.persist_probe_check()        # 09 §6
+        if st != observability.OK:
+            print(f"⚠️ {txt}")
+            line += f"\n⚠️ {txt}"
         if Config.NOTIFY_ON_START and bot_token and chat_id:
             extra = _restart_notice()
             if not ok and web_error:
@@ -256,6 +277,35 @@ def _startup_ping(bot_token, chat_id, web_error=None):
         print(f"⚠️ تعذر إرسال إشعار الإقلاع: {e}")
 
 
+_DOCTOR_LAST = {"worst": None}
+
+
+def _periodic_doctor(rt):
+    """12 §3.2: فحص دوري صامت كل DOCTOR_INTERVAL_MIN؛ يُبلَّغ المالك فقط عند ❌ جديد (انتقال إلى fail)، ومرة عند التعافي.
+    يضغط jobs.ndjson ويطبّق احتفاظ السجلات في نفس الدورة (09 §1 / 03)."""
+    try:
+        lines, worst = observability.doctor_report(bot_state=telegram_bot.STATE, queue=telegram_bot.QUEUE, watchdog=rt.watchdog)
+        prev = _DOCTOR_LAST["worst"]
+        _DOCTOR_LAST["worst"] = worst
+        print(f"🩺 doctor دوري: {worst}")
+        if rt.notifier is not None:
+            if worst == observability.FAIL and prev != observability.FAIL:
+                bad = [ln for ln in lines[1:] if ln.startswith("❌")]
+                rt.notifier.notify("🩺 الفحص الدوري وجد مشكلة:\n" + "\n".join(bad) + "\n/doctor للتقرير الكامل")
+            elif prev == observability.FAIL and worst != observability.FAIL:
+                rt.notifier.notify("🩺 الفحص الدوري: المشكلة السابقة زالت ✅")
+    except Exception as e:
+        print(f"⚠️ doctor دوري: {e}")
+    try:
+        if jobs.compact_if_needed():
+            print("🧹 jobs.ndjson ضُغط")
+        n = logkit.enforce_retention()
+        if n:
+            print(f"🧹 سجلات: حُذف {n} ملف قديم")
+    except Exception as e:
+        print(f"⚠️ تنظيف دوري: {e}")
+
+
 def _idle_loop(rt, web_t, bot_token, tick=1.0):
     """
     حلقة الخيط الرئيسي: تنام بنبضات قصيرة (tick) لا بـ WATCHDOG_INTERVAL*3 دفعة واحدة.
@@ -264,8 +314,12 @@ def _idle_loop(rt, web_t, bot_token, tick=1.0):
     """
     period = Config.WATCHDOG_INTERVAL * 3
     next_check = time.monotonic() + period
+    next_doctor = time.monotonic() + max(60, Config.DOCTOR_INTERVAL_MIN * 60) if Config.DOCTOR_INTERVAL_MIN > 0 else None
     web_restarts = 0
     while not rt.global_stop.wait(tick):
+        if next_doctor is not None and time.monotonic() >= next_doctor:
+            next_doctor = time.monotonic() + Config.DOCTOR_INTERVAL_MIN * 60
+            _periodic_doctor(rt)
         if time.monotonic() < next_check:
             continue
         next_check = time.monotonic() + period

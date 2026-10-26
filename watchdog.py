@@ -163,6 +163,13 @@ class Watchdog:
     def _record(self, level, detail):
         self.events.append((clock.monotonic(), level, detail))
         print(f"🩺 watchdog {level}: {detail}")
+        # المرحلة 5 (12 §3.3): تقرير حادث تلقائي عند أي تصعيد (L1/L3/L3b/L4) — بتهدئة داخل incidents؛ فشله صامت
+        if level != "recovered":
+            try:
+                import incidents
+                incidents.on_watchdog_event(level, detail, watchdog=self)
+            except Exception as e:
+                print(f"⚠️ incidents hook: {e}")
 
     def _prune_l1(self, now):
         window = Config.PROTECT_WINDOW_MINUTES * 60

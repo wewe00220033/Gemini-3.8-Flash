@@ -81,6 +81,33 @@ def load_state():
     return jobs
 
 
+def events_of(job_id):
+    """كل صفوف مهمة واحدة بترتيبها (لأمر /trace). [] لو غير موجودة. يقبل بادئة المعرّف (≥ 6 أحرف)."""
+    jid = str(job_id or "").strip()
+    if not jid:
+        return []
+    with _lock:
+        rows = store.read_json_lines(_path())
+    exact = [r for r in rows if r.get("job_id") == jid]
+    if exact or len(jid) < 6:
+        return exact
+    ids = {r.get("job_id") for r in rows if str(r.get("job_id", "")).startswith(jid)}
+    if len(ids) != 1:
+        return []
+    only = ids.pop()
+    return [r for r in rows if r.get("job_id") == only]
+
+
+def find_by_message(chat_id, message_id):
+    """معرّف المهمة لفويس بعينه (رد على الفويس → /trace). None لو لا شيء."""
+    with _lock:
+        rows = store.read_json_lines(_path())
+    for r in reversed(rows):
+        if str(r.get("chat_id")) == str(chat_id) and r.get("message_id") == message_id and r.get("job_id"):
+            return r["job_id"]
+    return None
+
+
 def pending_jobs(max_age_h=None, now=None):
     """المهام غير المكتملة (received/downloaded/transcribed) الأحدث من max_age_h، بترتيب الاستلام."""
     max_age_h = Config.JOBS_RESUME_MAX_AGE_H if max_age_h is None else max_age_h
