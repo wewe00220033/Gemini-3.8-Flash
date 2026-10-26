@@ -54,13 +54,17 @@ def fresh_env(monkeypatch, tmp_path):
     monkeypatch.setattr(config.Config, "INCIDENTS_DIR", str(tmp_path / "incidents"))
     monkeypatch.setattr(config.Config, "PERSIST_PROBE_FILE", str(tmp_path / ".persist_probe"))
     monkeypatch.setattr(config.Config, "LOG_TO_FILE", False)
+    # مرحلة 5.1: قناة audit + النسخ المحلية + حالة الجدولة في المجلد المؤقت
+    monkeypatch.setattr(config.Config, "AUDIT_FILE", str(tmp_path / "logs" / "audit.log"))
+    monkeypatch.setattr(config.Config, "BACKUPS_DIR", str(tmp_path / "backups"))
+    monkeypatch.setattr(config.Config, "BACKUP_STATE_FILE", str(tmp_path / "state" / "backup_state.json"))
     inc = sys.modules.get("incidents")
     if inc is not None:
         inc.reset_state()
         inc.set_notifier(None)
     # هذه الوحدات تحمل مرجعها الخاص لـ Config (from config import Config) — بعد reload(config) يصبح قديماً
     for mod_name in ("glossary", "archive", "settings", "prompts", "text_assist", "transcriber", "sessions", "delivery",
-                     "logkit", "observability", "incidents", "watchdog", "jobs", "voice_queue"):
+                     "logkit", "observability", "incidents", "watchdog", "jobs", "voice_queue", "backup", "audit"):
         mod = sys.modules.get(mod_name)
         if mod is not None and hasattr(mod, "Config"):
             monkeypatch.setattr(mod, "Config", config.Config)
