@@ -143,14 +143,118 @@ def list_local(kind="backup"):
     return out
 
 
+def _stem(path):
+    """backup_2026-10-24_0300_part2.zip → 2026-10-24_0300 (الطابع الزمني بلا جزء)."""
+    stem = os.path.basename(path)[len("backup_"):-4]
+    return stem.split("_part")[0]
+
+
+def _part_no(path):
+    """رقم الجزء (1..N) أو 0 لملف غير مجزّأ — للترتيب الصحيح عند التجميع."""
+    base = os.path.basename(path)[:-4]
+    if "_part" not in base:
+        return 0
+    try:
+        return int(base.rsplit("_part", 1)[1])
+    except ValueError:
+        return 0
+
+
+def local_groups():
+    """
+    النسخ المحلية مجمّعة (الأجزاء _partN تُعامل كنسخة واحدة) من الأحدث للأقدم:
+    [{"stem", "paths" (مرتبة بالجزء), "bytes", "mtime", "parts"}] — تُستخدم في /backups و/restore_test.
+    """
+    groups = {}
+    for p, mt in list_local():
+        g = groups.setdefault(_stem(p), {"stem": _stem(p), "paths": [], "bytes": 0, "mtime": 0.0})
+        g["paths"].append(p)
+        g["mtime"] = max(g["mtime"], mt)
+        try:
+            g["bytes"] += os.path.getsize(p)
+        except OSError:
+            pass
+    out = []
+    for g in groups.values():
+        g["paths"].sort(key=_part_no)
+        g["parts"] = len(g["paths"])
+        out.append(g)
+    out.sort(key=lambda g: g["stem"], reverse=True)
+    return out
+
+
+def backups_list_text(groups=None):
+    """قائمة /backups: رقم 1..N (الأحدث أولاً) + التاريخ من اسم الملف + الحجم + عدد الأجزاء."""
+    groups = local_groups() if groups is None else groups
+    if not groups:
+        return "ℹ️ لا توجد نسخ محفوظة محلياً بعد."
+    lines = [f"🗃️ النسخ المحفوظة محلياً ({len(groups)}/{Config.BACKUPS_KEEP}) — الأحدث أولاً:"]
+    for i, g in enumerate(groups, 1):
+        date = g["stem"].replace("_", " ")
+        if len(date) >= 15 and date[11:13].isdigit():
+            date = f"{date[:10]} {date[11:13]}:{date[13:15]}"
+        size = g["bytes"] / (1024 * 1024)
+        size_s = f"{size:.1f}MB" if size >= 1 else f"{g['bytes'] / 1024:.0f}KB"
+        parts = f" · {g['parts']} أجزاء" if g["parts"] > 1 else ""
+        lines.append(f"{i}. {date} · {size_s}{parts}")
+    lines.append(f"التواريخ بتوقيت الخادم ({server_tz_label()}) · /backups <رقم> لإرسال النسخة · /restore_test لفحص الأحدث")
+    return "\n".join(lines)
+
+
+def join_parts(paths, dest_path):
+    """يجمع الأجزاء بالترتيب في dest_path (تدفّق 1MB بلا تحميل الكل في الذاكرة). يرجع إجمالي البايتات."""
+    total = 0
+    with open(dest_path, "wb") as out:
+        for p in paths:
+            with open(p, "rb") as f:
+                while True:
+                    chunk = f.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+                    total += len(chunk)
+    return total
+
+
+def server_tz_label():
+    """تسمية توقيت الخادم: UTC أو UTC+02:00 — من إزاحة النظام (الحاويات السحابية غالباً UTC)."""
+    off = time.localtime().tm_gmtoff or 0
+    if off == 0:
+        return "UTC"
+    sign = "+" if off > 0 else "-"
+    off = abs(off)
+    return f"UTC{sign}{off // 3600:02d}:{(off % 3600) // 60:02d}"
+
+
+def schedule_text():
+    """
+    نص الجدولة الأسبوعية مع توضيح صريح أن الموعد بتوقيت الخادم (UTC على الاستضافات) + معادِله بتوقيت DISPLAY_TZ:
+    'كل الجمعة 03:00 بتوقيت الخادم (UTC) = 05:00 Africa/Cairo'.
+    """
+    base = f"كل {weekday_name_ar()} {Config.BACKUP_HOUR:02d}:00 بتوقيت الخادم ({server_tz_label()})"
+    tz_name = str(getattr(Config, "DISPLAY_TZ", "") or "").strip()
+    if not tz_name:
+        return base
+    try:
+        from zoneinfo import ZoneInfo
+        now = time.time()
+        lt = time.localtime(now)
+        server_dt = datetime.datetime(lt.tm_year, lt.tm_mon, lt.tm_mday, Config.BACKUP_HOUR, 0,
+                                      tzinfo=datetime.timezone(datetime.timedelta(seconds=lt.tm_gmtoff or 0)))
+        local_dt = server_dt.astimezone(ZoneInfo(tz_name))
+        if local_dt.strftime("%H:%M") == server_dt.strftime("%H:%M") and server_tz_label() != "UTC":
+            return base
+        return f"{base} = {local_dt.strftime('%H:%M')} {tz_name}"
+    except Exception:
+        return base
+
+
 def prune_local(keep=None):
     """يبقي آخر keep نسخة (مجموعة الأجزاء تُعامل كنسخة واحدة بطابعها الزمني). يرجع عدد المحذوف."""
     keep = Config.BACKUPS_KEEP if keep is None else keep
     groups = {}
     for p, mt in list_local():
-        stem = os.path.basename(p)[len("backup_"):-4]
-        stem = stem.split("_part")[0]
-        groups.setdefault(stem, []).append(p)
+        groups.setdefault(_stem(p), []).append(p)
     stems = sorted(groups.keys())
     removed = 0
     for stem in stems[:-keep] if keep > 0 else stems:
@@ -270,8 +374,9 @@ def run_weekly(send_fn=None, now=None):
             for i, chunk in enumerate(parts, 1):
                 name = os.path.basename(paths[i - 1])
                 cap = (f"🗂️ نسخة أسبوعية تلقائية — {len(included)} ملف، بلا أسرار."
-                       + (f" جزء {i}/{len(parts)} (اجمع الأجزاء ثم فك الضغط)" if len(parts) > 1 else "")
-                       + "\n/restore_test للتحقق من سلامتها · /backup_secrets للمفاتيح")
+                       + (f" جزء {i}/{len(parts)} (للفك محلياً اجمع الأجزاء؛ /restore_test يجمعها تلقائياً)" if len(parts) > 1 else "")
+                       + f"\nالموعد: {schedule_text()}"
+                       + "\n/restore_test للتحقق من سلامتها · /backups للنسخ السابقة · /backup_secrets للمفاتيح")
                 send_fn(name, chunk, cap)
                 res["sent"] += 1
         res["ok"] = True
@@ -303,20 +408,27 @@ def restore_test(zip_path=None):
     لا ملفات سرية، JSON صالح لكل *.json، ووجود الملفات المتوقعة. يرجع dict تقرير (بلا استثناءات) ثم يحذف المؤقت.
     """
     rep = {"ok": False, "path": None, "members": 0, "bytes": 0, "json_ok": 0, "json_bad": [], "missing": [],
-           "bad_crc": [], "unsafe": [], "secrets": [], "error": None}
+           "bad_crc": [], "unsafe": [], "secrets": [], "error": None, "parts": 1, "joined_bytes": 0}
+    part_paths = None
     if zip_path is None:
-        local = list_local()
-        if not local:
+        groups = local_groups()
+        if not groups:
             rep["error"] = "لا توجد نسخة محلية في backups/ بعد — نفّذ /backup أو انتظر النسخة الأسبوعية"
             return rep
-        zip_path = local[-1][0]
-        if "_part" in os.path.basename(zip_path):
-            rep["error"] = "آخر نسخة مقسّمة لأجزاء — اجمع الأجزاء يدوياً ثم اختبر الملف الكامل"
-            rep["path"] = zip_path
-            return rep
+        latest = groups[0]
+        zip_path = latest["paths"][0]
+        if latest["parts"] > 1:
+            # 09 §5: نسخة مجزّأة → تُجمَّع الأجزاء تلقائياً في ملف مؤقت ثم تُفحص كاملة (لا تجميع يدوي)
+            part_paths = latest["paths"]
+            rep["parts"] = latest["parts"]
+            rep["joined_from"] = [os.path.basename(p) for p in part_paths]
     rep["path"] = zip_path
     tmp = tempfile.mkdtemp(prefix="restore_test_")
     try:
+        if part_paths:
+            joined = os.path.join(tmp, f"backup_{_stem(zip_path)}.joined.zip")
+            rep["joined_bytes"] = join_parts(part_paths, joined)
+            zip_path = joined
         with zipfile.ZipFile(zip_path) as z:
             bad = z.testzip()
             if bad:
@@ -357,7 +469,10 @@ def restore_test_text(rep):
     if rep.get("error") and not rep.get("members"):
         return f"❌ تمرين الاستعادة: {rep['error']}"
     icon = "✅" if rep["ok"] else "❌"
-    lines = [f"{icon} تمرين الاستعادة — {os.path.basename(rep['path'] or '?')}",
+    title = os.path.basename(rep['path'] or '?')
+    if rep.get("parts", 1) > 1:
+        title = f"backup_{_stem(rep['path'])}.zip (جُمعت {rep['parts']} أجزاء تلقائياً)"
+    lines = [f"{icon} تمرين الاستعادة — {title}",
              f"• الأعضاء: {rep['members']} · الحجم بعد الفك: {rep['bytes'] / 1024:.0f}KB · JSON سليم: {rep['json_ok']}"]
     if rep["missing"]:
         lines.append("• ⚠️ غير موجود (قد يكون طبيعياً لو لم تُنشأ بعد): " + ", ".join(rep["missing"]))
