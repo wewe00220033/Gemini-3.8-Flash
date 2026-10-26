@@ -344,6 +344,7 @@ class Config:
     AGENT_TIMEOUT = int(os.environ.get("AGENT_TIMEOUT", "180"))
     AGENT_ENVIRONMENT = "remote"
     PLAN_MAX_INPUT_CHARS = 20000
+    PLAN_SYNC_FOR_TESTS = False               # الاختبارات فقط: تنفيذ /plan في نفس الخيط
     FEATURE_PLAN = os.environ.get("FEATURE_PLAN", "1") not in ("0", "false", "False", "")   # 13 §5: علم ميزة
     # الويب (13 §1): rate limit بالـ IP على /api/transcribe · توكن عبر cookie HttpOnly بعد ?token= مرة واحدة
     WEB_RATE_LIMIT_PER_MIN = int(os.environ.get("WEB_RATE_LIMIT_PER_MIN", "30"))
