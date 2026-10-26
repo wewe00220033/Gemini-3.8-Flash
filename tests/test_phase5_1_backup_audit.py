@@ -7,6 +7,7 @@ import importlib
 import io
 import json
 import os
+import datetime
 import time
 import zipfile
 
@@ -176,11 +177,12 @@ def test_split_over_limit_and_part_groups_prune_together(fresh_env, monkeypatch)
 # الجدولة الأسبوعية — 09 §5
 # =====================================================================
 def _at(wday, hour):
-    """طابع زمني محلي ليوم أسبوع (0=الاثنين) وساعة معينة في الأسبوع الحالي."""
+    """طابع زمني محلي ليوم أسبوع (0=الاثنين) وساعة معينة في الأسبوع الحالي — آمن مع التوقيت الصيفي."""
     now = time.time()
     lt = time.localtime(now)
-    base = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, hour, 0, 0, 0, 0, -1))
-    return base + (wday - lt.tm_wday) * 86400
+    d = datetime.date(lt.tm_year, lt.tm_mon, lt.tm_mday) + datetime.timedelta(days=(wday - lt.tm_wday))
+    dt = datetime.datetime(d.year, d.month, d.day, hour, 0, 0)
+    return time.mktime(dt.timetuple())
 
 
 def test_weekly_due_day_hour_and_once_per_week(fresh_env, monkeypatch):
