@@ -66,8 +66,9 @@ def is_forbidden(rel):
     return False
 
 
-def collect(root=ROOT, with_tests=False):
+def collect(root=None, with_tests=False):
     """قائمة (rel_path, abs_path) المرشحة للأرشيف. يرفع FileNotFoundError لو ملف مطلوب غائب."""
+    root = ROOT if root is None else root
     out = []
     seen = set()
 
@@ -104,8 +105,9 @@ def collect(root=ROOT, with_tests=False):
     return out
 
 
-def build(output, root=ROOT, with_tests=False, dry_run=False):
+def build(output, root=None, with_tests=False, dry_run=False):
     """يبني الأرشيف ويرجع (members, total_bytes). يرفع RuntimeError عند تسرّب سري."""
+    root = ROOT if root is None else root
     members = collect(root, with_tests)
     leaked = [rel for rel, _ in members if is_forbidden(rel)]
     if leaked:
@@ -129,19 +131,22 @@ def build(output, root=ROOT, with_tests=False, dry_run=False):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description="تجهيز deploy_ready.zip لملفات التشغيل فقط (بلا أسرار/اختبارات/بيانات).")
-    ap.add_argument("-o", "--output", default=os.path.join(ROOT, "deploy_ready.zip"))
+    ap.add_argument("-o", "--output", default=None, help="المخرج (الافتراضي <root>/deploy_ready.zip)")
+    ap.add_argument("--root", default=None, help="جذر المشروع (الافتراضي مجلد المستودع)")
     ap.add_argument("--list", action="store_true", help="عرض المحتويات فقط بلا كتابة")
     ap.add_argument("--with-tests", action="store_true", help="ضمّ tests/ وpytest.ini")
     args = ap.parse_args(argv)
+    root = os.path.abspath(args.root) if args.root else ROOT
+    output = args.output or os.path.join(root, "deploy_ready.zip")
     try:
-        members, total = build(args.output, with_tests=args.with_tests, dry_run=args.list)
+        members, total = build(output, root=root, with_tests=args.with_tests, dry_run=args.list)
     except (FileNotFoundError, RuntimeError) as e:
         print(f"❌ {e}")
         return 2
     for rel, ap_ in members:
         print(f"  {os.path.getsize(ap_):>9,}  {rel}")
     print(f"{'📋' if args.list else '✅'} {len(members)} ملفاً · {total / 1024:.0f}KB"
-          + ("" if args.list else f" → {args.output} ({os.path.getsize(args.output) / 1024:.0f}KB مضغوطاً)"))
+          + ("" if args.list else f" → {output} ({os.path.getsize(output) / 1024:.0f}KB مضغوطاً)"))
     if not args.list:
         print("↑ ارفعه في Files → Upload ثم Unarchive وانقل المحتويات للجذر (DEPLOY.md §ب). لا يحوي keys.json ولا .env.")
     return 0

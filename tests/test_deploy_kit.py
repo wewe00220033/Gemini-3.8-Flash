@@ -104,17 +104,16 @@ def test_is_forbidden_patterns(pack):
 
 def test_cli_exit_codes(pack, tmp_path, capsys):
     root = _fake_project(tmp_path)
-    monkeypatch_root = pack.ROOT
-    try:
-        pack.ROOT = str(root)
-        out = str(tmp_path / "cli.zip")
-        assert pack.main(["-o", out]) == 0 and os.path.exists(out)
-        assert "keys.json" not in capsys.readouterr().out.split("→")[0]
-        os.remove(root / "main.py")
-        assert pack.main(["-o", out, "--list"]) == 2
-        assert "main.py" in capsys.readouterr().out
-    finally:
-        pack.ROOT = monkeypatch_root
+    out = str(tmp_path / "cli.zip")
+    assert pack.main(["--root", str(root), "-o", out]) == 0 and os.path.exists(out)
+    printed = capsys.readouterr().out
+    assert "keys.json" not in printed.split("→")[0] and "deploy_ready" not in printed
+    # بلا -o → الافتراضي <root>/deploy_ready.zip
+    assert pack.main(["--root", str(root)]) == 0 and os.path.exists(root / "deploy_ready.zip")
+    capsys.readouterr()
+    os.remove(root / "main.py")
+    assert pack.main(["--root", str(root), "--list"]) == 2
+    assert "main.py" in capsys.readouterr().out
 
 
 def test_real_repo_archive_has_no_secrets(pack, tmp_path):
