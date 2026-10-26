@@ -478,6 +478,20 @@ def append_polished(polished_text, session_id=None):
             return False
 
 
+def append_raw_text(text, session_id=None):
+    """المرحلة 7 (12 §1): يلحق كتلة نصية حرة (استشارة/خطة) بملف الجلسة — append-only، لا تمس المدخلات."""
+    with _lock:
+        sid = session_id or current_id()
+        s = _find(sid) if sid else None
+        if s is None:
+            return False
+        _write_file_header(s)
+        _append_file(session_file(s["id"]), text if text.endswith("\n") else text + "\n")
+        s["last_ts"] = _now_str()
+        _write_index()
+        return True
+
+
 def append_title(title, session_id=None):
     """يلحق «### العنوان» بآخر مدخل (append-only؛ العنوان يصل بعد الخام)."""
     title = (title or "").strip()
@@ -521,7 +535,7 @@ def _parse_block(block):
             cur = pol
         elif ln.startswith(_TITLE_MARK):
             cur = title
-        elif ln.startswith(("⏹️ ", "▶️ ", "✏️ ", "📛 ", "📦 ", "🎭 ", "🧾 ")):
+        elif ln.startswith(("⏹️ ", "▶️ ", "✏️ ", "📛 ", "📦 ", "🎭 ", "🧾 ")) or ln.startswith("### "):
             cur = None
         elif cur is not None:
             cur.append(ln)

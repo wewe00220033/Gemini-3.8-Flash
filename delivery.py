@@ -71,25 +71,43 @@ def polished_message_html(polished_text, role_id, session_name=None):
     return head + "\n" + f"<pre>{html.escape(body)}</pre>"
 
 
-def prepare_for_web(raw_text, model=None, key_name=None, info=None):
-    """مسار الويب: القاموس (scope الخام) + أرشفة ALL.md. لا إرسال ولا تنظيم. يرجع (text, archived).
-    أي خطأ في القاموس/الأرشيف لا يُسقط التفريغ (نرجع النص كما هو)."""
+def prepare_for_web(raw_text, model=None, key_name=None, info=None, polish_fn=None):
+    """
+    مسار الويب (13 §3 Web Parity): **نفس الـ pipeline** — قاموس (scope الخام) → الدور الفعّال → تنظيم flash-lite
+    (لو WEB_POLISH) → أرشفة في ALL.md بوسم «🌐 ويب» (+ المنظم) → كتابة في الجلسة النشطة. لا إرسال تليجرام.
+    يرجع (raw, archived, polished, meta) — meta = {role, session, polish_error, source}.
+    أي خطأ في القاموس/التنظيم/الأرشيف لا يُسقط التفريغ (نرجع الخام كما هو).
+    """
     info = info or {}
     try:
-        raw, _gl = prepare_texts(raw_text)
+        raw, gl = prepare_texts(raw_text)
     except Exception as e:
         print(f"⚠️ القاموس (ويب): {e}")
-        raw = raw_text
+        raw, gl = raw_text, None
+    role_id = settings.effective_role()
     session_name = _safe_session_name()
+    polished, polish_error = None, None
+    if Config.WEB_POLISH and (raw or "").strip():
+        try:
+            if polish_fn is None:
+                import text_assist
+                polish_fn = text_assist.polish
+            kwargs = {"context_summary": sessions.summary()} if _accepts_context_summary(polish_fn) else {}
+            polished, polish_error = polish_fn(raw, role_id, gl, **kwargs)
+        except Exception as e:
+            polished, polish_error = None, f"{type(e).__name__}: {e}"
+            print(f"⚠️ التنظيم (ويب): {polish_error}")
     try:
         archived = archive.append(raw, model=model, elapsed=info.get("elapsed"), key_name=key_name,
-                                  session_name=session_name)
+                                  session_name=session_name, polished=polished, extra="🌐 ويب")
     except Exception as e:
         print(f"⚠️ الأرشفة (ويب): {e}")
         archived = False
     if session_name:
-        sessions.append_entry(raw, model=model, elapsed=info.get("elapsed"), key_name=key_name)
-    return raw, archived
+        sessions.append_entry(raw, model=model, elapsed=info.get("elapsed"), key_name=key_name, extra="🌐 ويب")
+        if polished:
+            sessions.append_polished(polished)
+    return raw, archived, polished, {"role": role_id, "session": session_name, "polish_error": polish_error, "source": "web"}
 
 
 def _safe_session_name():

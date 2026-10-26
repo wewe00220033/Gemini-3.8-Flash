@@ -20,6 +20,9 @@ from transcriber import transcribe_audio_bytes_ex
 from model_state import model_circuit
 import heartbeat
 import audit
+import sessions
+import observability
+from http.cookies import SimpleCookie
 
 
 def _transcribe(audio_bytes, mime_type):
@@ -50,6 +53,37 @@ def load_index_html():
     except OSError:
         return _FALLBACK_HTML
 
+# ----------------------------------------------------------------------
+# 13 §1 S5: rate limit بسيط بالـ IP (نافذة دقيقة منزلقة) — يحمي الحصة لو تسرّب الرابط
+# ----------------------------------------------------------------------
+_rl_lock = threading.Lock()
+_rl_hits = {}      # ip -> [timestamps]
+
+
+def rate_limited(ip, now=None, limit=None):
+    """True لو تجاوز الـ IP الحد خلال آخر 60 ث. يسجّل الضربة الحالية."""
+    now = now or time.time()
+    limit = limit if limit is not None else int(Config.WEB_RATE_LIMIT_PER_MIN)
+    if limit <= 0:
+        return False
+    with _rl_lock:
+        hits = [t for t in _rl_hits.get(ip, []) if now - t < 60]
+        if len(hits) >= limit:
+            _rl_hits[ip] = hits
+            return True
+        hits.append(now)
+        _rl_hits[ip] = hits
+        if len(_rl_hits) > 1000:       # لا تضخم
+            for k in [k for k, v in _rl_hits.items() if not v or now - v[-1] > 60]:
+                _rl_hits.pop(k, None)
+        return False
+
+
+def reset_rate_limit():
+    with _rl_lock:
+        _rl_hits.clear()
+
+
 class WebRequestHandler(BaseHTTPRequestHandler):
     # ------------------------------------------------------------------
     # أدوات مساعدة
@@ -57,6 +91,9 @@ class WebRequestHandler(BaseHTTPRequestHandler):
     def _send_json(self, status, payload):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        if getattr(self, "_set_cookie", False) and Config.WEB_ACCESS_TOKEN:
+            self.send_header("Set-Cookie", f"{Config.WEB_COOKIE_NAME}={Config.WEB_ACCESS_TOKEN}; HttpOnly; SameSite=Strict; Path=/")
+            self._set_cookie = False
         self.end_headers()
         self.wfile.write(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
 
@@ -73,9 +110,34 @@ class WebRequestHandler(BaseHTTPRequestHandler):
             return True
         supplied = self.headers.get("X-Access-Token", "")
         if not supplied:
+            supplied = self._cookie_token()
+        if not supplied:
+            # 13 §1 S2: query string يُقبل لمرة واحدة لتحويله إلى cookie HttpOnly (ترويسة تُضاف في _send_json)
             qs = parse_qs(urlparse(self.path).query)
             supplied = (qs.get("token") or [""])[0]
+            if supplied and hmac.compare_digest(supplied, token):
+                self._set_cookie = True
         return hmac.compare_digest(supplied, token)
+
+    _set_cookie = False
+
+    def _cookie_token(self):
+        raw = self.headers.get("Cookie", "")
+        if not raw:
+            return ""
+        try:
+            c = SimpleCookie()
+            c.load(raw)
+            m = c.get(Config.WEB_COOKIE_NAME)
+            return m.value if m else ""
+        except Exception:
+            return ""
+
+    def _client_ip(self):
+        fwd = self.headers.get("X-Forwarded-For", "")
+        if fwd:
+            return fwd.split(",")[0].strip()
+        return self.client_address[0] if self.client_address else "?"
 
     def _route(self):
         return urlparse(self.path).path
@@ -152,9 +214,42 @@ class WebRequestHandler(BaseHTTPRequestHandler):
             })
 
         if path == "/api/reset":
+            # 13 §1 S3: الإعادة عملية تغيير حالة → POST فقط
+            return self._send_json(405, {"ok": False, "error": "method not allowed — use POST"})
+
+        if path == "/api/doctor":
+            # 13 §3: نفس تقرير /doctor المحلي (JSON) — بلا getMe ولا Gemini
             if not self._authorized():
                 return self._send_json(401, {"ok": False, "error": "unauthorized", "need_token": True})
-            return self._send_json(200, {"ok": True, "reset": model_circuit.reset()})
+            lines, worst = observability.doctor_report(check_telegram=False)
+            return self._send_json(200, {"ok": worst != "fail", "worst": worst, "lines": lines})
+
+        if path == "/api/sessions":
+            # 13 §3: عرض الجلسات للقراءة فقط
+            if not self._authorized():
+                return self._send_json(401, {"ok": False, "error": "unauthorized", "need_token": True})
+            cur = sessions.current()
+            items = [{k: s.get(k) for k in ("id", "name", "status", "count", "created", "last_ts", "summary")}
+                     for s in sessions.list_sessions()]
+            return self._send_json(200, {"ok": True, "current": (cur or {}).get("id"), "sessions": items})
+
+        if path.startswith("/api/sessions/"):
+            if not self._authorized():
+                return self._send_json(401, {"ok": False, "error": "unauthorized", "need_token": True})
+            rest = path[len("/api/sessions/"):]
+            sid, _, action = rest.partition("/")
+            s = sessions.get(sid) if sid else None
+            if not s:
+                return self._send_json(404, {"ok": False, "error": "session not found"})
+            if action == "export":
+                data = sessions.export_bytes(s["id"]) or b""
+                self.send_response(200)
+                self.send_header("Content-Type", "text/markdown; charset=utf-8")
+                self.send_header("Content-Disposition", f'attachment; filename="session_{s["id"]}.md"')
+                self.end_headers()
+                self.wfile.write(data)
+                return
+            return self._send_json(200, {"ok": True, "session": s, "entries": sessions.entries(s["id"])[-50:]})
 
         self.send_response(404)
         self.end_headers()
@@ -163,7 +258,7 @@ class WebRequestHandler(BaseHTTPRequestHandler):
         path = self._route()
         audit.set_actor("web")
 
-        if path not in ("/api/transcribe", "/api/add_key"):
+        if path not in ("/api/transcribe", "/api/add_key", "/api/reset"):
             # نستهلك الـ body قبل الرد: على Windows إغلاق السوكت وبه بيانات غير مقروءة يرسل RST (10054) بدل 404
             self._drain_body()
             return self._send_json(404, {"ok": False, "error": "not found"})
@@ -171,7 +266,14 @@ class WebRequestHandler(BaseHTTPRequestHandler):
         if not self._authorized():
             return self._send_json(401, {"ok": False, "error": "unauthorized", "need_token": True})
 
+        if path == "/api/reset":
+            self._drain_body()
+            return self._send_json(200, {"ok": True, "reset": model_circuit.reset()})
+
         if path == "/api/transcribe":
+            if rate_limited(self._client_ip()):
+                self._drain_body()
+                return self._send_json(429, {"ok": False, "error": f"حد الطلبات: {Config.WEB_RATE_LIMIT_PER_MIN}/دقيقة — جرّب بعد قليل"})
             try:
                 content_length = int(self.headers.get("Content-Length", 0))
                 max_bytes = Config.MAX_UPLOAD_MB * 1024 * 1024
@@ -188,7 +290,11 @@ class WebRequestHandler(BaseHTTPRequestHandler):
                     audio_bytes, mime_type = body, (self.headers.get("Content-Type") or "audio/webm")
 
                 text, model, key_name, info = _transcribe(audio_bytes, mime_type)
-                self._send_json(200, {"ok": True, "text": text, "model": model, "key_name": key_name,
+                # 13 §3: {raw, polished, session} + الحقول القديمة (text = الخام) للتوافق مع الواجهة
+                self._send_json(200, {"ok": True, "text": text, "raw": text, "polished": info.get("polished"),
+                                      "role": info.get("role"), "session": info.get("session"),
+                                      "polish_error": info.get("polish_error"), "archived": info.get("archived"),
+                                      "model": model, "key_name": key_name,
                                       "elapsed": info.get("elapsed"), "skipped": info.get("skipped", [])})
             except Exception as e:
                 self._send_json(500, {"ok": False, "error": str(e)})
@@ -282,8 +388,16 @@ def build_health():
             resilience["watchdog"] = wd.snapshot()
         except Exception:
             pass
+    doctor = None
+    try:
+        # 13 §3: /health يعرض ملخص /doctor المحلي (بلا شبكة) — مفيد لـ UptimeRobot
+        d_lines, d_worst = observability.doctor_report(check_telegram=False, now=now)
+        doctor = {"worst": d_worst, "fails": [ln for ln in d_lines if ln.startswith("❌")][:5]}
+    except Exception as e:
+        doctor = {"worst": "unknown", "error": f"{type(e).__name__}: {e}"}
     return {
         "ok": not stale,
+        "doctor": doctor,
         "stale_threads": stale,
         "stale_after_s": stale_after,
         "beats": beats,

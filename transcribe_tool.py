@@ -47,11 +47,31 @@ def get_latest_recording(recordings_dir):
     files.sort(key=os.path.getmtime, reverse=True)
     return files[0]
 
+def apply_pipeline(text, plain=False):
+    """
+    13 §6 (م7): أداة سطر الأوامر تمر بنفس خط الإنتاج (قاموس → دور → أرشفة بوسم «أداة») إلا مع --plain.
+    لا تنظيم بالـ AI هنا (توفير حصة flash-lite من الحافظة)؛ أي فشل → النص الخام كما هو.
+    """
+    if plain:
+        return text, False
+    try:
+        import delivery
+        import archive
+        raw, _gl = delivery.prepare_texts(text)
+        archived = archive.append(raw, model="tool", extra="💻 أداة")
+        return raw, archived
+    except Exception as e:
+        print(f"⚠️ خط الإنتاج (أداة): {e} — النص الخام كما هو")
+        return text, False
+
+
 def main():
     recordings_dir = key_manager.data.get("recordings_dir", Config.DEFAULT_RECORDINGS_DIR)
+    args = [a for a in sys.argv[1:] if a != "--plain"]
+    plain = "--plain" in sys.argv[1:]
 
-    if len(sys.argv) > 1:
-        target_file = sys.argv[1]
+    if args:
+        target_file = args[0]
     else:
         target_file = get_latest_recording(recordings_dir)
         if not target_file:
@@ -68,6 +88,9 @@ def main():
     try:
         print("⏳ جاري قراءة ومعالجة الملف بالذكاء الاصطناعي...")
         text, model, key_name = transcribe_audio_file(target_file)
+        text, archived = apply_pipeline(text, plain=plain)
+        if archived:
+            print("📚 أُرشف في ALL.md بوسم «أداة» (استخدم --plain لتخطي القاموس والأرشفة)")
 
         # حفظ نسخة نصية بجانب الملف
         txt_path = os.path.splitext(target_file)[0] + ".txt"

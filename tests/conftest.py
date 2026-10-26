@@ -64,13 +64,17 @@ def fresh_env(monkeypatch, tmp_path):
     f = sys.modules.get("fsm")
     if f is not None:
         f.clear()
+    asst = sys.modules.get("assistant")
+    if asst is not None:
+        asst.reset()        # مرحلة 7: وضع /chat حالة واحدة في الذاكرة
     inc = sys.modules.get("incidents")
     if inc is not None:
         inc.reset_state()
         inc.set_notifier(None)
     # هذه الوحدات تحمل مرجعها الخاص لـ Config (from config import Config) — بعد reload(config) يصبح قديماً
     for mod_name in ("glossary", "archive", "settings", "prompts", "text_assist", "transcriber", "sessions", "delivery",
-                     "logkit", "observability", "incidents", "watchdog", "jobs", "voice_queue", "backup", "audit", "panel", "fsm"):
+                     "logkit", "observability", "incidents", "watchdog", "jobs", "voice_queue", "backup", "audit", "panel", "fsm",
+                     "assistant", "interactions_client", "web_service"):
         mod = sys.modules.get(mod_name)
         if mod is not None and hasattr(mod, "Config"):
             monkeypatch.setattr(mod, "Config", config.Config)

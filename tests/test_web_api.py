@@ -237,8 +237,11 @@ def test_status_and_health_expose_models_state_and_reset(web):
     assert st["models_state"][1]["paused"] is False
     h = json.loads(urllib.request.urlopen(web + "/health").read())
     assert h["models_state"][0]["paused"]
-    r = json.loads(urllib.request.urlopen(web + "/api/reset").read())
-    assert r == {"ok": True, "reset": 1}
+    # م7 (13 §1 S3): GET → 405؛ POST ينفّذ
+    status, _ = _get(web + "/api/reset")
+    assert status == 405
+    status, r = _post_json(web + "/api/reset", {})
+    assert status == 200 and r == {"ok": True, "reset": 1}
     assert not web_service.model_circuit.is_open("gemini-3.6-flash")
 
 

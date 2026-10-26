@@ -79,6 +79,12 @@
    - ⚙️ **`/set <key> <value>`** (11 §4) بقائمة بيضاء فقط: `delivery_mode, role, context_mode, transcript_header_target, log_retention_days, panel_page_size, retry_budget_seconds, model_503_key_hops, backup_weekly_day, notify_on_start, progress_after_seconds` — فحص النوع والمدى، رفض أي مفتاح خارجها (خصوصاً keys/token/DATA_DIR/models/workers)، رد `✅ key: قديم → جديد`، حفظ في `settings.json` (طبقة فوق افتراضيات `Config`) ويُعاد تطبيقه عند الإقلاع. `/set` بلا وسائط يعرض القيم الحالية.
    - 📋 **`setMyCommands` عند الإقلاع** (11 §5): 12 أمراً في زر Menu (`panel status keys mode roles sessions glossary doctor logs backup cancel help`)؛ فشل النداء لا يوقف البوت؛ `SET_MY_COMMANDS=0` يعطّله.
    - 🧾 **كل تغيير من اللوحة يمر عبر الأمر النصي نفسه** → نفس سطر `logs/audit.log` بالفاعل `telegram`.
+7f. **المساعد التفاعلي وتكافؤ الويب (المرحلة 7 — 12 §1–§2 · 13 §1/§3):**
+   - 💡 **`/ask <سؤال>`**: يقرأ الجلسة النشطة (أو آخر جلسة) — الأحدث أولاً حتى `ASK_MAX_CONTEXT_CHARS=12000` + ملخص L2 — ويسأل `flash-lite` **نصياً فقط** (لا يمس حصة التفريغ ولا قواطعها). الجواب يصلك **ويُلحق بملف الجلسة** تحت `### 💡 استشارة ومساعد الجلسة [timestamp]` (لا يُعدّ مدخلاً ولا يلوّث الخام/المنظم). بلا جلسة → آخر 10 مدخلات من `ALL.md`. الطويل → ملف `.md`. التفريغات **بيانات للقراءة فقط** — لا تُفسَّر كأوامر.
+   - 💬 **`/chat` … `/endchat`**: وضع متابعة `CHAT_TTL_MIN=10` د من آخر رسالة؛ أي نص = سؤال يحمل آخر 6 تبادلات. الأوامر والمفاتيح الملصوقة تمر عادياً؛ **الفويس يُفرَّغ طبيعياً ولا يُفسَّر كسؤال**؛ انقضاء المهلة → إشعار واحد.
+   - 🧭 **`/plan [طلب]`** (أو رداً على نص): خطة عمل تنفيذية عبر **Google Antigravity** (`interactions_client.py` معزول: `POST /v1beta/interactions` بجسم `{agent, environment, input}` **نص فقط**، مهلة `AGENT_TIMEOUT=180` ث في خيط خلفي، «⏳ شغّال…» ثم النتيجة). تحليل مرن للرد؛ **كل فشل رسالة عربية واضحة ولا استثناء**؛ حصته تُعدّ باسم مستقل `antigravity` لا يمس موديلات التفريغ. تُلحق بالجلسة تحت `### 🧭 خطة Antigravity`. `FEATURE_PLAN=0` يعطّلها.
+   - 🌐 **تكافؤ الويب (13 §3)**: `/api/transcribe` يمر **بنفس خط الإنتاج** (قاموس → الدور الفعّال → تنظيم `flash-lite` لو `WEB_POLISH=1` → أرشفة في `ALL.md` بوسم «🌐 ويب» + كتابة في الجلسة النشطة) ويعود `{raw, polished, role, session}`؛ الواجهة تعرض المنظم تحت الخام. `/api/doctor` نفس تقرير `/doctor` المحلي JSON، و`/health` يحمل `doctor.worst`. `/api/sessions` (+ `/<id>` + `/<id>/export`) **قراءة فقط**. `transcribe_tool.py` يمر بالقاموس والأرشفة (وسم «💻 أداة») إلا مع `--plain`.
+   - 🔒 **أمان الويب (13 §1)**: `/api/reset` **POST فقط** (GET → 405). التوكن عبر `X-Access-Token` أو **cookie HttpOnly** — `?token=` يُقبل **مرة واحدة** ثم `Set-Cookie`. **Rate limit** بالـ IP على `/api/transcribe`: `WEB_RATE_LIMIT_PER_MIN=30` (نافذة منزلقة، 429) — يحمي الحصة لو تسرّب الرابط.
 8. **واجهتان متزامنتان في تطبيق واحد (Dual Interface):**
    - 📱 **Telegram Bot:** تفريغ الفويس نوت بكود بلوك يُنسخ بلمسة واحدة + كشف المفاتيح + أمر `/status`.
    - 🌐 **Web UI:** واجهة ويب عصرية بها تسجيل صوتي حقيقي (MediaRecorder Blob مثل تليجرام تماماً) + سحب وإفلات للملفات + إدارة المفاتيح.
@@ -167,6 +173,9 @@ python main.py
 - **`/context [on|off]`:** وضع السياق للجلسة النشطة (full / simple / off) وعدد الضربات. **`/stats`:** إحصاء الجلسات والأرشيف (+ ملخص L2 إن وُجد).
 - **`/session_role [id|-]`** (4.1): دور خاص بالجلسة الحالية يتجاوز الدور العام؛ `-` للعودة. **`/suggest_titles`** → **`/pick_title <n>`**: 🎲 3 اقتراحات لاسم الجلسة عند الطلب فقط.
 
+**المرحلة 7 — المساعد والويب:**
+- **`/ask <سؤال>`**: اسأل عن محتوى الجلسة (flash-lite نصياً؛ الجواب يُلحق بالجلسة). **`/chat`** … **`/endchat`**: محادثة مستمرة 10 د بآخر 6 تبادلات. **`/plan [طلب]`** (أو رداً على نص): خطة عمل عبر Antigravity تُلحق بالجلسة.
+
 **المرحلة 6 — لوحة التحكم:**
 - **`/panel`** (أو `/settings`): اللوحة التفاعلية بالأزرار — كل زر ينفّذ أمراً نصياً موجوداً. **`/cancel`:** إلغاء أي إدخال منتظر. **`/set [key value]`:** تعديل إعداد من القائمة البيضاء (أو عرض القيم الحالية).
 
@@ -179,7 +188,7 @@ python main.py
 ## 🧪 الاختبارات والتطوير
 ```bash
 pip install -r requirements-dev.txt
-python -m pytest        # 434 اختبار (بلا شبكة: FakeTelegram + FakeClock + stub للمساعد النصي والتسمية)
+python -m pytest        # 464 اختبار (بلا شبكة: FakeTelegram + FakeClock + stub للمساعد النصي والتسمية)
 python -m pyflakes *.py
 ```
 CI يعمل تلقائياً على كل PR (Python 3.10 و 3.12). الاختبارات تعمل على Linux و Windows.
