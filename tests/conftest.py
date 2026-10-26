@@ -92,6 +92,26 @@ def fresh_env(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def _runtime_dirs_in_tmp(monkeypatch, tmp_path):
+    """مرحلة 5.1: حتى الاختبارات التي لا تستخدم fresh_env (watchdog/l4) لا تكتب incidents/ logs/ backups/ audit داخل المستودع."""
+    import config
+    monkeypatch.setattr(config.Config, "INCIDENTS_DIR", str(tmp_path / "incidents"))
+    monkeypatch.setattr(config.Config, "LOGS_DIR", str(tmp_path / "logs"))
+    monkeypatch.setattr(config.Config, "AUDIT_FILE", str(tmp_path / "logs" / "audit.log"))
+    monkeypatch.setattr(config.Config, "BACKUPS_DIR", str(tmp_path / "backups"))
+    monkeypatch.setattr(config.Config, "BACKUP_STATE_FILE", str(tmp_path / "state" / "backup_state.json"))
+    # الوحدات التي حملت Config بالاسم قد تحمل نسخة قديمة بعد reload(config) في fresh_env → نعيد ربطها هنا أيضاً
+    for mod_name in ("incidents", "logkit", "observability", "backup", "audit", "watchdog"):
+        mod = sys.modules.get(mod_name)
+        if mod is not None and hasattr(mod, "Config"):
+            monkeypatch.setattr(mod, "Config", config.Config)
+    inc = sys.modules.get("incidents")
+    if inc is not None:
+        inc.reset_state()
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _no_network_polish(monkeypatch):
     """مرحلة 3: المساعد النصي (flash-lite) لا يلمس الشبكة في الاختبارات أبداً.
     الافتراضي: تنظيم وهمي حتمي. اختبارات المرحلة 3 تستبدله صراحةً عند الحاجة (فشل/نجاح)."""
