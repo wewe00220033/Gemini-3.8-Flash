@@ -23,6 +23,13 @@ import zipfile
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir))
 
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
 # ملفات التشغيل الضرورية (غيابها = فشل)
 REQUIRED_FILES = (
     "main.py", "config.py", "key_manager.py", "telegram_bot.py", "web_service.py", "transcriber.py",
