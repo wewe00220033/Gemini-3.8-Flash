@@ -19,6 +19,7 @@ Failover v2 (مرحلة 2 — مواصفة 04 §2):
 
 import os
 import re
+import threading
 import time
 import base64
 import requests
@@ -575,10 +576,27 @@ def _backoff(rnd):
     return seq[min(rnd, len(seq) - 1)]
 
 
+_current_job = threading.local()
+
+
+def set_current_job(job_id):
+    """المرحلة 5 (09 §2): معرّف المهمة الجارية في هذا الخيط — كل محاولة Gemini تُسجَّل في jobs.ndjson لأمر /trace."""
+    _current_job.job_id = job_id
+
+
 def _log_attempt(model, key_name, att):
     icon = "✅" if att.outcome == SUCCESS else "⚠️"
     extra = f" — {att.detail}" if att.detail and att.outcome != SUCCESS else ""
     print(f"{icon} [{_short(model)}] [{key_name}] {att.outcome} في {att.elapsed:.1f} ث{extra}")
+    jid = getattr(_current_job, "job_id", None)
+    if jid:
+        try:
+            import jobs
+            jobs.record(jid, "attempt", att_model=model, att_key=str(key_name), att_outcome=att.outcome,
+                        att_ms=int(att.elapsed * 1000), att_status=getattr(att, "status", None),
+                        att_detail=(att.detail or "")[:120] if att.outcome != SUCCESS else None)
+        except Exception:
+            pass
 
 
 def _all_models_blocked():

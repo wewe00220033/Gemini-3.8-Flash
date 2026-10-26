@@ -16,6 +16,7 @@ import requests
 from concurrent.futures import ThreadPoolExecutor
 from config import Config
 from key_manager import key_manager
+import transcriber
 from transcriber import transcribe_audio_bytes_ex
 from model_state import model_circuit
 import heartbeat
@@ -350,14 +351,17 @@ def set_reaction(token, chat_id, message_id, emoji=None):
         return False
 
 
-def _download_with_retry(token, file_id):
-    """تحميل الملف من تليجرام مع إعادة محاولة ×DOWNLOAD_RETRIES وbackoff؛ يرفع RuntimeError مفهوماً."""
+def _download_with_retry(token, file_id, job_id=None):
+    """تحميل الملف من تليجرام مع إعادة محاولة ×DOWNLOAD_RETRIES وbackoff؛ يرفع RuntimeError مفهوماً.
+    كل محاولة فاشلة تُسجَّل في jobs.ndjson (download_fail) لأمر /trace (09 §7 بند 4)."""
     last = None
     for i in range(max(1, Config.DOWNLOAD_RETRIES)):
         try:
             return _download_file(token, file_id)
         except Exception as e:
             last = e
+            if job_id:
+                jobs.record(job_id, "download_fail", attempt=i + 1, error=f"{type(e).__name__}: {e}"[:200])
             if i + 1 < Config.DOWNLOAD_RETRIES:
                 delay = Config.DOWNLOAD_BACKOFF[min(i, len(Config.DOWNLOAD_BACKOFF) - 1)]
                 print(f"⚠️ تحميل الفويس فشل ({type(e).__name__}) — محاولة {i + 2}/{Config.DOWNLOAD_RETRIES} بعد {delay}ث")
@@ -411,9 +415,13 @@ def process_job(job):
 
     print(f"🎙️ بدء تفريغ ({job.label}) من {chat_id} [{job.source}:{job.job_id}]...")
     with ProgressKeeper(token, chat_id, reply_to_id=reply_to):
-        audio_bytes = _download_with_retry(token, job.file_id)
+        audio_bytes = _download_with_retry(token, job.file_id, job_id=job.job_id)
         jobs.record(job.job_id, "downloaded", bytes=len(audio_bytes))
-        text, model, key_name, info = transcribe_audio_bytes_ex(audio_bytes, job.mime_type)
+        transcriber.set_current_job(job.job_id)
+        try:
+            text, model, key_name, info = transcribe_audio_bytes_ex(audio_bytes, job.mime_type)
+        finally:
+            transcriber.set_current_job(None)
     jobs.record(job.job_id, "transcribed", model=model, key=str(key_name), elapsed=info.get("elapsed"))
     print(f"✅ تم التفريغ عبر [{model}] بالمفتاح [{key_name}] في {info.get('elapsed')} ث: {text[:40]}...")
     # المرحلة 4 (08 §2 قرار المالك أ): فويس جديد دون رد على الاقتراح = قبول صامت لاسم الجلسة المقترح
