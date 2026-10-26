@@ -121,6 +121,15 @@ def _clip_lines(text, n):
 # roles.json — الأدوار المخصصة
 # ----------------------------------------------------------------------
 _lock = threading.RLock()
+
+
+def _audit(action, **fields):
+    """09 §2 قناة audit: لا تكسر العملية أبداً لو فشل التسجيل."""
+    try:
+        import audit
+        audit.record(action, **fields)
+    except Exception:
+        pass
 _custom_cache = None
 _custom_path = None
 
@@ -187,7 +196,8 @@ def add_role(role_id, name, layer_a="", layer_b=""):
         custom[role_id] = {"name": (name or role_id).strip()[:40], "protected": False,
                            "layer_a": _clip_lines(layer_a or "", LAYER_A_ROLE_MAX_LINES), "layer_b": layer_b.strip()}
         _save_custom()
-        return dict(custom[role_id]), created
+    _audit("role.add" if created else "role.update", id=role_id, name=custom[role_id]["name"])
+    return dict(custom[role_id]), created
 
 
 def remove_role(role_id):
@@ -199,7 +209,9 @@ def remove_role(role_id):
         r = custom.pop(role_id, None)
         if r is not None:
             _save_custom()
-        return r
+    if r is not None:
+        _audit("role.remove", id=role_id, name=r.get("name"))
+    return r
 
 
 def roles_list_text(current):

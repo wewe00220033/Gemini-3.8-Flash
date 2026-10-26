@@ -19,6 +19,7 @@ from key_manager import key_manager, KeyManager
 from transcriber import transcribe_audio_bytes_ex
 from model_state import model_circuit
 import heartbeat
+import audit
 
 
 def _transcribe(audio_bytes, mime_type):
@@ -160,6 +161,7 @@ class WebRequestHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = self._route()
+        audit.set_actor("web")
 
         if path not in ("/api/transcribe", "/api/add_key"):
             # نستهلك الـ body قبل الرد: على Windows إغلاق السوكت وبه بيانات غير مقروءة يرسل RST (10054) بدل 404

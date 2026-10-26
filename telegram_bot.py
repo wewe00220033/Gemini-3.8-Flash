@@ -24,6 +24,7 @@ import transcriber
 from transcriber import transcribe_audio_bytes_ex
 from model_state import model_circuit
 import heartbeat
+import audit
 import backup
 import preflight
 import netsession
@@ -796,6 +797,7 @@ def _strip_banner(text):
 
 
 def handle_text(token, chat_id, msg, msg_text):
+    audit.set_actor("telegram")   # 09 §2: كل تغيير إداري من هذا الخيط يُنسب لتليجرام
     # 1) مفتاح Gemini جديد؟
     extracted_key, extracted_name = key_manager.extract_key_from_text(msg_text)
     if extracted_key:

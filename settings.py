@@ -20,6 +20,15 @@ _MODE_ALIASES = {"dual": "dual", "both": "dual", "raw": "raw_only", "raw_only": 
                  "منظم": "polished_only", "الاتنين": "dual", "الاثنين": "dual"}
 
 _lock = threading.RLock()
+
+
+def _audit(action, **fields):
+    """09 §2 قناة audit: لا تكسر العملية أبداً لو فشل التسجيل."""
+    try:
+        import audit
+        audit.record(action, **fields)
+    except Exception:
+        pass
 _cache = None
 _cache_path = None
 
@@ -65,9 +74,12 @@ def get(key, default=None):
 
 def set_value(key, value):
     with _lock:
+        old = _load().get(key)
         _load()[key] = value
         _save()
-        return value
+    if old != value:
+        _audit(f"settings.{key}", old=old, new=value)
+    return value
 
 
 def reset_cache():

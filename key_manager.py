@@ -26,6 +26,15 @@ try:
 except ImportError:  # pragma: no cover
     store = None
 
+
+def _audit(action, **fields):
+    """09 §2 قناة audit: لا تكسر العملية أبداً لو فشل التسجيل."""
+    try:
+        import audit
+        audit.record(action, **fields)
+    except Exception:
+        pass
+
 class KeyManager:
     def __init__(self):
         # قفل واحد يحمي keys.json من الكتابة المتزامنة (الويب والبوت في threads مختلفة)
@@ -279,6 +288,7 @@ class KeyManager:
             else:
                 k["project_group"] = group[:40]
             self.save()
+            _audit("key.project_group", name=k.get("name"), group=k.get("project_group") or "-")
             return k
 
     def _load_auto_groups(self):
@@ -598,6 +608,7 @@ class KeyManager:
                 if k.get("name", "").lower() == target.lower() or k.get("key", "").startswith(target):
                     removed = keys.pop(i)
                     self.save()
+                    _audit("key.remove", name=removed.get("name"), key=removed.get("key", "")[:8] + "…")
                     return removed
             return None
 
@@ -610,6 +621,7 @@ class KeyManager:
                 if k.get("name", "").lower() == (old_name or "").strip().lower():
                     k["name"] = new_name
                     self.save()
+                    _audit("key.rename", old=old_name, new=new_name)
                     return k
             return None
 
@@ -650,6 +662,7 @@ class KeyManager:
                     k["status"] = "active"
                     k["exhausted_until"] = 0
                     self.save()
+                    _audit("key.reactivate", name=k.get("name"), key=api_key[:8] + "…")
                     return k, False
 
             # إضافة مفتاح جديد
@@ -667,6 +680,7 @@ class KeyManager:
             keys_list.append(key_entry)
             self.data["keys"] = keys_list
             self.save()
+            _audit("key.add", name=key_entry["name"], key=api_key[:8] + "…")
             return key_entry, True
 
     @staticmethod
