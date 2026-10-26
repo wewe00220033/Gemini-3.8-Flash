@@ -223,13 +223,16 @@ def test_sessions_buttons_end_resume_export(bot):
     assert docs and docs[-1][0].startswith("session_")
 
 
-def test_backup_buttons_and_secrets_double_confirm(bot):
+def test_backup_buttons_and_secrets_double_confirm(bot, tmp_path):
     tb, sent, docs = bot
+    import backup
+    (tmp_path / "keys.json").write_text('{"keys": []}', encoding="utf-8")
     _cb(tb, "b:s")
-    assert not docs and "keys.json" in _calls(sent, "editMessageText")[-1]["text"]
+    assert not docs and "keys.json" in _calls(sent, "editMessageText")[-1]["text"]   # تأكيد أولاً — لا إرسال
     _cb(tb, "b:S")
-    assert not docs or docs[-1][0].startswith("secrets_") or True   # لا keys.json في البيئة → رسالة "لا يوجد keys.json"
-    assert any("keys.json" in t for t in _texts(sent))
+    assert docs and docs[-1][0].startswith("secrets_")
+    _cb(tb, "b:n")
+    assert backup.list_local() or any("لا توجد بيانات" in t for t in _texts(sent))
     _cb(tb, "b:t")
     assert any("تمرين الاستعادة" in t for t in _texts(sent))
 
@@ -340,6 +343,12 @@ def test_fsm_key_paste_and_rename(bot):
     assert fsm.current()["name"] == "await_key_rename"
     _cmd(tb, "Renamed")
     assert km.data["keys"][0]["name"] == "Renamed" and not fsm.active()
+    # /rename النصي مع اسم فيه مسافة (الأسماء الافتراضية «Project N»)
+    km.add_key(VALID_B)                                   # → Project 2
+    _cmd(tb, "/rename Project 2 Beta")
+    assert km.data["keys"][1]["name"] == "Beta"
+    _cmd(tb, '/rename "Beta" Gamma Delta')
+    assert km.data["keys"][1]["name"] == "Gamma Delta"
     _cb(tb, "k:a")
     _cmd(tb, "كلام بلا مفتاح")
     assert any("لم أجد مفتاح" in t for t in _texts(sent)) and not fsm.active()

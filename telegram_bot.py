@@ -848,7 +848,7 @@ def handle_fsm_text(token, chat_id, msg, msg_text):
         return True
     if name == "await_key_rename":
         fsm.clear()
-        handle_text(token, chat_id, msg, f"/rename {data.get('old')} {text}")
+        handle_text(token, chat_id, msg, f'/rename "{data.get("old")}" {text}')
         return True
     if name == "await_word":
         if "=" in text:
@@ -1196,7 +1196,19 @@ def handle_text(token, chat_id, msg, msg_text):
         if len(args) < 2:
             send_telegram_message(token, chat_id, "الاستخدام: /rename <الاسم القديم> <الاسم الجديد>", reply_to_id=msg["message_id"])
             return
-        entry = key_manager.rename_key(args[0], " ".join(args[1:]))
+        # أسماء بمسافات («Project 3»): "اسم قديم" جديد — أو أطول اسم موجود يطابق بداية الوسائط
+        old, new = args[0], " ".join(args[1:])
+        joined = " ".join(args)
+        if joined.startswith('"') and joined.count('"') >= 2:
+            old = joined[1:joined.index('"', 1)]
+            new = joined[joined.index('"', 1) + 1:].strip().strip('"')
+        else:
+            names = sorted((k.get("name", "") for k in key_manager.data.get("keys", [])), key=len, reverse=True)
+            for nm in names:
+                if nm and len(nm.split()) > 1 and joined.lower().startswith(nm.lower() + " "):
+                    old, new = nm, joined[len(nm):].strip()
+                    break
+        entry = key_manager.rename_key(old, new) if new else None
         if entry:
             send_telegram_message(token, chat_id, f"✏️ تمت إعادة التسمية إلى [{entry.get('name')}].", reply_to_id=msg["message_id"])
         else:
