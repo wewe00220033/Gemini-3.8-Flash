@@ -24,3 +24,8 @@ glossary.json
 roles.json
 settings.json
 transcripts/
+
+# Phase 5 runtime artifacts (CCTV logs, incident reports, persistence probe) — never commit
+logs/
+incidents/
+.persist_probe
