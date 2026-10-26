@@ -213,12 +213,29 @@ def test_rate_limit_not_bypassable_by_spoofed_header(fresh_env, monkeypatch):
     monkeypatch.setattr(web_service.Config, "TRUST_PROXY", False)
     monkeypatch.setattr(web_service.Config, "WEB_RATE_LIMIT_PER_MIN", 3)
     monkeypatch.setattr(web_service.Config, "WEB_ACCESS_TOKEN", "")
+    monkeypatch.setattr(web_service, "transcribe_audio_bytes_ex",
+                        lambda b, m="audio/webm": ("نص", "m", "k", {"elapsed": 0.1, "skipped": []}))
+    web_service.reset_rate_limit()
     httpd, base = _start(web_service)
+
+    def post(fwd):
+        req = urllib.request.Request(base + "/api/transcribe", data=b"\x00" * 64,
+                                     headers={"Content-Type": "audio/webm", "X-Forwarded-For": fwd})
+        try:
+            return urllib.request.urlopen(req, timeout=5).status
+        except urllib.error.HTTPError as e:
+            return e.code
+
     try:
-        codes = [_get(base + "/api/status", headers={"X-Forwarded-For": f"9.9.9.{i}"})[0] for i in range(6)]
-        assert 429 in codes, codes                                       # تغيير الترويسة لم يفد
+        codes = [post(f"9.9.9.{i}") for i in range(6)]
+        assert codes.count(429) >= 3, codes                              # تغيير الترويسة لم يفد: الحد بالـ IP الحقيقي
+        web_service.reset_rate_limit()
+        monkeypatch.setattr(web_service.Config, "TRUST_PROXY", True)
+        codes = [post(f"8.8.8.{i}") for i in range(6)]
+        assert 429 not in codes, codes                                   # خلف proxy موثوق فقط تُحترم الترويسة
     finally:
         httpd.shutdown()
+        web_service.reset_rate_limit()
 
 
 # =====================================================================
