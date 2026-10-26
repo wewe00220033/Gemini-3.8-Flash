@@ -11,6 +11,7 @@
 """
 
 import os
+import html
 import sys
 import time
 import json
@@ -254,7 +255,7 @@ def _restart_notice():
     return f"\n🔁 أعدت تشغيل نفسي قبل {age}ث{gen_txt} — السبب: {labels.get(reason, reason)}: {data.get('detail') or ''}".rstrip(": ")
 
 
-def _startup_ping(bot_token, chat_id, web_error=None):
+def _startup_ping(bot_token, chat_id, web_error=None, web_token=None, web_open=False):
     """
     تقرير الإقلاع بسطر واحد (22 Z6): يُطبع دائماً في اللوج، ويُرسل على تليجرام إن NOTIFY_ON_START.
     يحل محل قراءة كونسول الاستضافة: المالك يرى فوراً keys/tg/web/DATA_DIR/circuit + النسخة.
@@ -272,9 +273,17 @@ def _startup_ping(bot_token, chat_id, web_error=None):
             extra = _restart_notice()
             if not ok and web_error:
                 extra += f"\n⚠️ الويب لم يشتغل: {web_error} — البوت شغال طبيعي؛ /health غير متاح حتى يُصلح المنفذ."
+            extra = html.escape(extra)          # الرسالة تُرسل HTML (كتلة <code> للتوكن) — النصوص الحرة تُهرَّب
+            if web_token:
+                # 13 S1: التوكن المولَّد يصل للمالك مرة واحدة (شاته الخاص) — يتغير مع كل إقلاع حتى يُثبّته في البيئة
+                extra += (f"\n🔐 توكن الويب (مولَّد تلقائياً — يتغير عند كل إقلاع):\n<code>{web_token}</code>"
+                          f"\nثبّته في WEB_ACCESS_TOKEN على الاستضافة.")
+            elif web_open:
+                extra += "\n⚠️ الويب مفتوح بلا توكن (WEB_ALLOW_OPEN=1)."
             telegram_bot.send_telegram_message(
                 bot_token, chat_id,
-                f"🚀 المنظومة اشتغلت.\n{line}{extra}\n🕛 تصفير الكوتا: {key_manager.next_reset_display()} ({Config.DISPLAY_TZ})",
+                f"🚀 المنظومة اشتغلت.\n{html.escape(line)}{extra}\n🕛 تصفير الكوتا: {key_manager.next_reset_display()} ({Config.DISPLAY_TZ})",
+                parse_mode="HTML",
             )
     except Exception as e:
         print(f"⚠️ تعذر إرسال إشعار الإقلاع: {e}")
@@ -396,6 +405,15 @@ def main():
     # 1. خادم الويب — الربط بالمنفذ يتم هنا (في الخيط الرئيسي) كي يُكتشف فشل المنفذ فوراً لا بصمت (G27)
     web_t = None
     web_error = None
+    web_token_mode, web_token = web_service.ensure_web_token()          # 13 §1.1 S1 — قبل الربط
+    if web_token_mode == "generated":
+        print("=" * 64)
+        print("🔐 WEB_ACCESS_TOKEN غير مضبوط والويب يستمع على عنوان عام — تم توليد توكن تلقائياً:")
+        print(f"   {web_token}")
+        print("   ضعه في المتغير WEB_ACCESS_TOKEN ليثبت بين الإقلاعات (أو WEB_ALLOW_OPEN=1 لفتح الويب للعامة عمداً).")
+        print("=" * 64)
+    elif web_token_mode == "open":
+        print("⚠️ WEB_ALLOW_OPEN=1: واجهة الويب مفتوحة بلا توكن على عنوان عام — قرارك الصريح.")
     try:
         web_t = web_service.start_web_server_thread()
         print(f"🌐 واجهة الويب جاهزة للاستخدام: http://{Config.WEB_HOST}:{Config.WEB_PORT}  (health: /health)")
@@ -426,7 +444,8 @@ def main():
         rt.start_poller()
         rt.start_watchdog()
         time.sleep(1.5)
-        _startup_ping(bot_token, chat_id, web_error=web_error)
+        _startup_ping(bot_token, chat_id, web_error=web_error, web_token=(web_token if web_token_mode == "generated" else None),
+                      web_open=(web_token_mode == "open"))
     else:
         print("ℹ️ لم يتم العثور على توكن تليجرام، المنظومة تعمل في وضع الويب فقط.")
 

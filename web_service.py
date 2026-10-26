@@ -18,6 +18,7 @@ from config import Config
 from key_manager import key_manager, KeyManager
 from transcriber import transcribe_audio_bytes_ex
 from model_state import model_circuit
+import secrets
 import heartbeat
 import audit
 import sessions
@@ -134,9 +135,11 @@ class WebRequestHandler(BaseHTTPRequestHandler):
             return ""
 
     def _client_ip(self):
-        fwd = self.headers.get("X-Forwarded-For", "")
-        if fwd:
-            return fwd.split(",")[0].strip()
+        # 13 S5: X-Forwarded-For قابل للتزوير — لا يُعتمد إلا خلف proxy موثوق (TRUST_PROXY=1)
+        if Config.TRUST_PROXY:
+            fwd = self.headers.get("X-Forwarded-For", "")
+            if fwd:
+                return fwd.split(",")[0].strip()
         return self.client_address[0] if self.client_address else "?"
 
     def _route(self):
@@ -415,6 +418,35 @@ def build_health():
         "models": Config.MODELS,
         "models_state": model_circuit.snapshot(Config.MODELS),
     }
+
+
+# ----------------------------------------------------------------------
+# 13 §1.1 S1: توكن ويب مولَّد لو فارغ على عنوان غير محلي
+# ----------------------------------------------------------------------
+WEB_TOKEN_STATE = {"generated": False, "open": False}
+
+
+def ensure_web_token():
+    """
+    يُستدعى قبل ربط المنفذ. يرجع (mode, token|None) حيث mode ∈ {"env", "generated", "open", "local"}:
+    - توكن في البيئة → "env".
+    - فارغ و WEB_HOST محلي (127.0.0.1/localhost) → "local" (لا حاجة).
+    - فارغ و WEB_ALLOW_OPEN=1 → "open" (قرار صريح من المالك).
+    - غير ذلك → توليد secrets.token_hex(16) وضبطه في Config (الذاكرة فقط) → "generated".
+    التوكن المولَّد لا يُطبع هنا؛ main يطبعه مرة واحدة في بانر ويرسله للمالك على تليجرام.
+    """
+    WEB_TOKEN_STATE.update(generated=False, open=False)
+    if Config.WEB_ACCESS_TOKEN:
+        return "env", Config.WEB_ACCESS_TOKEN
+    if str(Config.WEB_HOST).strip() in ("127.0.0.1", "localhost", "::1"):
+        return "local", None
+    if Config.WEB_ALLOW_OPEN:
+        WEB_TOKEN_STATE["open"] = True
+        return "open", None
+    token = secrets.token_hex(16)
+    Config.WEB_ACCESS_TOKEN = token
+    WEB_TOKEN_STATE["generated"] = True
+    return "generated", token
 
 
 def bind_web_server():
