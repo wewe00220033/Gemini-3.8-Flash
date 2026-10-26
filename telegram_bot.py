@@ -395,11 +395,13 @@ def process_job(job):
         fn = job.meta.get("transcribe_fn") or transcribe_audio_bytes_ex
         text, model, key_name, info = fn(audio_bytes, job.mime_type)
         # مرحلة 3: الويب يمر بالقاموس (هدف الخام) ويُؤرشف في ALL.md مثل تليجرام — بلا تنظيم (توفير حصة flash-lite)
-        text, archived = delivery.prepare_for_web(text, model=model, key_name=key_name, info=info)
+        text, archived, polished, meta = delivery.prepare_for_web(text, model=model, key_name=key_name, info=info)
         jobs.record(job.job_id, "sent", model=model, key=str(key_name), elapsed=info.get("elapsed"),
-                    text=text[:2000], archived=archived, **_session_fields())
+                    text=text[:2000], archived=archived, polished=bool(polished),
+                    polished_text=(polished or "")[:2000] or None, source="web", **_session_fields())
         STATE["processed"] += 1
-        return {"text": text, "model": model, "key_name": key_name, "info": info, "archived": archived}
+        return {"text": text, "model": model, "key_name": key_name, "info": info, "archived": archived,
+                "polished": polished, "role": meta["role"], "session": meta["session"], "polish_error": meta["polish_error"]}
 
     token = job.meta.get("token") or _runtime_token()
     chat_id, reply_to = job.chat_id, job.message_id
@@ -1020,7 +1022,11 @@ def transcribe_via_queue(audio_bytes, mime_type, label="web", timeout=None, tran
     done.wait(timeout)
     if job.state == "done" and job.result:
         r = job.result
-        return r["text"], r["model"], r["key_name"], r["info"]
+        info = dict(r["info"] or {})
+        # 13 §3: نتائج خط الإنتاج تعود للويب عبر info (التوقيع القديم (text, model, key, info) محفوظ)
+        info.update(polished=r.get("polished"), role=r.get("role"), session=r.get("session"),
+                    polish_error=r.get("polish_error"), archived=r.get("archived"))
+        return r["text"], r["model"], r["key_name"], info
     if job.state == "failed":
         raise RuntimeError(job.error or "فشل التفريغ")
     if job.state == "skipped":

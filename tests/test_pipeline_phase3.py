@@ -451,9 +451,12 @@ def test_raw_message_html_respects_header_target(mods):
 
 def test_prepare_for_web_applies_glossary_raw_and_archives(mods):
     _, archive, _, _, delivery, _ = mods
-    text, archived = delivery.prepare_for_web("فتحت جرافيك و شلبي", model="m", key_name="A", info=_info())
+    text, archived, polished, meta = delivery.prepare_for_web("فتحت جرافيك و شلبي", model="m", key_name="A", info=_info())
     assert text == "فتحت Antigravity و شلبي" and archived           # spelling نعم، alias لا (خام)
     assert archive.last()["raw"] == text
+    # م7 (13 §3): الويب يمر بالتنظيم أيضاً ويُؤرشف بوسم «ويب»
+    assert polished and polished.startswith("[منظم-اختبار]") and meta["source"] == "web"
+    assert "🌐 ويب" in archive.last()["meta"] and archive.last()["polished"] == polished
 
 
 # =====================================================================
