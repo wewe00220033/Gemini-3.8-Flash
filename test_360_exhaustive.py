@@ -15,10 +15,8 @@ import os
 import sys
 import time
 import json
-import io
 import shutil
 import tempfile
-import zipfile
 
 # ضبط الترميز لسطح المكتب في ويندوز
 if hasattr(sys.stdout, "reconfigure"):
