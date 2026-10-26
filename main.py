@@ -29,6 +29,8 @@ import incidents
 import jobs
 import logkit
 import observability
+import backup
+import audit
 from model_state import model_circuit
 
 
@@ -282,9 +284,9 @@ _DOCTOR_LAST = {"worst": None}
 
 def _periodic_doctor(rt):
     """12 §3.2: فحص دوري صامت كل DOCTOR_INTERVAL_MIN؛ يُبلَّغ المالك فقط عند ❌ جديد (انتقال إلى fail)، ومرة عند التعافي.
-    يضغط jobs.ndjson ويطبّق احتفاظ السجلات في نفس الدورة (09 §1 / 03)."""
+    يضغط jobs.ndjson ويطبّق احتفاظ السجلات في نفس الدورة (09 §1 / 03). بلا getMe (الـ poller نفسه يثبت الاتصال)."""
     try:
-        lines, worst = observability.doctor_report(bot_state=telegram_bot.STATE, queue=telegram_bot.QUEUE, watchdog=rt.watchdog)
+        lines, worst = observability.doctor_report(bot_state=telegram_bot.STATE, queue=telegram_bot.QUEUE, watchdog=rt.watchdog, check_telegram=False)
         prev = _DOCTOR_LAST["worst"]
         _DOCTOR_LAST["worst"] = worst
         print(f"🩺 doctor دوري: {worst}")
@@ -306,6 +308,29 @@ def _periodic_doctor(rt):
         print(f"⚠️ تنظيف دوري: {e}")
 
 
+def _weekly_backup_tick(rt, bot_token, now=None):
+    """09 §5: لو حان الموعد (اليوم/الساعة ولم تُنفَّذ هذا الأسبوع) → نسخة تلقائية إلى الشات + backups/ (آخر 4).
+    بلا استثناءات؛ الفشل يُسجَّل في backup_state + audit ويُبلَّغ المالك سطراً واحداً."""
+    try:
+        if not backup.weekly_due(now):
+            return None
+        audit.set_actor("scheduler")
+        def _send(name, data, caption):
+            telegram_bot._send_document(bot_token, rt.chat_id, name, data, "application/zip", caption, None)
+        res = backup.run_weekly(send_fn=_send if (bot_token and rt.chat_id) else None, now=now)
+        if res.get("ok"):
+            print(f"🗂️ نسخة أسبوعية: {res.get('files')} ملف، {len(res.get('paths') or [])} جزء، حُذف {res.get('removed')} قديم"
+                  + (f" ({res.get('error')})" if res.get('error') else ""))
+        else:
+            print(f"⚠️ النسخة الأسبوعية فشلت: {res.get('error')}")
+            if rt.notifier is not None:
+                rt.notifier.notify(f"⚠️ النسخة الاحتياطية الأسبوعية فشلت: {res.get('error')}\n/backup يدوياً · /doctor")
+        return res
+    except Exception as e:  # pragma: no cover
+        print(f"⚠️ جدولة النسخ الأسبوعي: {e}")
+        return None
+
+
 def _idle_loop(rt, web_t, bot_token, tick=1.0):
     """
     حلقة الخيط الرئيسي: تنام بنبضات قصيرة (tick) لا بـ WATCHDOG_INTERVAL*3 دفعة واحدة.
@@ -323,6 +348,7 @@ def _idle_loop(rt, web_t, bot_token, tick=1.0):
         if time.monotonic() < next_check:
             continue
         next_check = time.monotonic() + period
+        _weekly_backup_tick(rt, bot_token)
         if web_t is not None and not web_t.is_alive():
             web_restarts += 1
             print(f"🩺 main: خادم الويب توقف — إعادة تشغيل (#{web_restarts})...")

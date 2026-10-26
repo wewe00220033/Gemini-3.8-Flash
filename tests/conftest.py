@@ -54,13 +54,20 @@ def fresh_env(monkeypatch, tmp_path):
     monkeypatch.setattr(config.Config, "INCIDENTS_DIR", str(tmp_path / "incidents"))
     monkeypatch.setattr(config.Config, "PERSIST_PROBE_FILE", str(tmp_path / ".persist_probe"))
     monkeypatch.setattr(config.Config, "LOG_TO_FILE", False)
+    # مرحلة 5.1: قناة audit + النسخ المحلية + حالة الجدولة في المجلد المؤقت
+    monkeypatch.setattr(config.Config, "AUDIT_FILE", str(tmp_path / "logs" / "audit.log"))
+    monkeypatch.setattr(config.Config, "BACKUPS_DIR", str(tmp_path / "backups"))
+    monkeypatch.setattr(config.Config, "BACKUP_STATE_FILE", str(tmp_path / "state" / "backup_state.json"))
+    aud = sys.modules.get("audit")
+    if aud is not None:
+        aud.set_actor(None)
     inc = sys.modules.get("incidents")
     if inc is not None:
         inc.reset_state()
         inc.set_notifier(None)
     # هذه الوحدات تحمل مرجعها الخاص لـ Config (from config import Config) — بعد reload(config) يصبح قديماً
     for mod_name in ("glossary", "archive", "settings", "prompts", "text_assist", "transcriber", "sessions", "delivery",
-                     "logkit", "observability", "incidents", "watchdog", "jobs", "voice_queue"):
+                     "logkit", "observability", "incidents", "watchdog", "jobs", "voice_queue", "backup", "audit"):
         mod = sys.modules.get(mod_name)
         if mod is not None and hasattr(mod, "Config"):
             monkeypatch.setattr(mod, "Config", config.Config)
@@ -82,6 +89,26 @@ def fresh_env(monkeypatch, tmp_path):
     model_state.model_circuit.reset()
     model_state.model_circuit._history.clear()
     return key_manager
+
+
+@pytest.fixture(autouse=True)
+def _runtime_dirs_in_tmp(monkeypatch, tmp_path):
+    """مرحلة 5.1: حتى الاختبارات التي لا تستخدم fresh_env (watchdog/l4) لا تكتب incidents/ logs/ backups/ audit داخل المستودع."""
+    import config
+    monkeypatch.setattr(config.Config, "INCIDENTS_DIR", str(tmp_path / "incidents"))
+    monkeypatch.setattr(config.Config, "LOGS_DIR", str(tmp_path / "logs"))
+    monkeypatch.setattr(config.Config, "AUDIT_FILE", str(tmp_path / "logs" / "audit.log"))
+    monkeypatch.setattr(config.Config, "BACKUPS_DIR", str(tmp_path / "backups"))
+    monkeypatch.setattr(config.Config, "BACKUP_STATE_FILE", str(tmp_path / "state" / "backup_state.json"))
+    # الوحدات التي حملت Config بالاسم قد تحمل نسخة قديمة بعد reload(config) في fresh_env → نعيد ربطها هنا أيضاً
+    for mod_name in ("incidents", "logkit", "observability", "backup", "audit", "watchdog"):
+        mod = sys.modules.get(mod_name)
+        if mod is not None and hasattr(mod, "Config"):
+            monkeypatch.setattr(mod, "Config", config.Config)
+    inc = sys.modules.get("incidents")
+    if inc is not None:
+        inc.reset_state()
+    yield
 
 
 @pytest.fixture(autouse=True)

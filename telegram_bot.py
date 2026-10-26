@@ -24,6 +24,7 @@ import transcriber
 from transcriber import transcribe_audio_bytes_ex
 from model_state import model_circuit
 import heartbeat
+import audit
 import backup
 import preflight
 import netsession
@@ -658,8 +659,8 @@ def _help_text():
         "/context [on|off] — سياق الفويسات السابقة داخل الجلسة (يسقط تلقائياً بعد ضربتين) · /session_role <id|-> — دور خاص بالجلسة · /suggest_titles → /pick_title <n> — 🎲 3 اقتراحات لاسم الجلسة · /stats — إحصاء\n"
         "/logs [N|errors|YYYY-MM-DD] — السجل (أسرار محجوبة) · /trace <job_id> أو رداً على فويس — رحلة الفويس · /doctor — فحص صحي محلي · /incidents — تقارير الحوادث\n"
         "/project_group <مفتاح> <مجموعة> — مفاتيح نفس مشروع Google تتشارك الحصة (والقفز عند 503 لمشروع آخر). اكتب - للإزالة\n"
-        "/backup — نسخة احتياطية (أرشيف+جلسات+إعدادات) بلا أسرار\n"
-        "/backup_secrets — نسخة keys.json بتأكيد صريح\n"
+        "/backup — نسخة احتياطية (أرشيف+جلسات+إعدادات) بلا أسرار (+نسخة محلية في backups/، وتلقائياً أسبوعياً)\n"
+        "/backup_secrets — نسخة keys.json بتأكيد صريح · /restore_test — تمرين استعادة آخر نسخة · /audit [N] — سجل التدقيق (من غيّر ماذا متى)\n"
         "/version — رقم النسخة والبناء ومدة التشغيل\n"
         "/queue — الطابور الحالي وإحصاءاته\n"
         "/reset — فتح قواطع الموديلات المقفولة مؤقتاً (لو عايز تجرّب حالاً)\n"
@@ -796,6 +797,7 @@ def _strip_banner(text):
 
 
 def handle_text(token, chat_id, msg, msg_text):
+    audit.set_actor("telegram")   # 09 §2: كل تغيير إداري من هذا الخيط يُنسب لتليجرام
     # 1) مفتاح Gemini جديد؟
     extracted_key, extracted_name = key_manager.extract_key_from_text(msg_text)
     if extracted_key:
@@ -1151,9 +1153,22 @@ def handle_text(token, chat_id, msg, msg_text):
             if not included:
                 send_telegram_message(token, chat_id, "ℹ️ لا توجد بيانات للنسخ بعد (لا أرشيف ولا جلسات). للأسرار: /backup_secrets", reply_to_id=msg["message_id"])
                 return
-            name = f"backup_{time.strftime('%Y-%m-%d_%H%M')}.zip"
-            caption = f"🗂️ نسخة احتياطية عامة — {len(included)} ملف، بلا أسرار.\nلمفاتيح API: /backup_secrets"
-            _send_document(token, chat_id, name, zip_bytes, "application/zip", caption, msg["message_id"])
+            # 09 §5: نسخة محلية أيضاً (آخر 4) + تقسيم > 50MB لحد sendDocument
+            try:
+                paths, _removed = backup.save_local(zip_bytes)
+                audit.record("backup.manual", files=len(included), parts=len(paths))
+            except Exception as e:
+                paths = []
+                print(f"⚠️ backups/: تعذر الحفظ المحلي ({e})")
+            parts = backup.split_bytes(zip_bytes)
+            stamp = time.strftime('%Y-%m-%d_%H%M')
+            for i, chunk in enumerate(parts, 1):
+                name = f"backup_{stamp}.zip" if len(parts) == 1 else f"backup_{stamp}_part{i}.zip"
+                caption = (f"🗂️ نسخة احتياطية عامة — {len(included)} ملف، بلا أسرار."
+                           + (f" جزء {i}/{len(parts)} (اجمع الأجزاء ثم فك الضغط)" if len(parts) > 1 else "")
+                           + (" · حُفظت محلياً في backups/" if paths else "")
+                           + "\nلمفاتيح API: /backup_secrets · للتحقق: /restore_test")
+                _send_document(token, chat_id, name, chunk, "application/zip", caption, msg["message_id"])
         except Exception as e:
             send_telegram_message(token, chat_id, f"⚠️ تعذر إنشاء النسخة الاحتياطية: {e}", reply_to_id=msg["message_id"])
 
@@ -1233,6 +1248,24 @@ def handle_text(token, chat_id, msg, msg_text):
                 _send_document(token, chat_id, os.path.basename(recent[0]), f.read(), "text/markdown", "📄 التقرير الكامل", msg["message_id"])
         except OSError:
             pass
+
+    elif cmd == "/restore_test":
+        # 09 §5 fire drill: يفك آخر نسخة محلية في مجلد مؤقت ويتحقق من سلامتها — البيانات الحية لا تُمس
+        rep = backup.restore_test()
+        audit.record("backup.restore_test", ok=rep.get("ok"), file=os.path.basename(rep.get("path") or "-"))
+        send_telegram_message(token, chat_id, backup.restore_test_text(rep), reply_to_id=msg["message_id"])
+
+    elif cmd == "/audit":
+        try:
+            n = max(1, min(100, int(args[0]))) if args else 20
+        except ValueError:
+            n = 20
+        lines = audit.tail(n)
+        if not lines:
+            send_telegram_message(token, chat_id, "📭 سجل التدقيق فارغ بعد (يُسجَّل كل تغيير في المفاتيح/الإعدادات/الأدوار/القاموس).", reply_to_id=msg["message_id"])
+            return
+        send_telegram_message(token, chat_id, f"🧾 آخر {len(lines)} تغيير إداري (logs/audit.log):\n<pre>{html.escape(chr(10).join(lines))}</pre>",
+                              reply_to_id=msg["message_id"], parse_mode="HTML")
 
     elif cmd in ("/queue", "الطابور"):
         send_telegram_message(token, chat_id, _queue_text(), reply_to_id=msg["message_id"])

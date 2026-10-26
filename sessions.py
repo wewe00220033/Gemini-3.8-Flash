@@ -777,7 +777,12 @@ def set_role_override(role_id, session_id=None):
             _append_file(session_file(s["id"]), f"🎭 دور الجلسة: {s['role_override'] or 'الافتراضي'}\n\n")
         except OSError:
             pass
-        return True
+    try:
+        import audit
+        audit.record("session.role_override", session=sid, role=s["role_override"] or "-")
+    except Exception:
+        pass
+    return True
 
 
 def role_override(session_id=None):

@@ -23,6 +23,15 @@ from datetime import datetime, timezone
 from config import Config
 import store
 
+
+def _audit(action, **fields):
+    """09 §2 قناة audit: لا تكسر العملية أبداً لو فشل التسجيل."""
+    try:
+        import audit
+        audit.record(action, **fields)
+    except Exception:
+        pass
+
 SCHEMA_VERSION = 1
 PREFIXES = ("وال", "بال", "لل", "ال", "و", "ف", "ب", "ل")
 _PREFIX_RE = "(?:" + "|".join(sorted(PREFIXES, key=len, reverse=True)) + ")?"
@@ -235,6 +244,7 @@ class Glossary:
                     e["status"] = status
                     self._compile()
                     self._write()
+                    _audit("glossary.add_pattern", id=e["id"], pattern=pattern, replacement=replacement)
                     return e, False
             entry = {"id": self._next_id(), "patterns": [pattern], "replacement": replacement, "kind": kind,
                      "scope": scope, "status": status, "context_rules": list(context_rules or []), "hits": 0,
@@ -242,6 +252,7 @@ class Glossary:
             self.doc["entries"].append(entry)
             self._compile()
             self._write()
+            _audit("glossary.add", id=entry["id"], pattern=pattern, replacement=replacement, kind=kind, status=status)
             return entry, True
 
     def find(self, id_or_pattern):
@@ -264,6 +275,7 @@ class Glossary:
             self.doc["entries"] = [x for x in self.doc["entries"] if x is not e]
             self._compile()
             self._write()
+            _audit("glossary.remove", id=e.get("id"), replacement=e.get("replacement"))
             return e
 
     def confirm(self, id_or_pattern, replacement=None):
@@ -280,6 +292,7 @@ class Glossary:
             e.pop("note", None)
             self._compile()
             self._write()
+            _audit("glossary.confirm", id=e.get("id"), replacement=e.get("replacement"))
             return e
 
     def export_bytes(self):

@@ -314,6 +314,17 @@ class Config:
     DOCTOR_INTERVAL_MIN = int(os.environ.get("DOCTOR_INTERVAL_MIN", "60"))    # فحص دوري صامت (0 = معطّل)
     DISK_LOW_MB = 200                                                         # ⚠️ لو المساحة الحرة أقل
     PERSIST_PROBE_FILE = os.path.join(DATA_DIR, ".persist_probe")             # 09 §6
+    # --- المرحلة 5.1 (09 §2 قناة audit + 09 §5 النسخ التلقائي + 12 §3.1 getMe) ---
+    AUDIT_FILE = os.path.join(LOGS_DIR, "audit.log")                          # من فعل ماذا متى — لا يُدوَّر (صغير)
+    BACKUPS_DIR = os.path.join(DATA_DIR, "backups")                           # النسخ المحلية (آخر BACKUPS_KEEP فقط)
+    BACKUPS_KEEP = 4
+    BACKUP_WEEKLY_ENABLED = os.environ.get("BACKUP_WEEKLY_ENABLED", "1") not in ("0", "false", "False", "")
+    BACKUP_WEEKLY_DAY = os.environ.get("BACKUP_WEEKLY_DAY", "fri")            # mon..sun أو 0..6 أو اسم عربي (الجمعة)
+    BACKUP_HOUR = int(os.environ.get("BACKUP_HOUR", "3"))                     # ساعة التنفيذ (توقيت الخادم المحلي)
+    BACKUP_SPLIT_MB = 50                                                      # > 50MB → backup_part1.zip… (حد sendDocument)
+    BACKUP_STATE_FILE = os.path.join(DATA_DIR, "state", "backup_state.json")  # آخر نسخة تلقائية
+    DOCTOR_TG_TIMEOUT = 3                                                     # مهلة getMe في /doctor (ثوانٍ)
+    DOCTOR_TG_SLOW_MS = 1500                                                  # ⚠️ لو الاستجابة أبطأ
 
     # المستخدم المصرح له في تليجرام (حماية البوت من التطفل).
     # فاضي = البوت يرفض الجميع حتى تضبط TELEGRAM_CHAT_ID في البيئة أو .env
