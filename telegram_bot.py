@@ -539,6 +539,37 @@ def _edit_panel(token, chat_id, message_id, text, markup):
     return False
 
 
+# 11 §5: قائمة مختصرة (≤ 12) تُسجَّل في زر Menu بتليجرام — الباقي عبر /help واللوحة
+BOT_COMMANDS = [
+    ("panel", "لوحة التحكم بالأزرار"),
+    ("status", "حالة المفاتيح والرصيد"),
+    ("keys", "قائمة المفاتيح"),
+    ("mode", "وضع الإرسال: خام/منظم/مزدوج"),
+    ("roles", "الأدوار المتاحة"),
+    ("sessions", "الجلسات"),
+    ("glossary", "القاموس المخصص"),
+    ("doctor", "فحص صحي محلي"),
+    ("logs", "السجل (أسرار محجوبة)"),
+    ("backup", "نسخة احتياطية بلا أسرار"),
+    ("cancel", "إلغاء إدخال جارٍ"),
+    ("help", "كل الأوامر"),
+]
+
+
+def register_commands(token):
+    """setMyCommands عند الإقلاع (11 §5). يرجع True عند النجاح؛ الفشل لا يعطّل شيئاً (لوج فقط)."""
+    if not token or not Config.SET_MY_COMMANDS:
+        return False
+    try:
+        r = _tg_post(token, "setMyCommands", {"commands": [{"command": c, "description": d[:256]} for c, d in BOT_COMMANDS]}, timeout=10)
+        ok = r.status_code == 200
+        print("📋 setMyCommands: " + ("تم" if ok else f"فشل ({r.status_code})"))
+        return ok
+    except Exception as e:
+        print(f"⚠️ setMyCommands: {e}")
+        return False
+
+
 def send_panel(token, chat_id, screen=None, reply_to_id=None):
     text, markup = screen or panel.home()
     payload = {"chat_id": chat_id, "text": text[:Config.TELEGRAM_MAX_MSG], "reply_markup": markup}
