@@ -49,8 +49,18 @@ def fresh_env(monkeypatch, tmp_path):
     monkeypatch.setattr(config.Config, "SESSIONS_DIR", str(tmp_path / "sessions"))
     monkeypatch.setattr(config.Config, "SESSIONS_INDEX_FILE", str(tmp_path / "sessions" / "sessions_index.json"))
     monkeypatch.setattr(config.Config, "CURRENT_SESSION_FILE", str(tmp_path / "sessions" / "current_session.json"))
+    # مرحلة 5: السجلات/الحوادث/مسبار الاستمرارية في المجلد المؤقت + ملف السجل معطّل افتراضياً (الاختبار يفعّله صراحةً)
+    monkeypatch.setattr(config.Config, "LOGS_DIR", str(tmp_path / "logs"))
+    monkeypatch.setattr(config.Config, "INCIDENTS_DIR", str(tmp_path / "incidents"))
+    monkeypatch.setattr(config.Config, "PERSIST_PROBE_FILE", str(tmp_path / ".persist_probe"))
+    monkeypatch.setattr(config.Config, "LOG_TO_FILE", False)
+    inc = sys.modules.get("incidents")
+    if inc is not None:
+        inc.reset_state()
+        inc.set_notifier(None)
     # هذه الوحدات تحمل مرجعها الخاص لـ Config (from config import Config) — بعد reload(config) يصبح قديماً
-    for mod_name in ("glossary", "archive", "settings", "prompts", "text_assist", "transcriber", "sessions", "delivery"):
+    for mod_name in ("glossary", "archive", "settings", "prompts", "text_assist", "transcriber", "sessions", "delivery",
+                     "logkit", "observability", "incidents", "watchdog", "jobs", "voice_queue"):
         mod = sys.modules.get(mod_name)
         if mod is not None and hasattr(mod, "Config"):
             monkeypatch.setattr(mod, "Config", config.Config)
