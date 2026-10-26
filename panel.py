@@ -297,12 +297,13 @@ def backup_menu(confirm_secrets=False):
     st = backup.load_state()
     last = f"آخر نسخة تلقائية منذ {(time.time() - st['last_ts']) / 86400:.1f} يوم" if st.get("last_ts") else "لا نسخة تلقائية بعد"
     text = (f"💾 النسخ الاحتياطي\n• {last} · محلي {len(local)}/{Config.BACKUPS_KEEP}\n"
-            f"• الجدولة: كل {backup.weekday_name_ar()} {Config.BACKUP_HOUR:02d}:00\n(/backup · /backup_secrets · /restore_test)")
+            f"• الجدولة: {backup.schedule_text()}\n(/backup · /backups · /backup_secrets · /restore_test)")
     if confirm_secrets:
         text += "\n\n🔐 إرسال keys.json إلى هذا الشات؟ (احذف الرسالة بعد الحفظ)"
         rows = [[btn("✅ متأكد", "b:S"), btn("❌ إلغاء", "b:menu")]]
     else:
-        rows = [[btn("📦 نسخة الآن", "b:n"), btn("🔐 نسخة الأسرار", "b:s"), btn("🧪 اختبار استعادة", "b:t")], [btn("🏠", "p:home")]]
+        rows = [[btn("📦 نسخة الآن", "b:n"), btn("🔐 نسخة الأسرار", "b:s"), btn("🧪 اختبار استعادة", "b:t")],
+                [btn("🗃️ النسخ المحفوظة", "b:l"), btn("🏠", "p:home")]]
     return text, kb(rows)
 
 
@@ -457,7 +458,7 @@ COMMAND_PARITY = {
     "s:l": "/sessions", "s:v": "/sessions", "s:r": "/resume", "s:e": "/end", "s:x": "/export", "s:n": "/new_session", "s:N": "/rename_session",
     "g:l": "/glossary", "g:v": "/glossary", "g:c": "/confirm_word", "g:d": "/del_word", "g:D": "/del_word", "g:a": "/add_word",
     "c": "/context", "L:t": "/logs", "L:e": "/logs errors", "L:r": "/trace", "L:a": "/audit", "L:menu": "/panel",
-    "b:n": "/backup", "b:s": "/backup_secrets", "b:S": "/backup_secrets confirm", "b:t": "/restore_test", "b:menu": "/panel",
+    "b:n": "/backup", "b:s": "/backup_secrets", "b:S": "/backup_secrets confirm", "b:t": "/restore_test", "b:l": "/backups", "b:menu": "/panel",
     "S:l": "/set", "S:v": "/set", "S:s": "/set", "S:e": "/set", "m:menu": "/mode", "c:menu": "/context",
 }
 

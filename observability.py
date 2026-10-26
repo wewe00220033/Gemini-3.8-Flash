@@ -337,7 +337,7 @@ def doctor_report(bot_state=None, queue=None, watchdog=None, now=None, check_tel
             return WARN, "النسخ الأسبوعي معطّل (BACKUP_WEEKLY_ENABLED=0)"
         st = backup.load_state()
         local = backup.list_local()
-        sched = f"كل {backup.weekday_name_ar()} {Config.BACKUP_HOUR:02d}:00 · محلي {len(local)}/{Config.BACKUPS_KEEP}"
+        sched = f"{backup.schedule_text()} · محلي {len(local)}/{Config.BACKUPS_KEEP}"
         if not st.get("last_ts"):
             return OK, sched + " · لم تُنفَّذ بعد"
         age_d = (now - st["last_ts"]) / 86400

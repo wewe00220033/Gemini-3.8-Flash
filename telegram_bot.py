@@ -803,6 +803,9 @@ def _dispatch_callback(token, chat_id, mid, data):
         if act == "t":
             _run_cmd(token, chat_id, "/restore_test", mid)
             return "🧪"
+        if act == "l":
+            _run_cmd(token, chat_id, "/backups", mid)
+            return "🗃️"
 
     # --- الإعدادات ---
     if sec == "S":
@@ -1105,7 +1108,8 @@ def _help_text():
         "/logs [N|errors|YYYY-MM-DD] — السجل (أسرار محجوبة) · /trace <job_id> أو رداً على فويس — رحلة الفويس · /doctor — فحص صحي محلي · /incidents — تقارير الحوادث\n"
         "/project_group <مفتاح> <مجموعة> — مفاتيح نفس مشروع Google تتشارك الحصة (والقفز عند 503 لمشروع آخر). اكتب - للإزالة\n"
         "/backup — نسخة احتياطية (أرشيف+جلسات+إعدادات) بلا أسرار (+نسخة محلية في backups/، وتلقائياً أسبوعياً)\n"
-        "/backup_secrets — نسخة keys.json بتأكيد صريح · /restore_test — تمرين استعادة آخر نسخة · /audit [N] — سجل التدقيق (من غيّر ماذا متى)\n"
+        "/backups [n] — قائمة النسخ المحفوظة محلياً (آخر 4) أو إرسال النسخة رقم n للشات\n"
+        "/backup_secrets — نسخة keys.json بتأكيد صريح · /restore_test — تمرين استعادة آخر نسخة (يجمع الأجزاء تلقائياً) · /audit [N] — سجل التدقيق (من غيّر ماذا متى)\n"
         "/ask <سؤال> — اسأل عن محتوى الجلسة (flash-lite؛ الجواب يُلحق بالجلسة) · /chat … /endchat — محادثة مستمرة 10 د · /plan [طلب] — خطة عمل عبر Antigravity (أو رداً على نص)\n"
         "/panel — لوحة التحكم بالأزرار (كل زر له أمر نصي مكافئ) · /set <key> <value> — الإعدادات الآمنة · /cancel — إلغاء إدخال جارٍ\n"
         "/version — رقم النسخة والبناء ومدة التشغيل\n"
@@ -1636,6 +1640,35 @@ def handle_text(token, chat_id, msg, msg_text):
                 _send_document(token, chat_id, name, chunk, "application/zip", caption, msg["message_id"])
         except Exception as e:
             send_telegram_message(token, chat_id, f"⚠️ تعذر إنشاء النسخة الاحتياطية: {e}", reply_to_id=msg["message_id"])
+
+    elif cmd == "/backups":
+        # 09 §5: النسخ المحلية (آخر 4) — بلا رقم تُعرض القائمة، /backups <n> يرسل النسخة (أو أجزاءها) من القرص للشات
+        groups = backup.local_groups()
+        if not groups:
+            send_telegram_message(token, chat_id, "ℹ️ لا توجد نسخ محفوظة محلياً في backups/ بعد — نفّذ /backup أو انتظر النسخة الأسبوعية.", reply_to_id=msg["message_id"])
+            return
+        if not args:
+            send_telegram_message(token, chat_id, backup.backups_list_text(groups), reply_to_id=msg["message_id"])
+            return
+        try:
+            n = int(args[0])
+        except ValueError:
+            n = 0
+        if not 1 <= n <= len(groups):
+            send_telegram_message(token, chat_id, f"⚠️ رقم غير صالح — اختر من 1 إلى {len(groups)} (/backups للقائمة).", reply_to_id=msg["message_id"])
+            return
+        g = groups[n - 1]
+        try:
+            for i, p in enumerate(g["paths"], 1):
+                with open(p, "rb") as f:
+                    data = f.read()
+                caption = (f"🗃️ نسخة محفوظة #{n} — {g['stem']}"
+                           + (f" جزء {i}/{g['parts']} (للفك محلياً اجمع الأجزاء بالترتيب)" if g["parts"] > 1 else "")
+                           + "\nبلا أسرار · /restore_test للتحقق من سلامة الأحدث")
+                _send_document(token, chat_id, os.path.basename(p), data, "application/zip", caption, msg["message_id"])
+            audit.record("backup.download", index=n, stem=g["stem"], parts=g["parts"])
+        except Exception as e:
+            send_telegram_message(token, chat_id, f"⚠️ تعذر إرسال النسخة #{n}: {e}", reply_to_id=msg["message_id"])
 
     elif cmd == "/backup_secrets":
         # الأسرار بأمر منفصل + تأكيد صريح بكلمة confirm (09 §4)

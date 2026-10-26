@@ -109,6 +109,11 @@ class Config:
     # توكن وصول اختياري لواجهة الويب (المنظومة شخصية — فاضي = مفتوح بالكامل).
     # لو ضبطته، الواجهة تطلبه مرة واحدة وتحفظه في المتصفح. localhost مفتوح دائماً.
     WEB_ACCESS_TOKEN = os.environ.get("WEB_ACCESS_TOKEN", "").strip()
+    # 13 §1.1 S1: فارغ على عنوان غير محلي → توكن مولَّد تلقائياً عند الإقلاع (web_service.ensure_web_token).
+    # الوضع المفتوح للعامة يحتاج تصريحاً صريحاً: WEB_ALLOW_OPEN=1
+    WEB_ALLOW_OPEN = os.environ.get("WEB_ALLOW_OPEN", "0") in ("1", "true", "True")
+    # 13 S5: لا نثق بـ X-Forwarded-For (قابل للتزوير) إلا خلف reverse proxy موثوق: TRUST_PROXY=1
+    TRUST_PROXY = os.environ.get("TRUST_PROXY", "0") in ("1", "true", "True")
 
     # الحد الأقصى لحجم الملف الصوتي المرفوع (Gemini inline_data حدها ~20MB)
     MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "25"))
