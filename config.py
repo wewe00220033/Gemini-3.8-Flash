@@ -331,6 +331,25 @@ class Config:
     PANEL_BUTTON_MAX_CHARS = 20                                               # 11 §6: نص الزر ≤ 20 حرفاً
     SET_MY_COMMANDS = os.environ.get("SET_MY_COMMANDS", "1") not in ("0", "false", "False", "")  # 11 §5: تسجيل القائمة عند الإقلاع
 
+    # ------------------------------------------------------------------
+    # المرحلة 7 — المساعد التفاعلي (12 §1–§2) وتكافؤ الويب (13 §1 S2/S3/S5، §3)
+    # ------------------------------------------------------------------
+    ASK_MAX_CONTEXT_CHARS = int(os.environ.get("ASK_MAX_CONTEXT_CHARS", "12000"))   # 12 §1: سياق الجلسة (الأحدث أولاً)
+    ASK_FALLBACK_ENTRIES = 10                 # /ask بلا جلسة → آخر N مدخلات من ALL.md
+    CHAT_TTL_MIN = int(os.environ.get("CHAT_TTL_MIN", "10"))                        # 12 §1: وضع /chat ينتهي بعد 10 د خمول
+    CHAT_HISTORY_TURNS = 6                    # آخر 6 تبادلات تُرفق مع كل سؤال في /chat
+    ASK_ANSWER_MAX_CHARS = 3500               # الجواب الأطول يُرسل كملف .md
+    # Antigravity عبر Interactions API (12 §2) — نص فقط، معزول في interactions_client.py
+    AGENT_NAME = os.environ.get("AGENT_NAME", "antigravity-preview-latest")
+    AGENT_TIMEOUT = int(os.environ.get("AGENT_TIMEOUT", "180"))
+    AGENT_ENVIRONMENT = "remote"
+    PLAN_MAX_INPUT_CHARS = 20000
+    FEATURE_PLAN = os.environ.get("FEATURE_PLAN", "1") not in ("0", "false", "False", "")   # 13 §5: علم ميزة
+    # الويب (13 §1): rate limit بالـ IP على /api/transcribe · توكن عبر cookie HttpOnly بعد ?token= مرة واحدة
+    WEB_RATE_LIMIT_PER_MIN = int(os.environ.get("WEB_RATE_LIMIT_PER_MIN", "30"))
+    WEB_COOKIE_NAME = "web_access"
+    WEB_POLISH = os.environ.get("WEB_POLISH", "1") not in ("0", "false", "False", "")       # 13 §3: الويب يمر بالتنظيم أيضاً
+
     # المستخدم المصرح له في تليجرام (حماية البوت من التطفل).
     # فاضي = البوت يرفض الجميع حتى تضبط TELEGRAM_CHAT_ID في البيئة أو .env
     DEFAULT_CHAT_ID = ""

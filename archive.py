@@ -156,6 +156,38 @@ def last():
             "title": "\n".join(title).strip() or None}
 
 
+def last_entries(n=10, tail_bytes=262144):
+    """المرحلة 7 (12 §1): آخر n مدخلات [{meta, raw, polished, title}] من ذيل ALL.md — بلا تحميل الملف كاملاً."""
+    path = all_path()
+    if not os.path.exists(path) or n <= 0:
+        return []
+    with _lock:
+        size = os.path.getsize(path)
+        with open(path, "rb") as f:
+            f.seek(max(0, size - tail_bytes))
+            data = f.read().decode("utf-8", errors="ignore")
+    parts = _ENTRY_RE.split(data)
+    out = []
+    for p in parts[1:][-n:]:
+        lines = (_ENTRY_MARK + p).strip("\n").split("\n")
+        meta = lines[0][len(_ENTRY_MARK):].strip()
+        raw, pol, title, cur = [], [], [], None
+        for ln in lines[1:]:
+            if ln.startswith(_RAW_MARK):
+                cur = raw
+            elif ln.startswith(_POL_MARK):
+                cur = pol
+            elif ln.startswith(_TITLE_MARK):
+                cur = title
+            elif ln.startswith("### "):
+                cur = None
+            elif cur is not None:
+                cur.append(ln)
+        out.append({"meta": meta, "raw": "\n".join(raw).strip(), "polished": "\n".join(pol).strip() or None,
+                    "title": "\n".join(title).strip() or None})
+    return out
+
+
 def count_entries():
     """عدد المدخلات (للعرض في /status) — مسح سطري بلا تحميل الملف كاملاً."""
     path = all_path()
