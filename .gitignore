@@ -29,3 +29,4 @@ transcripts/
 logs/
 incidents/
 .persist_probe
+backups/
