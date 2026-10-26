@@ -36,6 +36,8 @@ import prompts
 import delivery
 import sessions
 import glossary as glossary_mod
+import fsm
+import panel
 
 if sys.platform == "win32":
     try:
@@ -508,27 +510,375 @@ def _on_quota_deferral(job, wait_s):
         print(f"⚠️ تعذر إرسال صمام الحصة: {e}")
 
 
+def _answer_cb(token, cq_id, text="", alert=False):
+    """answerCallbackQuery — يُستدعى لكل callback حتى عند الخطأ (11 DoD 5)."""
+    try:
+        payload = {"callback_query_id": cq_id, "text": (text or "")[:200]}
+        if alert:
+            payload["show_alert"] = True
+        _tg_post(token, "answerCallbackQuery", payload, timeout=10)
+    except Exception:
+        pass
+
+
+def _edit_panel(token, chat_id, message_id, text, markup):
+    """editMessageText لتحديث نفس الرسالة (11 §1). لو فشل (رسالة قديمة/نص متطابق) نرسل رسالة جديدة."""
+    payload = {"chat_id": chat_id, "message_id": message_id, "text": text[:Config.TELEGRAM_MAX_MSG], "reply_markup": markup}
+    try:
+        r = _tg_post(token, "editMessageText", payload)
+        if r.status_code == 200:
+            return True
+        if "not modified" in (r.text or "").lower():
+            return True
+    except Exception:
+        pass
+    try:
+        _tg_post(token, "sendMessage", {"chat_id": chat_id, "text": text[:Config.TELEGRAM_MAX_MSG], "reply_markup": markup})
+    except Exception:
+        pass
+    return False
+
+
+# 11 §5: قائمة مختصرة (≤ 12) تُسجَّل في زر Menu بتليجرام — الباقي عبر /help واللوحة
+BOT_COMMANDS = [
+    ("panel", "لوحة التحكم بالأزرار"),
+    ("status", "حالة المفاتيح والرصيد"),
+    ("keys", "قائمة المفاتيح"),
+    ("mode", "وضع الإرسال: خام/منظم/مزدوج"),
+    ("roles", "الأدوار المتاحة"),
+    ("sessions", "الجلسات"),
+    ("glossary", "القاموس المخصص"),
+    ("doctor", "فحص صحي محلي"),
+    ("logs", "السجل (أسرار محجوبة)"),
+    ("backup", "نسخة احتياطية بلا أسرار"),
+    ("cancel", "إلغاء إدخال جارٍ"),
+    ("help", "كل الأوامر"),
+]
+
+
+def register_commands(token):
+    """setMyCommands عند الإقلاع (11 §5). يرجع True عند النجاح؛ الفشل لا يعطّل شيئاً (لوج فقط)."""
+    if not token or not Config.SET_MY_COMMANDS:
+        return False
+    try:
+        r = _tg_post(token, "setMyCommands", {"commands": [{"command": c, "description": d[:256]} for c, d in BOT_COMMANDS]}, timeout=10)
+        ok = r.status_code == 200
+        print("📋 setMyCommands: " + ("تم" if ok else f"فشل ({r.status_code})"))
+        return ok
+    except Exception as e:
+        print(f"⚠️ setMyCommands: {e}")
+        return False
+
+
+def send_panel(token, chat_id, screen=None, reply_to_id=None):
+    text, markup = screen or panel.home()
+    payload = {"chat_id": chat_id, "text": text[:Config.TELEGRAM_MAX_MSG], "reply_markup": markup}
+    if reply_to_id:
+        payload["reply_to_message_id"] = reply_to_id
+    return _tg_post(token, "sendMessage", payload)
+
+
+def _fsm_prompt(token, chat_id, state, data=None, text=""):
+    """يدخل حالة FSM ويرسل طلب الإدخال مع زر إلغاء (11 §3)."""
+    markup = {"inline_keyboard": [[{"text": "❌ إلغاء", "callback_data": "x:cancel"}]]}
+    r = _tg_post(token, "sendMessage", {"chat_id": chat_id, "text": text + f"\n(أو /cancel — تنتهي المهلة بعد {Config.FSM_TTL_SECONDS // 60} د)", "reply_markup": markup})
+    mid = None
+    try:
+        mid = r.json().get("result", {}).get("message_id") if r.status_code == 200 else None
+    except Exception:
+        pass
+    fsm.enter(state, data=data, chat_id=chat_id, prompt_msg_id=mid)
+
+
 def handle_callback(token, cq):
-    """callback_query من الأزرار inline: q:skip:<id> / q:wait:<id>. يرد answerCallbackQuery دائماً."""
+    """
+    callback_query من الأزرار inline (11 §1): يرد answerCallbackQuery **دائماً** (حتى عند الخطأ)، يعدّل نفس الرسالة
+    للتنقل، وينفّذ الأفعال عبر **نفس منطق الأوامر النصية** (Buttons = Commands — handle_text).
+    q:skip/q:wait (صمام الحصة من المرحلة 2) تبقى كما هي.
+    """
     data = cq.get("data") or ""
     cq_id = cq.get("id")
+    m = cq.get("message") or {}
+    chat_id = str(m.get("chat", {}).get("id", ""))
+    mid = m.get("message_id")
     note = ""
-    parts = data.split(":")
-    if len(parts) == 3 and parts[0] == "q":
-        action, job_id = parts[1], parts[2]
-        if action == "skip":
+    try:
+        note = _dispatch_callback(token, chat_id, mid, data) or ""
+    except Exception as e:
+        print(f"⚠️ callback [{data}]: {type(e).__name__}: {e}")
+        STATE["last_error"] = f"callback {data}: {e}"
+        note = "⚠️ حصل خطأ — جرّب الأمر النصي المكافئ"
+    _answer_cb(token, cq_id, note)
+    return note
+
+
+def _run_cmd(token, chat_id, text, reply_to=None):
+    """ينفّذ أمراً نصياً كما لو كتبه المالك (parity). msg وهمي بمعرّف الرسالة الحالية."""
+    handle_text(token, chat_id, {"message_id": reply_to or 0}, text)
+
+
+def _dispatch_callback(token, chat_id, mid, data):
+    audit.set_actor("telegram")
+    sec, act, arg = panel.parse(data)
+
+    # --- صمام الحصة (المرحلة 2) ---
+    if sec == "q":
+        job_id = arg or act
+        if act == "skip":
             ok = QUEUE.skip(job_id) if QUEUE else False
             note = "⏭ تم التخطّي" if ok else "المهمة انتهت بالفعل"
-        elif action == "wait":
+        else:
             note = "⏳ تمام، هستنى وهنفّذها تلقائياً"
         prompt = _quota_prompts.pop(job_id, None)
         if prompt and prompt[1]:
             delete_message(token, prompt[0], prompt[1])
-    try:
-        _tg_post(token, "answerCallbackQuery", {"callback_query_id": cq_id, "text": note[:200]}, timeout=10)
-    except Exception:
-        pass
-    return note
+        return note
+
+    def show(screen):
+        _edit_panel(token, chat_id, mid, *screen)
+        return ""
+
+    # --- إلغاء FSM ---
+    if sec == "x":
+        prev = fsm.clear()
+        if mid:
+            delete_message(token, chat_id, mid)
+        return "أُلغي ✅" if prev else "لا عملية جارية"
+
+    # --- الرئيسية / الحالة / الطبيب ---
+    if sec == "p":
+        if act == "home":
+            return show(panel.home())
+        if act == "st":
+            _run_cmd(token, chat_id, "/status", mid)
+            return ""
+        if act == "dr":
+            _run_cmd(token, chat_id, "/doctor", mid)
+            return "🩺 جارٍ الفحص…"
+
+    # --- المفاتيح ---
+    if sec == "k":
+        if act == "l":
+            return show(panel.keys_list(arg or 1))
+        if act == "v":
+            return show(panel.key_view(arg))
+        if act == "d":
+            return show(panel.key_view(arg, confirm_delete=True))
+        if act == "D":
+            keys = key_manager.data.get("keys", [])
+            try:
+                name = keys[int(arg)].get("name")
+            except (IndexError, ValueError):
+                return show(panel.keys_list(1))
+            _run_cmd(token, chat_id, f"/remove {name}", mid)
+            show(panel.keys_list(1))
+            return "🗑 حُذف"
+        if act == "n":
+            keys = key_manager.data.get("keys", [])
+            try:
+                name = keys[int(arg)].get("name")
+            except (IndexError, ValueError):
+                return "المفتاح غير موجود"
+            _fsm_prompt(token, chat_id, "await_key_rename", {"old": name}, f"✏️ اكتب الاسم الجديد للمفتاح [{name}]:")
+            return ""
+        if act == "a":
+            _fsm_prompt(token, chat_id, "await_key", {}, "🔑 الصق مفتاح Gemini (اختيارياً: الاسم ثم المفتاح):")
+            return ""
+
+    # --- وضع الإرسال / البانر ---
+    if sec == "m":
+        if act != "menu":
+            _run_cmd(token, chat_id, f"/mode {act}", mid)
+        return show(panel.mode_menu())
+    if sec == "h":
+        _run_cmd(token, chat_id, f"/header {act}", mid)
+        return show(panel.mode_menu())
+
+    # --- الأدوار ---
+    if sec == "r":
+        if act == "l":
+            return show(panel.roles_list())
+        if act == "s":
+            _run_cmd(token, chat_id, f"/role {arg}", mid)
+            show(panel.roles_list())
+            return f"🎭 {arg}"
+        if act == "n":
+            _fsm_prompt(token, chat_id, "await_role", {}, "🎭 اكتب الدور الجديد بالشكل:\n<id> | <الاسم> | <تعليمات التنظيم>\nمثال: lawyer | محامي | نظّم النص قانونياً في بنود")
+            return ""
+        if act == "d":
+            return show(panel.roles_list(confirm_delete=arg))
+        if act == "D":
+            _run_cmd(token, chat_id, f"/role_del {arg}", mid)
+            show(panel.roles_list())
+            return "🗑 حُذف"
+
+    # --- الجلسات ---
+    if sec == "s":
+        if act == "l":
+            return show(panel.sessions_list(arg or 1))
+        if act == "v":
+            return show(panel.session_view(arg))
+        if act == "r":
+            _run_cmd(token, chat_id, f"/resume {arg}", mid)
+            show(panel.sessions_list(1))
+            return "▶️ استُؤنفت"
+        if act == "e":
+            _run_cmd(token, chat_id, "/end", mid)
+            show(panel.sessions_list(1))
+            return "⏹ أُنهيت"
+        if act == "x":
+            _run_cmd(token, chat_id, f"/export {arg}", mid)
+            return "📥"
+        if act == "n":
+            _fsm_prompt(token, chat_id, "await_session_name", {"new": True}, "🗂 اكتب اسم الجلسة الجديدة (أو «-» لاسم مؤقت):")
+            return ""
+        if act == "N":
+            _fsm_prompt(token, chat_id, "await_session_name", {"new": False}, "✏️ اكتب الاسم الجديد للجلسة النشطة:")
+            return ""
+
+    # --- القاموس ---
+    if sec == "g":
+        if act == "l":
+            return show(panel.glossary_list(arg or 1))
+        if act == "v":
+            return show(panel.glossary_view(arg))
+        if act == "c":
+            _run_cmd(token, chat_id, f"/confirm_word {arg}", mid)
+            show(panel.glossary_view(arg))
+            return "✅ مؤكد"
+        if act == "d":
+            return show(panel.glossary_view(arg, confirm_delete=True))
+        if act == "D":
+            _run_cmd(token, chat_id, f"/del_word {arg} confirm", mid)
+            show(panel.glossary_list(1))
+            return "🗑 حُذف"
+        if act == "a":
+            _fsm_prompt(token, chat_id, "await_word", {}, "📖 اكتب اللفظ كما يُسمع (مثال: شلبي):")
+            return ""
+
+    # --- السياق ---
+    if sec == "c":
+        if act in ("auto", "simple"):
+            _run_cmd(token, chat_id, "/context on" if act == "auto" else "/context off", mid)
+        return show(panel.context_menu())
+
+    # --- السجلات ---
+    if sec == "L":
+        if act == "menu":
+            return show(panel.logs_menu())
+        if act == "t":
+            _run_cmd(token, chat_id, "/logs", mid)
+        elif act == "e":
+            _run_cmd(token, chat_id, "/logs errors", mid)
+        elif act == "a":
+            _run_cmd(token, chat_id, "/audit", mid)
+        elif act == "r":
+            last = jobs.load_state()
+            jid = None
+            if last:
+                jid = sorted(last.values(), key=lambda j: j.get("ts", 0))[-1].get("job_id") if isinstance(last, dict) else None
+            if jid:
+                _run_cmd(token, chat_id, f"/trace {jid}", mid)
+            else:
+                return "لا فويس في السجل بعد"
+        return ""
+
+    # --- النسخ ---
+    if sec == "b":
+        if act == "menu":
+            return show(panel.backup_menu())
+        if act == "n":
+            _run_cmd(token, chat_id, "/backup", mid)
+            return "📦 جارٍ…"
+        if act == "s":
+            return show(panel.backup_menu(confirm_secrets=True))
+        if act == "S":
+            _run_cmd(token, chat_id, "/backup_secrets confirm", mid)
+            show(panel.backup_menu())
+            return "🔐 أُرسلت"
+        if act == "t":
+            _run_cmd(token, chat_id, "/restore_test", mid)
+            return "🧪"
+
+    # --- الإعدادات ---
+    if sec == "S":
+        if act == "l":
+            return show(panel.settings_list())
+        if act == "v":
+            return show(panel.setting_view(arg))
+        if act == "s":
+            key, _, val = arg.partition("=")
+            _run_cmd(token, chat_id, f"/set {key} {val}", mid)
+            show(panel.setting_view(key))
+            return "✅"
+        if act == "e":
+            typ, rng, desc = panel.SET_WHITELIST.get(arg, (None, None, arg))
+            _fsm_prompt(token, chat_id, "await_set_value", {"key": arg}, f"⚙️ اكتب القيمة الجديدة لـ {desc} ({arg})" + (f" — المدى {rng[0]}–{rng[1]}:" if typ == "int" else ":"))
+            return ""
+
+    return "زر غير معروف"
+
+
+def handle_fsm_text(token, chat_id, msg, msg_text):
+    """
+    مسار النص أثناء حالة FSM (11 §3). يرجع True لو استُهلك النص. /cancel يُلغي. المهلة → «انتهت المهلة» مرة واحدة.
+    الفويس لا يمر من هنا إطلاقاً (الحالة تنتظر نصاً فقط).
+    """
+    exp = fsm.expired_and_clear()
+    if exp:
+        send_telegram_message(token, chat_id, f"⌛ انتهت مهلة «{fsm.LABELS.get(exp['name'], exp['name'])}» — ابدأ من جديد من /panel.", reply_to_id=msg["message_id"])
+    st = fsm.current()
+    text = (msg_text or "").strip()
+    if not st:
+        return False
+    if text.lower().split("@")[0] in ("/cancel", "إلغاء"):
+        fsm.clear()
+        send_telegram_message(token, chat_id, "✅ أُلغيت العملية.", reply_to_id=msg["message_id"])
+        return True
+    if text.startswith("/"):
+        # أمر آخر أثناء الانتظار: لا نبتلعه — نُلغي الحالة بصمت وننفّذ الأمر
+        fsm.clear()
+        return False
+    name, data = st["name"], st.get("data") or {}
+    if name == "await_key":
+        fsm.clear()
+        handle_text(token, chat_id, msg, text)       # نفس مسار لصق المفتاح
+        if not key_manager.extract_key_from_text(text)[0]:
+            send_telegram_message(token, chat_id, "لم أجد مفتاح Gemini في النص. أعد المحاولة من /panel → 🔑.", reply_to_id=msg["message_id"])
+        return True
+    if name == "await_key_rename":
+        fsm.clear()
+        handle_text(token, chat_id, msg, f'/rename "{data.get("old")}" {text}')
+        return True
+    if name == "await_word":
+        if "=" in text:
+            fsm.clear()
+            handle_text(token, chat_id, msg, f"/add_word {text}")
+            return True
+        fsm.enter("await_word_dst", {"src": text}, chat_id=chat_id)
+        send_telegram_message(token, chat_id, f"📖 «{text}» → اكتب المقصود (أضف كلمة spelling في النهاية لو تصحيح إملائي):", reply_to_id=msg["message_id"])
+        return True
+    if name == "await_word_dst":
+        fsm.clear()
+        handle_text(token, chat_id, msg, f"/add_word {data.get('src')} = {text}")
+        return True
+    if name == "await_session_name":
+        fsm.clear()
+        if data.get("new"):
+            handle_text(token, chat_id, msg, "/new_session" + ("" if text == "-" else f" {text}"))
+        else:
+            handle_text(token, chat_id, msg, f"/rename_session {text}")
+        return True
+    if name == "await_role":
+        fsm.clear()
+        handle_text(token, chat_id, msg, f"/new_role {text}")
+        return True
+    if name == "await_set_value":
+        fsm.clear()
+        handle_text(token, chat_id, msg, f"/set {data.get('key')} {text}")
+        return True
+    fsm.clear()
+    return False
 
 
 def start_queue(resume=True):
@@ -661,6 +1011,7 @@ def _help_text():
         "/project_group <مفتاح> <مجموعة> — مفاتيح نفس مشروع Google تتشارك الحصة (والقفز عند 503 لمشروع آخر). اكتب - للإزالة\n"
         "/backup — نسخة احتياطية (أرشيف+جلسات+إعدادات) بلا أسرار (+نسخة محلية في backups/، وتلقائياً أسبوعياً)\n"
         "/backup_secrets — نسخة keys.json بتأكيد صريح · /restore_test — تمرين استعادة آخر نسخة · /audit [N] — سجل التدقيق (من غيّر ماذا متى)\n"
+        "/panel — لوحة التحكم بالأزرار (كل زر له أمر نصي مكافئ) · /set <key> <value> — الإعدادات الآمنة · /cancel — إلغاء إدخال جارٍ\n"
         "/version — رقم النسخة والبناء ومدة التشغيل\n"
         "/queue — الطابور الحالي وإحصاءاته\n"
         "/reset — فتح قواطع الموديلات المقفولة مؤقتاً (لو عايز تجرّب حالاً)\n"
@@ -798,6 +1149,9 @@ def _strip_banner(text):
 
 def handle_text(token, chat_id, msg, msg_text):
     audit.set_actor("telegram")   # 09 §2: كل تغيير إداري من هذا الخيط يُنسب لتليجرام
+    # 0) حالة إدخال جارية (11 §3)؟ تستهلك النص (إلا الأوامر). المنتهية → «انتهت المهلة» مرة واحدة
+    if handle_fsm_text(token, chat_id, msg, msg_text):
+        return
     # 1) مفتاح Gemini جديد؟
     extracted_key, extracted_name = key_manager.extract_key_from_text(msg_text)
     if extracted_key:
@@ -842,7 +1196,19 @@ def handle_text(token, chat_id, msg, msg_text):
         if len(args) < 2:
             send_telegram_message(token, chat_id, "الاستخدام: /rename <الاسم القديم> <الاسم الجديد>", reply_to_id=msg["message_id"])
             return
-        entry = key_manager.rename_key(args[0], " ".join(args[1:]))
+        # أسماء بمسافات («Project 3»): "اسم قديم" جديد — أو أطول اسم موجود يطابق بداية الوسائط
+        old, new = args[0], " ".join(args[1:])
+        joined = " ".join(args)
+        if joined.startswith('"') and joined.count('"') >= 2:
+            old = joined[1:joined.index('"', 1)]
+            new = joined[joined.index('"', 1) + 1:].strip().strip('"')
+        else:
+            names = sorted((k.get("name", "") for k in key_manager.data.get("keys", [])), key=len, reverse=True)
+            for nm in names:
+                if nm and len(nm.split()) > 1 and joined.lower().startswith(nm.lower() + " "):
+                    old, new = nm, joined[len(nm):].strip()
+                    break
+        entry = key_manager.rename_key(old, new) if new else None
         if entry:
             send_telegram_message(token, chat_id, f"✏️ تمت إعادة التسمية إلى [{entry.get('name')}].", reply_to_id=msg["message_id"])
         else:
@@ -1249,6 +1615,26 @@ def handle_text(token, chat_id, msg, msg_text):
         except OSError:
             pass
 
+    elif cmd in ("/panel", "/settings", "لوحة"):
+        send_panel(token, chat_id, panel.home(), reply_to_id=msg["message_id"])
+
+    elif cmd == "/cancel":
+        prev = fsm.clear()
+        send_telegram_message(token, chat_id, "✅ أُلغيت العملية." if prev else "لا عملية جارية.", reply_to_id=msg["message_id"])
+
+    elif cmd == "/set":
+        # 11 §4: القائمة البيضاء فقط + تحقق النوع/المدى + audit + تأكيد يعرض القديم/الجديد
+        if len(args) < 2:
+            cur = "\n".join(f"• {k} = {panel.current_setting(k)}" for k in panel.SET_WHITELIST)
+            send_telegram_message(token, chat_id, "الاستخدام: /set <key> <value>\nالمسموح:\n" + cur, reply_to_id=msg["message_id"])
+            return
+        ok_, val = panel.validate_setting(args[0], " ".join(args[1:]))
+        if not ok_:
+            send_telegram_message(token, chat_id, f"❌ {val}", reply_to_id=msg["message_id"])
+            return
+        old, new = panel.apply_setting(args[0], val)
+        send_telegram_message(token, chat_id, f"✅ {args[0].lower()}: {old} → {new}", reply_to_id=msg["message_id"])
+
     elif cmd == "/restore_test":
         # 09 §5 fire drill: يفك آخر نسخة محلية في مجلد مؤقت ويتحقق من سلامتها — البيانات الحية لا تُمس
         rep = backup.restore_test()
@@ -1325,7 +1711,7 @@ def main(stop_event=None, pool=None, poll_params=None):
         while not stop_event.is_set():
             try:
                 poll_t = current_poll_timeout()
-                params = {"timeout": poll_t}
+                params = {"timeout": poll_t, "allowed_updates": '["message","callback_query"]'}   # 11 §1
                 if poll_params:
                     params.update(poll_params)
                 if offset:

@@ -202,7 +202,9 @@ def test_callback_wait_keeps_job_and_unknown_data_is_safe(tb, monkeypatch):
     assert _wait(lambda: job.job_id in bot._quota_prompts)
     note = bot.handle_callback("TOK", {"id": "cq2", "data": f"q:wait:{job.job_id}"})
     assert "هستنى" in note and bot.QUEUE.size() == 1 and job.state == "deferred"
-    assert bot.handle_callback("TOK", {"id": "cq3", "data": "garbage"}) == ""
+    # بيانات مجهولة: لا استثناء، ويُرد answerCallbackQuery دائماً (المرحلة 6 تعيد ملاحظة «زر غير معروف» بدل الصمت)
+    note = bot.handle_callback("TOK", {"id": "cq3", "data": "garbage"})
+    assert isinstance(note, str) and "غير معروف" in note
     assert _methods(sent)[-1] == "answerCallbackQuery"
 
 

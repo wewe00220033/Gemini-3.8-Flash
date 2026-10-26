@@ -31,6 +31,7 @@ import logkit
 import observability
 import backup
 import audit
+import panel
 from model_state import model_circuit
 
 
@@ -413,7 +414,15 @@ def main():
         telegram_bot.start_queue(resume=bool(bot_token))
     except Exception as e:
         print(f"⚠️ تعذر بدء الطابور الموحّد: {e}")
+    # 11 §4: تجاوزات settings.json (/set) تُطبَّق على Config قبل أي عمل
+    try:
+        n_over = panel.apply_persisted_overrides()
+        if n_over:
+            print(f"⚙️ طُبّق {n_over} تجاوز من settings.json")
+    except Exception as e:
+        print(f"⚠️ تجاوزات الإعدادات: {e}")
     if bot_token:
+        telegram_bot.register_commands(bot_token)     # 11 §5
         rt.start_poller()
         rt.start_watchdog()
         time.sleep(1.5)

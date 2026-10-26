@@ -52,6 +52,10 @@ def _load():
         for k in ("delivery_mode", "role", "header_target"):
             if isinstance(data.get(k), str) and data[k]:
                 merged[k] = data[k]
+        # 11 §4: تجاوزات /set الأخرى (أرقام/منطقية/نصوص) تبقى كما هي — panel.apply_persisted_overrides يتحقق منها عند الإقلاع
+        for k, v in data.items():
+            if k not in merged and isinstance(v, (str, int, float, bool)) and not str(k).startswith("_"):
+                merged[k] = v
     if merged["delivery_mode"] not in DELIVERY_MODES:
         merged["delivery_mode"] = "dual"
     if merged["header_target"] not in HEADER_TARGETS:

@@ -325,6 +325,11 @@ class Config:
     BACKUP_STATE_FILE = os.path.join(DATA_DIR, "state", "backup_state.json")  # آخر نسخة تلقائية
     DOCTOR_TG_TIMEOUT = 3                                                     # مهلة getMe في /doctor (ثوانٍ)
     DOCTOR_TG_SLOW_MS = 1500                                                  # ⚠️ لو الاستجابة أبطأ
+    # --- المرحلة 6 (11 §1–4): اللوحة التفاعلية + FSM + /set ---
+    FSM_TTL_SECONDS = 300                                                     # 11 §3: انتهاء حالة الإدخال تلقائياً
+    CALLBACK_DATA_MAX = 64                                                    # 11 §1: حد تليجرام (بايت)
+    PANEL_BUTTON_MAX_CHARS = 20                                               # 11 §6: نص الزر ≤ 20 حرفاً
+    SET_MY_COMMANDS = os.environ.get("SET_MY_COMMANDS", "1") not in ("0", "false", "False", "")  # 11 §5: تسجيل القائمة عند الإقلاع
 
     # المستخدم المصرح له في تليجرام (حماية البوت من التطفل).
     # فاضي = البوت يرفض الجميع حتى تضبط TELEGRAM_CHAT_ID في البيئة أو .env
