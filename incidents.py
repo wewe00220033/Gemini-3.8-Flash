@@ -99,11 +99,11 @@ def _circuits_md():
 
 
 def _keys_md():
-    import key_manager
-    led = key_manager.quota_ledger()
-    keys = key_manager.data.get("keys", [])
+    from key_manager import key_manager as km
+    led = km.quota_ledger()
+    keys = km.data.get("keys", [])
     now = time.time()
-    avail = sum(1 for k in keys if any(key_manager.is_model_available(k, m, now) for m in Config.MODELS))
+    avail = sum(1 for k in keys if any(km.is_model_available(k, m, now) for m in Config.MODELS))
     return f"- مفاتيح: {len(keys)} (متاح {avail}) · متبقي اليوم ~{led.get('remaining')} · وضع {led.get('mode')}"
 
 

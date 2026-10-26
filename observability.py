@@ -240,8 +240,7 @@ def doctor_report(bot_state=None, queue=None, watchdog=None, now=None):
 
     # 4) الحصة + المفاتيح
     def _keys():
-        import key_manager
-        km = key_manager
+        from key_manager import key_manager as km
         keys = km.data.get("keys", [])
         if not keys:
             return FAIL, "لا مفاتيح Gemini"

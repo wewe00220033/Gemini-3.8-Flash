@@ -133,7 +133,7 @@ def _make_record(msg, created):
 def test_daily_rotation_gzips_previous_day(LK):
     h = LK.DailyFileHandler()
     h.setFormatter(logging.Formatter("%(message)s"))
-    t0 = time.mktime((2026, 1, 10, 12, 0, 0, 0, 0, 0))
+    t0 = time.time() - 86400                                                  # أمس → اليوم (داخل مدة الاحتفاظ)
     h.emit(_make_record("يوم أول", t0))
     h.emit(_make_record("يوم ثانٍ", t0 + 86400))
     h.close()
