@@ -58,6 +58,9 @@ def fresh_env(monkeypatch, tmp_path):
     monkeypatch.setattr(config.Config, "AUDIT_FILE", str(tmp_path / "logs" / "audit.log"))
     monkeypatch.setattr(config.Config, "BACKUPS_DIR", str(tmp_path / "backups"))
     monkeypatch.setattr(config.Config, "BACKUP_STATE_FILE", str(tmp_path / "state" / "backup_state.json"))
+    aud = sys.modules.get("audit")
+    if aud is not None:
+        aud.set_actor(None)
     inc = sys.modules.get("incidents")
     if inc is not None:
         inc.reset_state()

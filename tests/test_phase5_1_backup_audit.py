@@ -91,8 +91,8 @@ def test_audit_records_settings_roles_glossary_session(fresh_env):
     prompts.add_role("lawyer", "محامي", "", "نظّم قانونياً")
     prompts.remove_role("lawyer")
     gl = glossary.get_glossary()
-    e, _ = gl.add("شلبي", "ChatGPT")
-    gl.add("شلبى", "ChatGPT")                                  # نمط إضافي لنفس المدخل
+    e, _ = gl.add("زوبعة", "ZubaaTool")
+    gl.add("زوبعه", "ZubaaTool")                                # نمط إضافي لنفس المدخل
     gl.confirm(e["id"])
     gl.remove(e["id"])
     sessions.start("أ")
