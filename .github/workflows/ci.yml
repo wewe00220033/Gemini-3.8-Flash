@@ -19,7 +19,7 @@ jobs:
       - name: Install
         run: pip install -r requirements-dev.txt
       - name: Lint (pyflakes)
-        run: python -m pyflakes *.py tests/*.py
+        run: python -m pyflakes *.py tests/*.py tools/*.py
       - name: Compile
         run: python -m py_compile *.py
       - name: Tests

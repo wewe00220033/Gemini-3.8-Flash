@@ -30,3 +30,6 @@ logs/
 incidents/
 .persist_probe
 backups/
+
+# deploy archive produced by tools/pack_deploy.py
+deploy_ready.zip
