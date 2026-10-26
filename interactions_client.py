@@ -130,7 +130,8 @@ def run(prompt, timeout=None, post_fn=None):
             data = resp.json()
         except Exception:
             data = None
-        text = extract_text(data) if data is not None else (getattr(resp, "text", "") or "").strip()
+        # غير JSON (صفحة HTML/نص خام) = شكل غير متوقع — لا نرسله للمالك كخطة
+        text = extract_text(data) if isinstance(data, (dict, list)) else ""
         if not text:
             return _fail("رد Antigravity بشكل غير متوقع (بلا نص) — قد تغيّر شكل الـ API")
         with _lock:

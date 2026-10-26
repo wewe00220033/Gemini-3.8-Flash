@@ -89,6 +89,7 @@ def test_ask_appends_to_session_and_uses_text_assist_model_only(bot, monkeypatch
         return FakeResp(200, {"candidates": [{"content": {"parts": [{"text": "قررتم SQLite لاحقاً."}]}}]})
 
     monkeypatch.setattr(text_assist.requests, "post", fake_requests_post)
+    monkeypatch.setattr(text_assist, "key_manager", tb.key_manager)     # fresh_env أعاد تحميل key_manager
     tb.key_manager.add_key(VALID_A, "P1")
     _cmd(tb, "/ask إيه اللي قررناه؟")
     assert urls and Config.TEXT_ASSIST_MODEL in urls[0] and "lite" in urls[0]
@@ -110,9 +111,10 @@ def test_ask_context_newest_first_within_budget_and_includes_summary(bot, monkey
     sid = sessions.start("كبيرة")["id"]
     for i in range(10):
         sessions.append_entry(f"فويس رقم {i} " + ("كلام " * 60), model="m")
-    s = sessions.get(sid)
-    s["summary"] = "ملخص-L2-تجريبي"
-    sessions._write_index()
+    with sessions._lock:
+        sessions._find(sid)["summary"] = "ملخص-L2-تجريبي"
+        sessions._write_index()
+    assert sessions.summary(sid) == "ملخص-L2-تجريبي"
     calls = []
     res = assistant.ask("سؤال", generate_fn=_fake_generate(calls))
     assert res["ok"] and res["source"] == "session"
