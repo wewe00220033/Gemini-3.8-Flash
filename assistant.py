@@ -24,6 +24,7 @@ _chat = {"active": False, "chat_id": None, "since": 0.0, "last_at": 0.0, "histor
 
 ASK_MARK = "### 💡 استشارة ومساعد الجلسة"
 PLAN_MARK = "### 🧭 خطة Antigravity"
+SUMMARY_MARK = "### 📊 ملخص وخطة الجلسة"
 
 SYSTEM_ASK = (
     "أنت مساعد شخصي يقرأ تفريغات فويسات المالك (عربية مصرية غالباً مع مصطلحات تقنية إنجليزية). "
@@ -124,6 +125,33 @@ def ask(question, session_id=None, generate_fn=None, with_history=False):
     appended = False
     if s is not None:
         appended = append_note(ASK_MARK, f"❓ {question}\n\n{answer}", session_id=s["id"])
+    return {"ok": True, "answer": answer, "source": source, "session_name": (s or {}).get("name"), "appended": appended}
+
+
+def summarize(custom_instructions="", session_id=None, generate_fn=None):
+    """
+    ينفّذ تلخيصاً شاملاً وخطة عمل للجلسة النشطة عبر flash-lite.
+    يرجع dict: {ok, answer|error, source, session_name, appended}.
+    """
+    ctx, source, s = build_context(session_id)
+    if source == "empty":
+        return {"ok": False, "error": "لا يوجد محتوى بعد (لا جلسة ولا أرشيف) — ابعت فويس أولاً.", "source": source}
+    custom_instructions = (custom_instructions or "").strip()
+    user = f"محتوى تفريغات الجلسة:\n{ctx}\n\n"
+    if custom_instructions:
+        user += f"طلب المالك الخاص: {custom_instructions}\n\n"
+    user += "المطلوب: أخرج التلخيص التنفيذي والخطة والقرارات والاقتراحات وفق القالب المحدد."
+    import prompts
+    system = prompts.SUMMARY_PROMPT
+    fn = generate_fn or text_assist.generate
+    answer, reason = fn(system, user)
+    if not answer:
+        return {"ok": False, "error": f"تعذّر توليد الملخص الآن ({reason})", "source": source}
+    answer = answer.strip()
+    appended = False
+    if s is not None:
+        note_body = (f"🎯 {custom_instructions}\n\n" if custom_instructions else "") + answer
+        appended = append_note(SUMMARY_MARK, note_body, session_id=s["id"])
     return {"ok": True, "answer": answer, "source": source, "session_name": (s or {}).get("name"), "appended": appended}
 
 

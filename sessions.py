@@ -754,25 +754,30 @@ def reject_pending_title(session_id=None):
 
 
 def voice_title(raw_text, generate_fn=None):
-    """عنوان قصير للفويس نفسه (3–6 كلمات) لترويسة الرسالة والأرشيف — نصي فقط. None عند التعطيل/الفشل."""
+    """عنوان قصير للفويس نفسه (2–6 كلمات) لترويسة الرسالة والأرشيف — نصي فقط. None عند التعطيل/الفشل."""
     if not Config.SMART_TITLE_ENABLED:
         return None
     words = (raw_text or "").split()
-    if len(words) < 8:
+    if len(words) < 2:
         return None
     if generate_fn is None:
         import text_assist
         generate_fn = text_assist.generate
-    system = ("اكتب عنواناً معبّراً من 3 إلى 6 كلمات لهذا النص المفرغ من فويس عربي، بلا علامات ترقيم ولا شرح. "
+    system = ("اكتب عنواناً معبّراً من 2 إلى 6 كلمات لهذا النص المفرغ من فويس عربي، بلا علامات ترقيم ولا شرح. "
               "أخرج العنوان فقط.")
     try:
         text, _reason = generate_fn(system, " ".join(words[:Config.SMART_TITLE_WORDS]))
     except Exception:
         text = None
     t = sanitize_name((text or "").strip().split("\n")[0].strip("«»\"'.:- "))
-    if not t or len(t.split()) > 8:
-        return None
-    return t
+    if t and len(t.split()) <= 8:
+        return t
+    # بديل احتياطي ذكي للتسجيلات المقتضبة أو عند تعذر الرد:
+    if len(words) >= 2:
+        fallback = sanitize_name(" ".join(words[:5]).strip("«»\"'.,:- "))
+        if fallback and len(fallback.split()) <= 8:
+            return fallback
+    return None
 
 
 # ======================================================================

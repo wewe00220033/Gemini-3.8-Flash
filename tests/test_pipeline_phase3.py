@@ -109,6 +109,23 @@ def test_glossary_no_partial_word_match(mods):
     assert pol == "شلبيات كتير" and n == 0
 
 
+def test_glossary_bracket_and_prefix_guards(mods):
+    g = mods[0].get_glossary()
+    g.add("كاربون", "Gemini Carbon")
+    g.add("Carbon", "Gemini Carbon")
+    g.add("أرجون", "Gemini Argon")
+    g.add("Argon", "Gemini Argon")
+    g.add("سانتا", "Claude Sonnet")
+    # صمام 1: اللفظ متبوع بالقوس والمصطلح لا يتكرر
+    text = "مع سانتا (Claude Sonnet) وبتاع أرجون (Gemini Argon)"
+    out, n = g.apply(text, target="polished")
+    assert out == text and n == 0
+    # صمام 2: المصطلح المركب المسبوق ببادئته لا يُضاعَف
+    text2 = "استخدمت Gemini Argon و Gemini Carbon"
+    out2, n2 = g.apply(text2, target="polished")
+    assert out2 == text2 and n2 == 0
+
+
 def test_glossary_longest_pattern_first(mods):
     g = mods[0].get_glossary()
     g.add("جيميناي", "Gemini", kind="spelling")
@@ -672,3 +689,50 @@ def test_process_job_telegram_dual_raw_then_polished_and_web_archives(bot, mods,
     r = tb.process_job(web_job)
     assert r["text"] == "فتحت Antigravity" and r["archived"] and len(sent) == n_before
     assert archive.count_entries() == 2
+
+
+def test_delivery_typing_indicator_and_reaction_progression(bot, mods, monkeypatch):
+    """فحص ظهور مؤشر الكتابة وتدرج التفاعلات 👀 ➡️ ✍️ ➡️ 👍 أثناء طبقة التنظيم B."""
+    tb, sent = bot
+    import voice_queue
+    from config import Config
+    monkeypatch.setattr(tb, "_download_file", lambda t, f: b"abc")
+    monkeypatch.setattr(tb, "transcribe_audio_bytes_ex",
+                        lambda b, m: ("نص تجريبي للتفريغ", "gemini-3.6-flash", "A", {"elapsed": 1.5, "skipped": []}))
+    msg = {"message_id": 42, "chat": {"id": 1}, "date": 1, "voice": {"file_id": "fid42", "file_unique_id": "u42"}}
+    job = voice_queue.new_telegram_job("1", msg, "fid42", "audio/ogg", "voice")
+    job.meta["token"] = "T"
+    res = tb.process_job(job)
+    assert res.get("polished")
+
+    # 1. مؤشر الكتابة أُرسل أثناء طبقة B
+    actions = [x["payload"] for x in sent if x["url"].endswith("sendChatAction")]
+    assert any(a.get("action") == "typing" and a.get("chat_id") == "1" for a in actions)
+
+    # 2. التفاعلات تدرجت إلى ✍️ ثم 🎉
+    reactions = [x["payload"] for x in sent if x["url"].endswith("setMessageReaction")]
+    emojis = [r.get("reaction", [{}])[0].get("emoji") for r in reactions]
+    assert Config.REACTION_POLISHING in emojis  # ✍️
+    assert Config.REACTION_DONE in emojis       # 🎉
+
+
+def test_delivery_raw_only_reaction_done(monkeypatch):
+    """في وضع raw_only: التفاعل ينتقل مباشرة إلى 🎉 بعد إرسال الرسالة الخام بلا typing أو ✍️."""
+    import delivery
+    import settings
+    from config import Config
+    monkeypatch.setattr(settings, "delivery_mode", lambda: "raw_only")
+    actions = []
+    reactions = []
+    sender = delivery.Sender(
+        send_text=lambda t, r, p: 100,
+        send_action=lambda act: actions.append(act),
+        set_reaction=lambda em: reactions.append(em),
+    )
+    res = delivery.deliver("نص خام فقط", "gemini-3.6-flash", "key", {"elapsed": 1.0},
+                           sender, reply_to_id=50, archive_entry=False)
+    assert res["raw_msg_id"] == 100
+    assert actions == []                        # لا typing
+    assert reactions == [Config.REACTION_DONE]  # 🎉 مباشرة
+
+

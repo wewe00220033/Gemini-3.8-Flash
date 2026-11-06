@@ -370,7 +370,30 @@ def test_lite_and_antigravity_never_transcribe(fresh_env):
 def test_bot_commands_include_ask_and_help_mentions_new_commands(bot):
     tb, sent, _ = bot
     names = [c[0] for c in tb.BOT_COMMANDS]
-    assert "ask" in names and len(names) <= 12
+    assert "ask" in names and "summary" in names and len(names) <= 15
     _cmd(tb, "/help")
     h = _texts(sent)[-1]
-    assert "/ask" in h and "/chat" in h and "/endchat" in h and "/plan" in h
+    assert "/ask" in h and "/chat" in h and "/endchat" in h and "/plan" in h and "/summary" in h
+
+
+def test_summary_command(bot, monkeypatch):
+    tb, sent, docs = bot
+    import sessions, assistant
+    sessions.start("جلسة_مشروع")
+    sessions.append_entry("قررنا استخدام FastAPI بدلاً من Flask وإطلاق النسخة الأسبوع القادم", model="m")
+    
+    calls = []
+    def fake_gen(sys_t, usr_t):
+        calls.append((sys_t, usr_t))
+        return "## ملخص تنفيذي\n1. القرار: FastAPI\n2. الموعد: الأسبوع القادم", None
+
+    monkeypatch.setattr(assistant.text_assist, "generate", fake_gen)
+    _cmd(tb, "/summary ركز على الموعد")
+    
+    txts = _texts(sent)
+    assert any("ملخص وخطة" in t for t in txts)
+    assert "FastAPI" in txts[-1]
+    assert "ركز على الموعد" in calls[0][1]
+    # التأكد من الإلحاق في ملف الجلسة
+    data = sessions.export_bytes(sessions.current_id()).decode("utf-8")
+    assert assistant.SUMMARY_MARK in data and "FastAPI" in data

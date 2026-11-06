@@ -425,3 +425,71 @@ def test_disabled_model_never_called(engine, monkeypatch):
     with pytest.raises(RuntimeError):
         engine.transcribe_audio_bytes(b"abc")
     assert not any("gemini-3.8-flash" in c["url"] for c in calls)
+
+
+# ---------- TDD: فحص الملفات الطويلة وتجاوز التوكنات (SRE 360) ----------
+
+def test_dynamic_read_timeout_with_duration(engine):
+    """ملف 6.5MB مدته ساعة (4126ث) ينبغي أن يُمنح سقف المهلة الطويلة (180ث) وليس 67ث فقط."""
+    size_6_5mb = int(6.5 * 1024 * 1024)
+    # بدون مدة (سلوك قديم محفوظ 100%):
+    assert engine.dynamic_read_timeout(size_6_5mb) == 67
+    # مع مدة قصيرة (30ث): لا يؤثر على الحجم الصغير
+    assert engine.dynamic_read_timeout(size_6_5mb, duration_sec=30) == 67
+    # مع مدة تتجاوز 30 دقيقة: يُمنح سقف الملفات الكبيرة
+    assert engine.dynamic_read_timeout(size_6_5mb, duration_sec=1800) >= 180
+    assert engine.dynamic_read_timeout(size_6_5mb, duration_sec=4126) >= 180
+
+
+def test_token_limit_error_does_not_strike_session_context(engine, monkeypatch):
+    """
+    عند تجاوز سقف التوكنات في الموديل (400: The input token count exceeds the maximum number of tokens allowed 98304)،
+    الخطأ ناتج عن طول الصوت وليس عن سياق الجلسة النصي؛ لذا لا يجوز معاقبة الجلسة بضربات سياق.
+    """
+    engine.key_manager.add_key(VALID_A, "A")
+    # محاكاة وجود سياق جلسة نشط
+    monkeypatch.setattr(engine, "_session_context_text", lambda: "سياق سابق")
+    strikes = []
+    monkeypatch.setattr(engine, "_session_record_strike", lambda r: strikes.append(r))
+
+    err_msg = "The input token count exceeds the maximum number of tokens allowed 98304."
+    _install_post(monkeypatch, engine, lambda c: _err(400, err_msg, "INVALID_ARGUMENT"))
+
+    with pytest.raises(RuntimeError) as exc_info:
+        engine.transcribe_audio_bytes(b"large_audio")
+
+    assert "exceeds the maximum number of tokens allowed" in str(exc_info.value)
+    # حماية الجلسة: صفر ضربات سياق!
+    assert len(strikes) == 0
+
+
+def test_long_audio_duration_skips_small_context_models(engine, monkeypatch):
+    """
+    إذا كان الفويس معلوماً أن مدته تتجاوز سقف موديل 3.5-transcribe (أكثر من 45 دقيقة)،
+    يتم تخطّي الموديل مسبقاً لمنع استهلاك محاولات فاشلة بـ 400.
+    """
+    engine.key_manager.add_key(VALID_A, "A")
+    called_models = []
+
+    def mock_post(c):
+        for m in engine.Config.MODELS:
+            if m in c["url"]:
+                called_models.append(m)
+        return ok_text("تم التفريغ بنجاح")
+
+    _install_post(monkeypatch, engine, mock_post)
+
+    # 1. عند نجاح 3.6-flash أولاً: 3.5-transcribe لم يُطلب
+    text, model, key, info = engine.transcribe_audio_bytes_ex(b"audio", duration_sec=4126)
+    assert text == "تم التفريغ بنجاح"
+    assert "gemini-3.5-transcribe" not in called_models
+
+    # 2. عندما يصل الدور إلى 3.5-transcribe (مثلاً 3.6-flash مقفول مؤقتاً):
+    engine.model_circuit.pause("gemini-3.6-flash", 60, "busy")
+    with pytest.raises(Exception):
+        engine.transcribe_audio_bytes_ex(b"audio", duration_sec=4126)
+
+    # التأكد من أنه لم يتم استدعاء 3.5-transcribe عبر الشبكة إطلاقاً وتم تسجيل تخطّيه
+    assert "gemini-3.5-transcribe" not in called_models
+
+

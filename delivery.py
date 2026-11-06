@@ -24,11 +24,13 @@ import sessions
 
 
 class Sender:
-    """واجهة الإرسال القابلة للحقن: send_text(text, reply_to, parse_mode) -> message_id|None ؛ send_document(...)"""
+    """واجهة الإرسال القابلة للحقن: send_text(text, reply_to, parse_mode) -> message_id|None ؛ send_document(...) ؛ send_action(...) ؛ set_reaction(...)"""
 
-    def __init__(self, send_text, send_document=None):
+    def __init__(self, send_text, send_document=None, send_action=None, set_reaction=None):
         self.send_text = send_text
         self.send_document = send_document
+        self.send_action = send_action
+        self.set_reaction = set_reaction
 
 
 def prepare_texts(raw_text, glossary=None):
@@ -168,6 +170,11 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
                                           raw, reply_to_id,
                                           filename_prefix="transcript", caption="📄 التفريغ الخام (طويل → ملف)",
                                           head_html=_entry_head_html(result["title"], session_name))
+        if mode == "raw_only" and getattr(sender, "set_reaction", None):
+            try:
+                sender.set_reaction(Config.REACTION_DONE)
+            except Exception:
+                pass
 
     # 3b) اقتراح اسم الجلسة (08 §2): أول فويس في جلسة باسمها المؤقت → اقتراح معلّق (قبول صامت عند الفويس التالي)
     if archive_entry and session_name:
@@ -181,6 +188,16 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
 
     # 4) المنظم
     if mode in ("dual", "polished_only"):
+        if getattr(sender, "send_action", None):
+            try:
+                sender.send_action("typing")
+            except Exception:
+                pass
+        if getattr(sender, "set_reaction", None):
+            try:
+                sender.set_reaction(Config.REACTION_POLISHING)
+            except Exception:
+                pass
         if polish_fn is None:
             import text_assist
             polish_fn = text_assist.polish
@@ -196,6 +213,11 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
         anchor = result["raw_msg_id"] or reply_to_id
         if polished:
             result["polished"] = polished
+            if getattr(sender, "set_reaction", None):
+                try:
+                    sender.set_reaction(Config.REACTION_DONE)
+                except Exception:
+                    pass
             if archive_entry:
                 archive.append_polished(polished)
                 if session_name:
@@ -206,6 +228,11 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
                                                    head_html=_entry_head_html(result["title"], session_name))
         else:
             result["polish_error"] = reason
+            if getattr(sender, "set_reaction", None):
+                try:
+                    sender.set_reaction(Config.REACTION_DONE)
+                except Exception:
+                    pass
             if mode == "polished_only":
                 # لا خام أُرسل: نرسل الخام كبديل حتى لا يضيع الفويس (07 §2.2 روح القرار: لا رفض)
                 result["raw_msg_id"] = _send_long(sender, raw_message_html(raw, footer_html), raw, reply_to_id,

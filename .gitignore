@@ -33,3 +33,7 @@ backups/
 
 # deploy archive produced by tools/pack_deploy.py
 deploy_ready.zip
+
+# Release and deploy packages
+deploy_latest.zip
+releases/

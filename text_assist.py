@@ -14,6 +14,7 @@
 
 import time
 import threading
+import re
 
 import requests
 
@@ -24,6 +25,14 @@ import transcriber
 
 _lock = threading.RLock()
 _state = {"thinking_ok": None, "calls": 0, "ok": 0, "fail": 0, "last_error": None}
+_INVISIBLE_RE = re.compile(r"[\u200b-\u200f\ufeff\u202a-\u202e\s]+")
+
+
+def is_effective_empty(text):
+    """يكتشف إن كان النص فارغاً أو لا يحوي سوى مسافات أو أحرف يونيكود غير مرئية (مثل RLM/BOM)."""
+    if not text:
+        return True
+    return len(_INVISIBLE_RE.sub("", str(text))) == 0
 
 
 def model_name():
@@ -122,7 +131,7 @@ def polish(raw_text, role_id=None, glossary=None, context_summary=None):
     القاموس (scope polished) يُطبَّق على الناتج.
     context_summary (10 §2 L2): ملخص الجلسة التراكمي — يُضاف لنص النظام «للفهم فقط»؛ لا يُعاد كتابته ولا يُدمج في الناتج.
     """
-    if not (raw_text or "").strip():
+    if is_effective_empty(raw_text):
         return None, "نص فارغ"
     role_id = role_id or Config.DEFAULT_ROLE
     system_text = prompts.compose_prompt("polish", role_id)

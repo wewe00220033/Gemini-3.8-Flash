@@ -11,6 +11,7 @@
 import sys
 import time
 import html
+import re
 import os
 import threading
 import requests
@@ -225,11 +226,13 @@ def send_html_get_id(token, chat_id, text, reply_to_id=None):
     return first_id
 
 
-def make_sender(token, chat_id):
+def make_sender(token, chat_id, reaction_msg_id=None):
     """Sender لخط الإنتاج (delivery.deliver) فوق دوال تليجرام الحقيقية."""
     return delivery.Sender(
         send_text=lambda text, reply_to, parse_mode=None: send_html_get_id(token, chat_id, text, reply_to),
         send_document=lambda fn, data, mime, caption, reply_to: _send_document(token, chat_id, fn, data, mime, caption, reply_to),
+        send_action=lambda action="typing": send_chat_action(token, chat_id, action),
+        set_reaction=(lambda emoji: set_reaction(token, chat_id, reaction_msg_id, emoji)) if reaction_msg_id else None,
     )
 
 
@@ -413,7 +416,7 @@ def process_job(job):
         c_info = {"elapsed": cached.get("elapsed")}
         cached_polished = cached.get("polished_text")
         polish_fn = (lambda raw, role, gl: (cached_polished, None)) if cached_polished else None
-        res = delivery.deliver(cached["text"], c_model, c_key, c_info, make_sender(token, chat_id), reply_to_id=reply_to,
+        res = delivery.deliver(cached["text"], c_model, c_key, c_info, make_sender(token, chat_id, reaction_msg_id=reply_to), reply_to_id=reply_to,
                                polish_fn=polish_fn, footer_html=_footer(c_model, c_key, c_info) + " · ♻️ مكرر",
                                archive_entry=False)
         jobs.record(job.job_id, "sent", dedup_of=cached.get("job_id"), text=cached["text"][:2000],
@@ -430,7 +433,11 @@ def process_job(job):
         jobs.record(job.job_id, "downloaded", bytes=len(audio_bytes))
         transcriber.set_current_job(job.job_id)
         try:
-            text, model, key_name, info = transcribe_audio_bytes_ex(audio_bytes, job.mime_type)
+            dur = job.meta.get("duration")
+            try:
+                text, model, key_name, info = transcribe_audio_bytes_ex(audio_bytes, job.mime_type, duration_sec=dur)
+            except TypeError:
+                text, model, key_name, info = transcribe_audio_bytes_ex(audio_bytes, job.mime_type)
         finally:
             transcriber.set_current_job(None)
     jobs.record(job.job_id, "transcribed", model=model, key=str(key_name), elapsed=info.get("elapsed"))
@@ -440,7 +447,7 @@ def process_job(job):
     if accepted:
         print(f"📛 اعتُمد اسم الجلسة صامتاً: «{accepted}»")
     # المرحلة 3: قاموس → أرشفة (قبل الإرسال) → الخام → المنظم (07)
-    res = delivery.deliver(text, model, key_name, info, make_sender(token, chat_id), reply_to_id=reply_to,
+    res = delivery.deliver(text, model, key_name, info, make_sender(token, chat_id, reaction_msg_id=reply_to), reply_to_id=reply_to,
                            footer_html=_footer(model, key_name, info) + _context_footer(info))
     text = res["raw"]
     if res.get("title_suggestion"):
@@ -543,20 +550,21 @@ def _edit_panel(token, chat_id, message_id, text, markup):
     return False
 
 
-# 11 §5: قائمة مختصرة (≤ 12) تُسجَّل في زر Menu بتليجرام — الباقي عبر /help واللوحة
+# 11 §5: قائمة مختصرة (≤ 12) تُسجَّل في زر Menu بتليجرام — الأولوية للاستخدام اليومي والجلسات
 BOT_COMMANDS = [
+    ("new_session", "بدء جلسة جديدة"),
+    ("end", "إنهاء الجلسة النشطة وحفظها"),
+    ("summary", "ملخص تنفيذي وخطة الجلسة"),
     ("panel", "لوحة التحكم بالأزرار"),
-    ("status", "حالة المفاتيح والرصيد"),
-    ("ask", "اسأل عن محتوى الجلسة"),
-    ("mode", "وضع الإرسال: خام/منظم/مزدوج"),
-    ("roles", "الأدوار المتاحة"),
-    ("sessions", "الجلسات"),
-    ("glossary", "القاموس المخصص"),
-    ("doctor", "فحص صحي محلي"),
-    ("logs", "السجل (أسرار محجوبة)"),
-    ("backup", "نسخة احتياطية بلا أسرار"),
+    ("ask", "اسأل أو لخص محتوى الجلسة"),
+    ("chat", "بدء محادثة ذكية عن الجلسة"),
+    ("plan", "تحويل الجلسة لخطة عمل تنفيذية"),
+    ("sessions", "قائمة الجلسات السابقة والحالية"),
+    ("status", "حالة المفاتيح والرصيد المتبقي"),
+    ("mode", "وضع الإرسال: خام / منظم / مزدوج"),
+    ("roles", "تغيير دور وأسلوب التنسيق"),
     ("cancel", "إلغاء إدخال جارٍ"),
-    ("help", "كل الأوامر"),
+    ("doctor", "فحص صحي وتشخيص المنظومة"),
 ]
 
 
@@ -826,11 +834,28 @@ def _dispatch_callback(token, chat_id, mid, data):
     return "زر غير معروف"
 
 
+def _format_markdown_for_telegram(text):
+    """يحوّل تنسيق الماركداون الشائع (**عريض**، `كود`، عناوين) إلى HTML مدعوم في تليجرام دون كسر الرموز."""
+    if not text:
+        return ""
+    t = html.escape(text)
+    # عناوين (### عنوان) -> <b>عنوان</b>
+    t = re.sub(r'^(?:#{1,6})\s*(.+)$', r'<b>\1</b>', t, flags=re.MULTILINE)
+    # خط عريض (**نص**) -> <b>نص</b>
+    t = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', t)
+    # نقاط (* نقطة أو - نقطة) -> • نقطة
+    t = re.sub(r'^\s*[\*\-]\s+', '• ', t, flags=re.MULTILINE)
+    # كود مضمن (`كود`) -> <code>كود</code>
+    t = re.sub(r'`([^`\n]+)`', r'<code>\1</code>', t)
+    return t
+
+
 def _send_answer(token, chat_id, reply_to_id, head, body, filename_prefix):
-    """جواب قصير كرسالة؛ طويل كملف .md (12 §2 «طويلة → ملف»)."""
+    """جواب قصير كرسالة منسقة بـ HTML أنيق؛ طويل كملف .md (12 §2 «طويلة → ملف»)."""
     text = f"{head}\n{body}"
     if len(text) <= Config.ASK_ANSWER_MAX_CHARS:
-        return send_telegram_message(token, chat_id, text, reply_to_id=reply_to_id)
+        formatted_html = f"<b>{html.escape(head)}</b>\n\n{_format_markdown_for_telegram(body)}"
+        return send_telegram_message(token, chat_id, formatted_html, reply_to_id=reply_to_id, parse_mode="HTML")
     fname = f"{filename_prefix}_{time.strftime('%Y%m%d_%H%M')}.md"
     return _send_document(token, chat_id, fname, body.encode("utf-8"), "text/markdown", head[:900], reply_to_id)
 
@@ -840,13 +865,52 @@ def _answer_question(token, chat_id, msg, question, in_chat=False):
     if not question:
         send_telegram_message(token, chat_id, "الاستخدام: /ask <سؤالك عن محتوى الجلسة>  — أو /chat لوضع المحادثة المستمرة.", reply_to_id=msg["message_id"])
         return
-    res = assistant.chat_turn(question) if in_chat else assistant.ask(question)
-    if not res.get("ok"):
-        send_telegram_message(token, chat_id, f"⚠️ {res.get('error')}", reply_to_id=msg["message_id"])
+
+    def _work():
+        try:
+            res = assistant.chat_turn(question) if in_chat else assistant.ask(question)
+            if not res.get("ok"):
+                send_telegram_message(token, chat_id, f"⚠️ {res.get('error')}", reply_to_id=msg["message_id"])
+                return
+            src = f"📂 {res['session_name']}" if res.get("source") == "session" else "📚 الأرشيف العام"
+            tail = " · 📝 أُلحق بالجلسة" if res.get("appended") else ""
+            _send_answer(token, chat_id, msg["message_id"], f"💡 {src}{tail}", res["answer"], "ask")
+        except Exception as e:
+            STATE["last_error"] = f"ask: {e}"
+            send_telegram_message(token, chat_id, f"⚠️ /ask: خطأ غير متوقع ({type(e).__name__}).", reply_to_id=msg["message_id"])
+
+    if Config.PLAN_SYNC_FOR_TESTS:
+        _work()
+    else:
+        threading.Thread(target=_work, name="ask-worker", daemon=True).start()
+
+
+def _summary_command(token, chat_id, msg, custom_instructions):
+    """أمر /summary: تلخيص تنفيذي شامل + خطة عمل واقتراحات عبر flash-lite نصياً وتُلحق بالجلسة."""
+    ctx, source, s = assistant.build_context()
+    if source == "empty":
+        send_telegram_message(token, chat_id, "لا محتوى للتلخيص بعد: ابدأ جلسة وابعت فويس أولاً.", reply_to_id=msg["message_id"])
         return
-    src = f"📂 {res['session_name']}" if res.get("source") == "session" else "📚 الأرشيف العام"
-    tail = " · 📝 أُلحق بالجلسة" if res.get("appended") else ""
-    _send_answer(token, chat_id, msg["message_id"], f"💡 {src}{tail}", res["answer"], "ask")
+    label = f"الجلسة «{s['name']}»" if s else "الأرشيف العام"
+    send_telegram_message(token, chat_id, f"⏳ جاري إعداد الملخص الشامل وخطة العمل لـ {label}…", reply_to_id=msg["message_id"])
+
+    def _work():
+        try:
+            res = assistant.summarize(custom_instructions)
+            if not res.get("ok"):
+                send_telegram_message(token, chat_id, f"⚠️ /summary: {res.get('error')}", reply_to_id=msg["message_id"])
+                return
+            src = f"📂 {res['session_name']}" if res.get("source") == "session" else "📚 الأرشيف العام"
+            tail = " · 📝 أُلحق بالجلسة" if res.get("appended") else ""
+            _send_answer(token, chat_id, msg["message_id"], f"📊 ملخص وخطة {src}{tail}", res["answer"], "summary")
+        except Exception as e:
+            STATE["last_error"] = f"summary: {e}"
+            send_telegram_message(token, chat_id, f"⚠️ /summary: خطأ غير متوقع ({type(e).__name__}).", reply_to_id=msg["message_id"])
+
+    if Config.PLAN_SYNC_FOR_TESTS:
+        _work()
+    else:
+        threading.Thread(target=_work, name="summary-worker", daemon=True).start()
 
 
 def handle_chat_text(token, chat_id, msg, msg_text):
@@ -1053,6 +1117,8 @@ def enqueue_telegram_audio(token, chat_id, msg, file_id, mime_type, label):
     q = start_queue()
     job = voice_queue.new_telegram_job(chat_id, msg, file_id, mime_type, label)
     job.meta["token"] = token
+    if media.get("duration"):
+        job.meta["duration"] = int(media["duration"])
     try:
         position = q.submit(job)
     except voice_queue.QueueFull as e:
@@ -1110,7 +1176,7 @@ def _help_text():
         "/backup — نسخة احتياطية (أرشيف+جلسات+إعدادات) بلا أسرار (+نسخة محلية في backups/، وتلقائياً أسبوعياً)\n"
         "/backups [n] — قائمة النسخ المحفوظة محلياً (آخر 4) أو إرسال النسخة رقم n للشات\n"
         "/backup_secrets — نسخة keys.json بتأكيد صريح · /restore_test — تمرين استعادة آخر نسخة (يجمع الأجزاء تلقائياً) · /audit [N] — سجل التدقيق (من غيّر ماذا متى)\n"
-        "/ask <سؤال> — اسأل عن محتوى الجلسة (flash-lite؛ الجواب يُلحق بالجلسة) · /chat … /endchat — محادثة مستمرة 10 د · /plan [طلب] — خطة عمل عبر Antigravity (أو رداً على نص)\n"
+        "/summary [طلب] — تلخيص تنفيذي شامل وخطة عمل للجلسة (flash-lite) · /ask <سؤال> — اسأل عن محتوى الجلسة · /chat … /endchat — محادثة مستمرة 10 د · /plan [طلب] — خطة عمل عبر Antigravity (أو رداً على نص)\n"
         "/panel — لوحة التحكم بالأزرار (كل زر له أمر نصي مكافئ) · /set <key> <value> — الإعدادات الآمنة · /cancel — إلغاء إدخال جارٍ\n"
         "/version — رقم النسخة والبناء ومدة التشغيل\n"
         "/queue — الطابور الحالي وإحصاءاته\n"
@@ -1746,6 +1812,9 @@ def handle_text(token, chat_id, msg, msg_text):
                 _send_document(token, chat_id, os.path.basename(recent[0]), f.read(), "text/markdown", "📄 التقرير الكامل", msg["message_id"])
         except OSError:
             pass
+
+    elif cmd in ("/summary", "/recap"):
+        _summary_command(token, chat_id, msg, " ".join(args))
 
     elif cmd == "/ask":
         # 12 §1: مساعد الجلسة — نصي فقط (flash-lite)، الجواب يُلحق بملف الجلسة

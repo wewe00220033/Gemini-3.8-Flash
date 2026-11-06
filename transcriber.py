@@ -53,6 +53,11 @@ _KEY_HINTS = ("api key", "api_key", "apikey", "key not valid", "leaked", "permis
 _NETWORK_MSG = "🌐 السيرفر مش قادر يوصل لـ Google (مشكلة شبكة من جهة الاستضافة). جرّب بعد دقيقة."
 
 
+def _is_token_limit_error(detail):
+    msg = str(detail or "").lower()
+    return "token count exceeds" in msg or "tokens allowed" in msg or "too many tokens" in msg
+
+
 class Attempt:
     """نتيجة محاولة واحدة (موديل × مفتاح)."""
     __slots__ = ("outcome", "text", "detail", "retry_after", "elapsed", "status")
@@ -69,17 +74,17 @@ class Attempt:
 # ======================================================================
 # الواجهة العامة
 # ======================================================================
-def transcribe_audio_bytes(audio_bytes, mime_type="audio/mp4"):
+def transcribe_audio_bytes(audio_bytes, mime_type="audio/mp4", duration_sec=None):
     """
     تفريغ بايتات الصوت عبر أفضل الموديلات المتاحة مع Failover سريع.
     يرجع (text, model, key_name). يرفع RuntimeError برسالة واضحة عند الفشل.
     للمعلومات الإضافية (الزمن، الموديلات المتخطاة) استخدم transcribe_audio_bytes_ex.
     """
-    text, model, key_name, _info = transcribe_audio_bytes_ex(audio_bytes, mime_type)
+    text, model, key_name, _info = transcribe_audio_bytes_ex(audio_bytes, mime_type, duration_sec=duration_sec)
     return text, model, key_name
 
 
-def transcribe_audio_bytes_ex(audio_bytes, mime_type="audio/mp4"):
+def transcribe_audio_bytes_ex(audio_bytes, mime_type="audio/mp4", duration_sec=None):
     """نفس transcribe_audio_bytes + قاموس info: {elapsed, skipped:[...], attempts:n}."""
     if not audio_bytes:
         raise ValueError("بيانات الصوت فارغة!")
@@ -88,7 +93,7 @@ def transcribe_audio_bytes_ex(audio_bytes, mime_type="audio/mp4"):
 
     started = time.time()
     b64_data = base64.b64encode(audio_bytes).decode("utf-8")
-    timeout = (Config.GEMINI_CONNECT_TIMEOUT, dynamic_read_timeout(len(audio_bytes)))
+    timeout = (Config.GEMINI_CONNECT_TIMEOUT, dynamic_read_timeout(len(audio_bytes), duration_sec=duration_sec))
 
     info = {"skipped": [], "attempts": 0, "elapsed": 0.0, "hops": 0, "waited": 0, "rounds": 0,
             "context": "off", "strikes": 0}
@@ -141,6 +146,8 @@ def transcribe_audio_bytes_ex(audio_bytes, mime_type="audio/mp4"):
                 return att
             if att.outcome not in (SUCCESS, BAD_REQUEST, BLOCKED):
                 return att                                   # 503/429/… ليست ضربات
+            if att.outcome == BAD_REQUEST and _is_token_limit_error(att.detail):
+                return att                                   # عيب سعة في الموديل وليس سياق جلسة نصي
             _context_strike("echo" if is_echo else att.outcome)
             att = _try(model, key_str, key_name, _build_payload(b64_data, mime_type, model, context_text=ctx["text"]))
             last_holder[0] = att
@@ -163,6 +170,12 @@ def transcribe_audio_bytes_ex(audio_bytes, mime_type="audio/mp4"):
                 reason = model_circuit.reason(model) or "مقفول"
                 info["skipped"].append(f"{_short(model)}: {reason} (يفتح بعد {_fmt_wait(left)})")
                 reasons[model] = f"مزدحم ({reason}) — يفتح بعد {_fmt_wait(left)}"
+                continue
+
+            max_dur = getattr(Config, "MODEL_MAX_AUDIO_DURATION_SEC", {}).get(model)
+            if duration_sec and max_dur and duration_sec > max_dur:
+                info["skipped"].append(f"{_short(model)}: مدة الصوت ({int(duration_sec)}ث) تتجاوز سقف الموديل ({max_dur}ث)")
+                reasons[model] = f"مدة الصوت تتجاوز سقف الموديل ({max_dur // 60} دقيقة)"
                 continue
 
             payload = _build_payload(b64_data, mime_type, model, context_text=ctx["text"])
@@ -484,15 +497,19 @@ def transcription_prompt():
         return Config.SYSTEM_PROMPT
 
 
-def dynamic_read_timeout(size_bytes):
+def dynamic_read_timeout(size_bytes, duration_sec=None):
     """
     مهلة القراءة تتناسب مع حجم الملف: min(cap, BASE + PER_MB × MB).
     سقفان (04 §2.5b، 22 U3): ≤ 8MB → MAX_SMALL=90 (اكتشاف تعليق سريع للفويسات العادية)؛
     > 8MB → MAX_LARGE=180 (ملف 15MB يحتاج 135ث فعلاً — كان يُقصّ إلى 90 → timeout زائف).
+    إذا كانت المدة الزمنية معلومة (duration_sec >= 1800ث = نصف ساعة فأكثر)، يُمنح سقف المهلة الطويلة (180ث).
     """
     mb = max(0.0, float(size_bytes)) / (1024 * 1024)
     t = Config.GEMINI_READ_TIMEOUT_BASE + Config.GEMINI_READ_TIMEOUT_PER_MB * mb
     cap = Config.GEMINI_READ_TIMEOUT_MAX_LARGE if mb > Config.GEMINI_LARGE_FILE_MB else Config.GEMINI_READ_TIMEOUT_MAX_SMALL
+    if duration_sec and duration_sec >= 1800:
+        cap = max(cap, Config.GEMINI_READ_TIMEOUT_MAX_LARGE)
+        t = max(t, Config.GEMINI_READ_TIMEOUT_MAX_LARGE)
     return int(min(cap, max(Config.GEMINI_READ_TIMEOUT_BASE, t)))
 
 

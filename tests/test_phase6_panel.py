@@ -428,7 +428,7 @@ def test_settings_panel_choice_and_int_fsm(bot):
 # =====================================================================
 def test_register_commands_short_list(bot, monkeypatch):
     tb, sent, _ = bot
-    assert len(tb.BOT_COMMANDS) <= 12 and tb.BOT_COMMANDS[0][0] == "panel"
+    assert len(tb.BOT_COMMANDS) <= 15 and tb.BOT_COMMANDS[0][0] == "new_session"
     assert tb.register_commands("T") is True
     p = _calls(sent, "setMyCommands")[-1]
     assert len(p["commands"]) == len(tb.BOT_COMMANDS) and all(c["command"].isascii() and c["description"] for c in p["commands"])

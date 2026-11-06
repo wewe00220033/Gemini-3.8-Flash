@@ -66,7 +66,6 @@ class Config:
         "gemini-3.5-transcribe": 25,
         "gemini-3.8-flash": 20,
     }
-
     # متى تتصفّر كوتا Google اليومية (منتصف الليل بتوقيت المحيط الهادئ) وبأي توقيت تُعرض الأوقات لك
     DAILY_RESET_TZ = os.environ.get("DAILY_RESET_TZ", "America/Los_Angeles")
     DISPLAY_TZ = os.environ.get("DISPLAY_TZ", "Africa/Cairo")
@@ -77,11 +76,13 @@ class Config:
     SYSTEM_PROMPT = (
         "أنت محرك تفريغ صوتي محترف فائق الدقة والذكاء (Multimodal Speech-to-Text Engine).\n"
         "المهمة: تفريغ التسجيل الصوتي بدقة متناهية كلمة بكلمة إلى نص عربي سليم، مع الالتزام التام بالقواعد التالية:\n"
-        "1. المصطلحات التقنية، والبرمجية، وأسماء الأدوات، والبروتوكولات، والشركات، والاختصارات تُكتب باللغة الإنجليزية بأحرفها اللاتينية الأصلية القياسية (مثل: GitHub, AI, Python, Gist, IP, API, DevOps, Docker, Linux, Windows, Groq, Telegram).\n"
+        "1. المصطلحات التقنية، والبرمجية، وأسماء الأدوات، والبروتوكولات، والشركات، والاختصارات تُكتب باللغة الإنجليزية بأحرفها اللاتينية الأصلية القياسية (مثل: GitHub, AI, Python, Gist, IP, API, DevOps, Docker, Linux, Windows, Groq, Telegram, Claude, Cloudflare, Arena.AI, genspark, Temp-Mail, Claude Fable, ChatGPT Astra, Claude Sonnet, Claude Opus, Gemini Argon, Gemini Carbon, FlashLite, Rate Limit, Antigravity IDE, Session, New Session).\n"
         "   وكذلك أسماء الملفات والامتدادات والمتغيرات والمناطق الزمنية كما تُكتب في الكود (مثل: .env, keys.json, main.py, config.py, Africa/Cairo, America/Los_Angeles, PORT, SERVER_PORT).\n"
-        "2. تفهم العامية المصرية بدقة تامة دون تحريف ودون اختلاق كلمات أو تخمين من عندك؛ انقل الكلام خام كما نُطق تماماً.\n"
+        "2. تفهم العامية المصرية بدقة تامة دون تحريف ودون اختلاق كلمات أو تخمين من عندك؛ انقل الكلام خام كما نُطق تماماً وبلهجته المصرية الحية دون تحويله إلى فصحى.\n"
         "3. اضبط الإملاء وعلامات الترقيم الأساسية دون إسقاط أي حرف أو كلمة.\n"
-        "4. أخرج النص المفرغ فقط، بدون أي مقدمات، أو اعتذارات، أو تعليقات جانبية."
+        "4. أسماء العائلة والأشخاص: الأب (زيزو)، الأم (رحمة)، والأولاد: سليم، كارما (لا تكتبها كرم)، كِنده (تُكتب كنده بالهاء المربوطة وليس كندا بالألف إلا إذا كان السياق الجغرافي دولة كندا).\n"
+        "5. احذر الخلط السمعي: موديل FlashLite لا تكتبه Flashlight (كشاف)، و Antigravity IDE لا تكتبها Antigravity ID، وموديل Claude Sonnet لا تكتبه Sante، وموديل Claude Opus لا تكتبه Oops، وموديلي Gemini Argon و Gemini Carbon اكتبهما بأحرفهما اللاتينية القياسية.\n"
+        "6. أخرج النص المفرغ فقط، بدون أي مقدمات، أو اعتذارات، أو تعليقات جانبية."
     )
 
     # (اختياري — مُعطّل افتراضياً) إرسال القواعد كـ system_instruction منفصل + temperature.
@@ -131,6 +132,10 @@ class Config:
     GEMINI_READ_TIMEOUT_MAX_SMALL = int(os.environ.get("GEMINI_READ_TIMEOUT_MAX_SMALL", "90"))
     GEMINI_READ_TIMEOUT_MAX_LARGE = int(os.environ.get("GEMINI_READ_TIMEOUT_MAX_LARGE", "180"))
     GEMINI_LARGE_FILE_MB = 8
+    # سقف مدة الصوت للموديلات المحدودة (3.5-transcribe حده 98K توكن ≈ 45 دقيقة = 2700 ثانية)
+    MODEL_MAX_AUDIO_DURATION_SEC = {
+        "gemini-3.5-transcribe": int(os.environ.get("TRANSCRIBE_MODEL_MAX_DURATION_SEC", "2700")),
+    }
 
     # قاطع الدائرة على مستوى الموديل (بالثواني): لو موديل رجّع 5xx أو Timeout يُتخطّى للمدة دي
     # على كل المفاتيح (المشكلة في Google مش في المفتاح). 0 = معطّل. /reset يفتح القواطع يدوياً.
@@ -292,8 +297,10 @@ class Config:
     JOBS_RESUME_MAX_AGE_H = int(os.environ.get("JOBS_RESUME_MAX_AGE_H", "20"))   # تليجرام يحتفظ بـ file_id ساعات
     JOBS_DEDUP_HOURS = 24
     JOBS_COMPACT_KEEP = 2000   # عند تجاوز ضعفه يُضغط الملف لآخر هذا العدد من المهام
-    # ريأكشن فوري على الفويس (Bot API 7.0+، من القائمة المسموحة فقط؛ ⏳/✅ غير مسموحين)
-    REACTION_RECEIVED = "\U0001F440"   # 👀
+    # ريأكشن فوري وتدرج الحالات على الفويس (Bot API 7.0+، من القائمة المسموحة فقط؛ ⏳/✅ غير مسموحين)
+    REACTION_RECEIVED = "\U0001F440"   # 👀 عند الاستلام وبدء التفريغ
+    REACTION_POLISHING = "\u270D"      # ✍️ عند بدء التنظيم الذكي (طبقة B)
+    REACTION_DONE = "\U0001F389"       # 🎉 عند اكتمال الإرسال بنجاح
     REACTION_ENABLED = os.environ.get("REACTION_ENABLED", "1") not in ("0", "false", "False", "")
     # /health العميق (G26، 03b §3): يرجع 503 لو أي خيط حيوي لم ينبض خلال هذه المدة.
     # يُحسب افتراضياً من مهلة polling + هامش القراءة + 15 (≈55ث) — لا 90 ولا 120.

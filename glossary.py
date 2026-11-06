@@ -60,7 +60,7 @@ DEFAULT_ENTRIES = [
     # غير مؤكد المقصود (05 §1) — معلَّق حتى يؤكده المالك (/glossary يعرضه بعلامة ⏳)
     {"id": "g_006", "patterns": ["فابل", "فافل"], "replacement": "?", "kind": "alias", "scope": "polished_only",
      "status": "pending", "context_rules": [], "note": "المالك: «تبع كلود — ف أ ب ل». المقصود غير مؤكد (Claude Code؟)"},
-    {"id": "g_007", "patterns": ["أسترا", "استرا"], "replacement": "?", "kind": "alias", "scope": "polished_only",
+    {"id": "g_007", "patterns": ["أسترا", "استرا", "أسترال", "استرال"], "replacement": "?", "kind": "alias", "scope": "polished_only",
      "status": "pending", "context_rules": [], "note": "المالك: «تبع ChatGPT». المقصود غير مؤكد"},
 ]
 
@@ -178,13 +178,29 @@ class Glossary:
         """نطابق على النسخة المطبَّعة (نفس الطول حرفاً بحرف) ونستبدل في النص الأصلي مع حفظ السابقة."""
         norm = normalize_keep_len(text)
         rules = entry.get("context_rules") or []
+        replacement = entry.get("replacement") or ""
+        rep_norm = normalize(replacement)
+        rep_parts = replacement.split()
+        prev_word_norm = normalize(rep_parts[0]) if len(rep_parts) > 1 else None
+
         out, last, n = [], 0, 0
         for m in rx.finditer(norm):
             if rules and self._skip_by_context(norm, m.start(), m.end(), rules):
                 continue
+            # صمام 1: اللفظ متبوع أصلاً بالمصطلح بين قوسين (قاعدة الأقواس): شلبي (ChatGPT) أو سانتا (Claude Sonnet)
+            after = text[m.end():].lstrip()
+            if after.startswith("(") and ")" in after:
+                bracket_content = normalize(after[1:after.find(")")]).strip()
+                if bracket_content and (rep_norm in bracket_content or bracket_content in rep_norm):
+                    continue
+            # صمام 2: اللفظ مسبوق بالبادئة الإنجليزية من المصطلح المركب: Gemini Carbon أو Claude Sonnet
+            if prev_word_norm:
+                before = text[:m.start()].rstrip()
+                if normalize(before).endswith(prev_word_norm):
+                    continue
             prefix = text[m.start(1):m.end(1)]
             out.append(text[last:m.start()])
-            out.append(prefix + entry["replacement"])
+            out.append(prefix + replacement)
             last = m.end()
             n += 1
         if not n:
