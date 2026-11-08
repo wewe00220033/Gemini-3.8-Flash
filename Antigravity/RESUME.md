@@ -8,7 +8,7 @@
 
 * **المستودع:** `https://github.com/wewe00220033/Gemini-3.8-Flash.git`
 * **الفرع النشط:** `A-test` (متزامن 100% مع `origin/A-test`).
-* **مسار العمل المحلي:** `c:\Users\USER\Downloads\111\منظومة_التفريغ_الصوتي_الذكي_Gemini`
+* **مسار العمل المحلي:** `<repo-root>`
 * **الإصدار الحالي:** `2.0.0-phase7.1`
 * **حالة الاختبارات:** 494 اختباراً ناجحاً بنسبة 100% (`pytest` يمر بالكامل في 84 ثانية).
 
@@ -47,3 +47,4 @@
 2. إضافة متغيرات `POLISH_PROVIDER` و `LOCAL_PROVIDER_CMD` و `LOCAL_PROVIDER_TIMEOUT=15` في `config.py`.
 3. كتابة `ProviderRouter` و `LocalProvider` في `text_assist.py`.
 4. كتابة اختبارات الوحدة والـ Failover في `tests/test_phase4_polish.py` والتأكد من نجاح الـ 494 اختباراً.
+
