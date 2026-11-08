@@ -192,7 +192,7 @@ python main.py
 ## 🧪 الاختبارات والتطوير
 ```bash
 pip install -r requirements-dev.txt
-python -m pytest        # 504 اختباراً (بلا شبكة: FakeTelegram + FakeClock + stub للمساعد النصي والتسمية)
+python -m pytest        # 513 اختباراً (بلا شبكة: FakeTelegram + FakeClock + stub للمساعد النصي والتسمية)
 python -m pyflakes *.py
 ```
 CI يعمل تلقائياً على كل PR و Push (Python 3.10 و 3.12 بنجاح 100%). الاختبارات تعمل على Linux و Windows.

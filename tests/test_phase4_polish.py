@@ -241,9 +241,11 @@ def test_long_text_preview_keeps_head(S, fresh_env):
                            title_fn=lambda r: "عنوان طويل")
     assert res["title"] == "عنوان طويل" and docs == ["transcript.md", "polished.md"]
     assert len(msgs) == 2
+    assert f"📂 {s['name']}" in msgs[0]                                        # الترويسة 📂 على الخام دائماً
     for m in msgs:
-        assert "🏷️ <b>عنوان طويل</b>" in m and f"📂 {s['name']}" in m and "<pre>" in m
-        assert m.index("🏷️") < m.index("<pre>")                               # الترويسة قبل المعاينة
+        assert f"📂 {s['name']}" in m and "<pre>" in m
+    # 🏷️ العنوان يظهر على المنظم (يُحسب بعد إرسال الخام للمسار السريع SMART_TITLE_BEFORE_RAW=0)
+    assert "🏷️ <b>عنوان طويل</b>" in msgs[1] and msgs[1].index("🏷️") < msgs[1].index("<pre>")
     S.end()
     msgs.clear()
     delivery.deliver(long_raw, M1, "A", {}, sender, polish_fn=lambda raw, role, gl: (None, "x"), title_fn=lambda r: None)

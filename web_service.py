@@ -26,6 +26,17 @@ import observability
 from http.cookies import SimpleCookie
 
 
+def _is_https(handler):
+    """هل الطلب وصل عبر HTTPS؟ (خلف وكيل عكسي أو مباشرة) — يحدد إضافة Secure للكعكة."""
+    try:
+        proto = (handler.headers.get("X-Forwarded-Proto") or "").split(",")[0].strip().lower()
+        if proto:
+            return proto == "https"
+        return bool(getattr(handler.request, "getpeercert", None) and handler.request.getpeercert())
+    except Exception:
+        return False
+
+
 def _transcribe(audio_bytes, mime_type):
     """
     1b [متطلب-مالك]: طلبات الويب تمر من الطابور الموحّد نفسه (telegram_bot.QUEUE) ليشملها in_flight
@@ -93,7 +104,11 @@ class WebRequestHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         if getattr(self, "_set_cookie", False) and Config.WEB_ACCESS_TOKEN:
-            self.send_header("Set-Cookie", f"{Config.WEB_COOKIE_NAME}={Config.WEB_ACCESS_TOKEN}; HttpOnly; SameSite=Strict; Path=/")
+            # Secure إلزامي على HTTPS؛ على HTTP محلي لا يُضاف وإلا رفض المتصفح الكعكة
+            secure = "; Secure" if _is_https(self) else ""
+            self.send_header("Set-Cookie",
+                             f"{Config.WEB_COOKIE_NAME}={Config.WEB_ACCESS_TOKEN}; "
+                             f"HttpOnly; SameSite=Strict; Path=/{secure}")
             self._set_cookie = False
         self.end_headers()
         self.wfile.write(json.dumps(payload, ensure_ascii=False).encode("utf-8"))

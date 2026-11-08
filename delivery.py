@@ -65,9 +65,12 @@ def _entry_head_html(title, session_name):
     return " · ".join(parts)
 
 
-def polished_message_html(polished_text, role_id, session_name=None, provider_tag=None):
+def polished_message_html(polished_text, role_id, session_name=None, provider_tag=None, title=None):
     role = prompts.get_role(role_id) or {}
-    head = f"<b>📝 النسخة المنظمة</b> · دور: {html.escape(role.get('name', role_id))}"
+    head = ""
+    if title:
+        head += f"🏷️ <b>{html.escape(title)}</b>\n"      # العنوان يُحسب بعد الخام — يظهر هنا
+    head += f"<b>📝 النسخة المنظمة</b> · دور: {html.escape(role.get('name', role_id))}"
     if session_name:
         head += f" · جلسة: «{html.escape(session_name)}»"
     if provider_tag:
@@ -193,25 +196,54 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
             result["session_written"] = sessions.append_entry(raw, model=model, elapsed=(info or {}).get("elapsed"),
                                                               key_name=key_name)
 
-    # 2b) عنوان الفويس (08 §3) — نصي؛ لا يؤخر الخام إلا بنداء lite واحد قصير؛ يُسجَّل append-only في الملفين
-    if archive_entry and Config.SMART_TITLE_ENABLED:
-        result["title"] = _voice_title(raw, title_fn)
-        if result["title"]:
-            archive.append_title(result["title"])
-            if session_name:
-                sessions.append_title(result["title"])
+    # 2b) عنوان الفويس (08 §3) — نداء lite واحد قصير، يُسجَّل append-only في الملفين.
+    #     ⚠️ يُؤجَّل إلى ما بعد إرسال الخام: كان النداء المتزامن هنا يؤخر ظهور أول رسالة
+    #     للمستخدم بمقدار زمن النداء (2–5 ثوانٍ مقاسة). الوظيفة محفوظة في _attach_title() أدناه.
+    _titles_on = bool(archive_entry and Config.SMART_TITLE_ENABLED)
+    title_first = _titles_on and getattr(Config, "SMART_TITLE_BEFORE_RAW", False)
+    title_deferred = _titles_on and not title_first
 
-    # 3) الخام
+    def _compute_title():
+        """يحسب العنوان ويسجّله في الأرشيف/الجلسة. يعيد العنوان أو None. لا يرفع استثناء أبداً."""
+        try:
+            t = _voice_title(raw, title_fn)
+        except Exception as e:      # التسمية تحسين لا شرط — لا تُسقط التسليم أبداً
+            print(f"⚠️ تعذر حساب عنوان الفويس: {type(e).__name__}: {e}")
+            return None
+        if not t:
+            return None
+        try:
+            archive.append_title(t)
+            if session_name:
+                sessions.append_title(t)
+        except Exception as e:
+            print(f"⚠️ تعذر تسجيل عنوان الفويس: {type(e).__name__}: {e}")
+        return t
+
+    if title_first:
+        result["title"] = _compute_title()   # وضع التوافق: العنوان قبل الخام (يكلّف نداء lite)
+
+    def _attach_title():
+        """يحسب العنوان بعد إرسال الخام ويُلحقه بالأرشيف/الجلسة والترويسة إن أمكن."""
+        if not title_deferred:
+            return
+        result["title"] = _compute_title()
+
+    # 3) الخام — يُرسل فوراً بلا انتظار أي نداء شبكي إضافي
     if mode in ("dual", "raw_only"):
-        result["raw_msg_id"] = _send_long(sender, raw_message_html(raw, footer_html, result["title"], session_name),
+        _raw_title = None if title_deferred else result["title"]
+        result["raw_msg_id"] = _send_long(sender, raw_message_html(raw, footer_html, _raw_title, session_name),
                                           raw, reply_to_id,
                                           filename_prefix="transcript", caption="📄 التفريغ الخام (طويل → ملف)",
-                                          head_html=_entry_head_html(result["title"], session_name))
+                                          head_html=_entry_head_html(_raw_title, session_name))
         if mode == "raw_only" and getattr(sender, "set_reaction", None):
             try:
                 sender.set_reaction(Config.REACTION_DONE)
             except Exception:
                 pass
+
+    # 3a) العنوان صار بعد إرسال الخام — نداء lite واحد هنا، لا يعطّل وصول النص للمستخدم.
+    _attach_title()
 
     # 3b) اقتراح اسم الجلسة (08 §2): أول فويس في جلسة باسمها المؤقت → اقتراح معلّق (قبول صامت عند الفويس التالي)
     if archive_entry and session_name:
@@ -286,7 +318,7 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
                                 if len(full_html) <= Config.TELEGRAM_MAX_MSG - 50 and getattr(sender, "edit_text", None):
                                     sender.edit_text(mid, full_html, "HTML")
                                 else:
-                                    s_single = polished_message_html(s_text, role_id, session_name, provider_tag="🦙 <b>[شلبي]</b>")
+                                    s_single = polished_message_html(s_text, role_id, session_name, provider_tag="🦙 <b>[شلبي]</b>", title=result["title"])
                                     _send_long(sender, s_single, s_text, mid or anchor, filename_prefix="shelby_polished", caption="🦙 نسخة شلبي المنظمة")
                             elif s_err and getattr(sender, "edit_text", None):
                                 err_html = merged_compare_message_html(polished, shelby_text=None, role_id=role_id, session_name=session_name, shelby_error=s_err)
@@ -299,7 +331,7 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
                     result["compare_thread"] = t
 
                 elif cmp_mode == "split":
-                    gemini_html = polished_message_html(polished, role_id, session_name, provider_tag="🤖 <b>[جيميني]</b>")
+                    gemini_html = polished_message_html(polished, role_id, session_name, provider_tag="🤖 <b>[جيميني]</b>", title=result["title"])
                     mid = _send_long(sender, gemini_html, polished, anchor, filename_prefix="gemini_polished",
                                      caption="🤖 نسخة جيميني المنظمة (طويلة → ملف)",
                                      head_html=_entry_head_html(result["title"], session_name))
@@ -314,7 +346,7 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
                             s_kwargs = {"context_summary": l2} if _accepts_context_summary(s_fn) else {}
                             s_text, s_err = s_fn(raw, role_id, gl, **s_kwargs)
                             if s_text:
-                                s_html = polished_message_html(s_text, role_id, session_name, provider_tag="🦙 <b>[شلبي]</b>")
+                                s_html = polished_message_html(s_text, role_id, session_name, provider_tag="🦙 <b>[شلبي]</b>", title=result["title"])
                                 _send_long(sender, s_html, s_text, mid or anchor, filename_prefix="shelby_polished", caption="🦙 نسخة شلبي المنظمة")
                             elif s_err:
                                 sender.send_text(f"⚠️ تعذر تشغيل شلبي محلياً ({html.escape(str(s_err))})", mid or anchor, "HTML")
@@ -325,7 +357,7 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
                     t.start()
                     result["compare_thread"] = t
             else:
-                result["polished_msg_id"] = _send_long(sender, polished_message_html(polished, role_id, session_name),
+                result["polished_msg_id"] = _send_long(sender, polished_message_html(polished, role_id, session_name, title=result["title"]),
                                                        polished, anchor, filename_prefix="polished",
                                                        caption="📝 النسخة المنظمة (طويلة → ملف)",
                                                        head_html=_entry_head_html(result["title"], session_name))

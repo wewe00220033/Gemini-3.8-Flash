@@ -111,7 +111,7 @@ class Supervisor:
         self.generation += 1
         # نبض أولي: العامل الجديد يحتاج وقتاً للإقلاع قبل أول لمسة — لا نحكم عليه متجمداً فوراً
         try:
-            with open(self.beat_file, "w") as f:
+            with open(self.beat_file, "w", encoding="utf-8") as f:
                 f.write(str(time.time()))
         except OSError:
             pass
@@ -238,7 +238,7 @@ def touch_beat(path):
     """يلمسه العامل كل WORKER_BEAT_INTERVAL ثانية من خيط مستقل (لا شبكة)."""
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             f.write(str(time.time()))
         return True
     except OSError:

@@ -127,6 +127,81 @@ def _chunk_text(text, limit):
     return chunks
 
 
+_TAG_RE = re.compile(r"</?([a-zA-Z][a-zA-Z0-9]*)(?:\s+[^<>]*)?>")
+# الوسوم التي لا تحتاج إغلاقاً — لا تُفتح في نهاية القطعة تلقائياً
+_VOID_TAGS = {"br", "hr", "img", "code"}
+
+
+def _html_chunks(text, limit):
+    """
+    يقسم HTML جاهزاً لقطع ≤ limit **دون قطع أي وسم في منتصفه** ويوازن الوسوم المفتوحة.
+
+    المشكلة التي يحلها: `_chunk_text` يقطع عند حد الطول، فقد يقع الحد بين '<' و'>' فيتفتّت
+    الوسم، أو تبقى '<pre>' مفتوحة في قطعة و'</pre>' في أخرى — فيردّ تليجرام 400 ويضيع
+    التنسيق (كتلة النسخ بلمسة واحدة). هنا:
+      1. نُخزّن كل وسم مؤقتاً فلا يمكن أن يقع القطع داخله.
+      2. نُغلق الوسوم المفتوحة في نهاية كل قطعة ونعيد فتحها في بداية التالية.
+      3. المحتوى النصي يبقى حرفياً كما هو (لا lstrip) حفاظاً على أمانة النص عند النسخ.
+    """
+    if len(text) <= limit:
+        return [text]
+
+    tags = []
+
+    def _stash(m):
+        tags.append(m.group(0))
+        return "\x00%d\x00" % (len(tags) - 1)
+
+    safe = _TAG_RE.sub(_stash, text)
+
+    def _split(budget):
+        raw, rest = [], safe
+        while len(rest) > budget:
+            cut = rest.rfind("\n", 0, budget)
+            if cut < budget // 2:
+                cut = rest.rfind(" ", 0, budget)
+            if cut < budget // 2:
+                cut = budget
+            raw.append(rest[:cut])
+            rest = rest[cut:]
+        if rest:
+            raw.append(rest)
+        return raw
+
+    def _build(raw_chunks):
+        out, carry = [], []
+        for raw in raw_chunks:
+            body = re.sub(r"\x00(\d+)\x00", lambda m: tags[int(m.group(1))], raw)
+            stack = list(carry)
+            for m in _TAG_RE.finditer(body):
+                closing, name = m.group(0).startswith("</"), m.group(1).lower()
+                if name in _VOID_TAGS:
+                    continue
+                if closing:
+                    if name in stack:
+                        while stack and stack.pop() != name:
+                            pass
+                else:
+                    stack.append(name)
+            out.append("".join("<%s>" % n for n in carry) + body +
+                       "".join("</%s>" % n for n in reversed(stack)))
+            carry = stack
+        return out
+
+    budget = limit
+    result = _build(_split(budget))
+    # إعادة الفتح/الإغلاق تضيف طولاً — نقلّص الميزانية بقدر التجاوز وأعد المحاولة
+    for _ in range(5):
+        over = max((len(c) for c in result), default=0)
+        if over <= limit:
+            break
+        budget -= (over - limit) + 8
+        if budget < limit // 2:
+            break
+        result = _build(_split(budget))
+    return result
+
+
 def _tg_post(token, method, payload, timeout=None):
     return _http_post(_api(token, method), json=payload, timeout=_tg_timeout(timeout))
 
@@ -200,10 +275,14 @@ def send_chat_action(token, chat_id, action="typing"):
 
 
 def send_html_get_id(token, chat_id, text, reply_to_id=None):
-    """يرسل HTML (مقسماً لو طويل) ويرجع message_id لأول قطعة (لربط المنظم بالخام) أو None. fallback نص خام."""
+    """يرسل HTML (مقسماً لو طويل) ويرجع message_id لأول قطعة (لربط المنظم بالخام) أو None. fallback نص خام.
+
+    التقسيم عبر `_html_chunks` لا `_chunk_text`: الأخير يقطع الوسوم في منتصفها فتصل قطع
+    بـ`<pre>` مفتوح أو مغلق بلا فتح، فيردّ تليجرام 400 ويُفقد التنسيق (كتلة النسخ بلمسة).
+    """
     first_id = None
     limit = Config.TELEGRAM_MAX_MSG - 50
-    for i, chunk in enumerate(_chunk_text(text, limit)):
+    for i, chunk in enumerate(_html_chunks(text, limit)):
         payload = {"chat_id": chat_id, "text": chunk, "parse_mode": "HTML"}
         if reply_to_id and i == 0:
             payload["reply_to_message_id"] = reply_to_id

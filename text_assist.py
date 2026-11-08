@@ -170,7 +170,13 @@ def _call_local_provider(system_text, raw_text):
         if res.returncode == 0 and res.stdout.strip():
             logger.info("✨ [local] polish في %.1f ث", elapsed)
             return res.stdout.strip(), None
-        raw_err = res.stderr.strip().splitlines()[-1][:120] if res.stderr else f"خروج غير صفري ({res.returncode})"
+        if res.stderr and res.stderr.strip():
+            raw_err = res.stderr.strip().splitlines()[-1][:120]
+        elif res.returncode == 0:
+            # خرج بنجاح لكن مخرجاته فارغة — ليست "خروج غير صفري (0)" بل عقد CLI مخروق
+            raw_err = "المزود خرج بنجاح لكن stdout فارغ (لا نص منظم)"
+        else:
+            raw_err = f"خروج غير صفري ({res.returncode})"
         clean_err = re.sub(r'([A-Za-z]:[\\/][^\s:"\'\)]+|/(?:home|var|usr|etc|root|data)[^\s:"\'\)]+)', '<PATH>', raw_err)
         clean_err = logkit.redact(clean_err)
         return None, f"فشل المزود المحلي: {clean_err}"

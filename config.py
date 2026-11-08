@@ -199,6 +199,9 @@ class Config:
     SESSION_NAME_MAX = 60                  # 08 §3: تنقية الاسم + حد 60 حرفاً (الملف يبقى session_<uuid8>.md)
     SESSION_EXPORT_ZIP_MB = 50             # 08 §2: /export يرسل .zip لو الملف > 50MB
     SMART_TITLE_ENABLED = os.environ.get("SMART_TITLE_ENABLED", "1") not in ("0", "false", "False", "")
+    # 0 (افتراضي) = أرسل الخام فوراً ثم احسب العنوان (أسرع ظهوراً 2–5 ث) — الترويسة 🏷️ تظهر على المنظم والأرشيف.
+    # 1 = احسب العنوان قبل الخام (الترويسة على رسالة الخام أيضاً) — يكلّف زمن نداء lite واحد.
+    SMART_TITLE_BEFORE_RAW = os.environ.get("SMART_TITLE_BEFORE_RAW", "0") not in ("0", "false", "False", "")
     SMART_TITLE_WORDS = 100                # 08 §2: الاقتراح من أول 100 كلمة عبر flash-lite (نصياً)
     # السياق (10 §2): L1 = آخر N فويسات خام من الجلسة النشطة، مقتطعة إلى CONTEXT_MAX_CHARS — داخل طبقة A فقط
     CONTEXT_ENABLED = os.environ.get("CONTEXT_ENABLED", "1") not in ("0", "false", "False", "")

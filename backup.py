@@ -282,19 +282,53 @@ def save_local(zip_bytes, when=None):
     """
     d = backups_dir()
     os.makedirs(d, exist_ok=True)
+    _purge_stale_tmp(d)                    # بقايا نفاد مساحة سابق — تُحذف قبل أي كتابة جديدة
     stamp = time.strftime("%Y-%m-%d_%H%M", time.localtime(when or time.time()))
     parts = split_bytes(zip_bytes)
     paths = []
-    for i, chunk in enumerate(parts, 1):
-        name = f"backup_{stamp}.zip" if len(parts) == 1 else f"backup_{stamp}_part{i}.zip"
-        p = os.path.join(d, name)
-        tmp = p + ".tmp"
-        with open(tmp, "wb") as f:
-            f.write(chunk)
-        os.replace(tmp, p)
-        paths.append(p)
+    try:
+        for i, chunk in enumerate(parts, 1):
+            name = f"backup_{stamp}.zip" if len(parts) == 1 else f"backup_{stamp}_part{i}.zip"
+            p = os.path.join(d, name)
+            tmp = p + ".tmp"
+            with open(tmp, "wb") as f:
+                f.write(chunk)
+            os.replace(tmp, p)
+            paths.append(p)
+    except BaseException:
+        # نفاد مساحة/انقطاع: لا نترك ملفاً نصفياً يأكل القرص ويفشل كل نسخة تالية
+        for q in paths:
+            _unlink_quiet(q + ".tmp")
+        _unlink_quiet(tmp if "tmp" in dir() else "")
+        raise
     removed = prune_local()
     return paths, removed
+
+
+def _unlink_quiet(path):
+    if not path:
+        return
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+    except OSError:
+        pass
+
+
+def _purge_stale_tmp(d, max_age_s=3600):
+    """يحذف *.zip.tmp الأقدم من ساعة (بقايا انهيار/نفاد مساحة) — لا يمس ملفات النسخ السليمة."""
+    try:
+        now = time.time()
+        for fn in os.listdir(d):
+            if fn.endswith(".zip.tmp"):
+                p = os.path.join(d, fn)
+                try:
+                    if now - os.path.getmtime(p) >= max_age_s:
+                        os.remove(p)
+                except OSError:
+                    pass
+    except OSError:
+        pass
 
 
 # ---- جدولة أسبوعية (مرة في اليوم المحدد عند الساعة المحددة، بلا تكرار داخل نفس الأسبوع) ----

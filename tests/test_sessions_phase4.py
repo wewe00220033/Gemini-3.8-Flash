@@ -414,7 +414,8 @@ def test_deliver_writes_session_and_title_and_suggests_name(S, fresh_env):
     e = S.entries(s["id"])[0]
     assert e["title"] == "إعداد Nginx" and e["polished"] == "منظم" and e["raw"] == LONG_RAW
     assert archive.last()["title"] == "إعداد Nginx" and "جلسة: «" in archive.last()["meta"]
-    assert "🏷️ <b>إعداد Nginx</b>" in msgs[0][0] and f"📂 {s['name']}" in msgs[0][0]
+    assert f"📂 {s['name']}" in msgs[0][0]          # ترويسة الجلسة على الخام
+    assert "🏷️ <b>إعداد Nginx</b>" in msgs[1][0]     # العنوان يُحسب بعد الخام ويظهر على المنظم
     S.end()                                                                 # بلا جلسة → ALL.md فقط (08 §7.1)
     res2 = delivery.deliver("نص آخر طويل بما يكفي ليحمل عنواناً مفيداً هنا", M1, "A", {}, sender,
                             polish_fn=lambda *a: (None, "x"), title_fn=lambda raw: None)
