@@ -14,7 +14,6 @@ local_provider_template.py — قالب استرشادي لمزود التنظي
 """
 
 import sys
-import json
 
 # فرض ترميز UTF-8 لدعم العامية المصرية والرموز التعبيرية بدون مشاكل على أنظمة ويندوز
 if sys.platform == "win32":
