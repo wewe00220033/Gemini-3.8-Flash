@@ -185,7 +185,7 @@ class Config:
     if not LOCAL_POLISH_CMD and "PYTEST_CURRENT_TEST" not in os.environ and "pytest" not in sys.modules:
         if os.path.isfile(_DEFAULT_LOCAL_SCRIPT):
             LOCAL_POLISH_CMD = f'"{sys.executable}" "{_DEFAULT_LOCAL_SCRIPT}"'
-    LOCAL_POLISH_TIMEOUT = float(os.environ.get("LOCAL_POLISH_TIMEOUT", "8.0"))
+    LOCAL_POLISH_TIMEOUT = float(os.environ.get("LOCAL_POLISH_TIMEOUT", "60.0"))
     COMPARE_MODE = os.environ.get("COMPARE_MODE", "merged").strip().lower()   # merged | split | off
     POLISH_FILE_THRESHOLD = 12000          # 07 §4: نص > ~3 رسائل → يُرسل كملف .md + معاينة
     PANEL_PAGE_SIZE = 5

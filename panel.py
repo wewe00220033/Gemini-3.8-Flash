@@ -35,6 +35,7 @@ SET_WHITELIST = {
     "backup_weekly_day":        ("choice", ("mon", "tue", "wed", "thu", "fri", "sat", "sun"), "يوم النسخة الأسبوعية"),
     "notify_on_start":          ("bool", None, "إشعار عند الإقلاع"),
     "progress_after_seconds":   ("int", (0, 120), "رسالة «جارٍ» بعد (ث)"),
+    "local_polish_timeout":     ("int", (1, 300), "مهلة المنظم المحلي (ث)"),
 }
 # ممنوعة نهائياً (11 §4)
 SET_FORBIDDEN = ("keys", "token", "telegram_bot_token", "web_access_token", "data_dir", "models", "transcribe_workers",
@@ -42,6 +43,7 @@ SET_FORBIDDEN = ("keys", "token", "telegram_bot_token", "web_access_token", "dat
 # مفاتيح /set التي تُطبَّق كتجاوز فوري على Config (الطبقتان: Config افتراضي، settings.json تجاوز)
 SET_CONFIG_ATTR = {
     "compare_mode": "COMPARE_MODE",
+    "local_polish_timeout": "LOCAL_POLISH_TIMEOUT",
     "log_retention_days": "LOG_RETENTION_DAYS", "panel_page_size": "PANEL_PAGE_SIZE",
     "retry_budget_seconds": "RETRY_BUDGET_SECONDS", "model_503_key_hops": "MODEL_503_KEY_HOPS",
     "backup_weekly_day": "BACKUP_WEEKLY_DAY", "notify_on_start": "NOTIFY_ON_START",

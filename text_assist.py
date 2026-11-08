@@ -149,7 +149,7 @@ def _call_local_provider(system_text, raw_text):
     cmd = getattr(Config, "LOCAL_POLISH_CMD", "") or ""
     if not cmd:
         return None, "لا يوجد مزود محلي مهيأ"
-    timeout = getattr(Config, "LOCAL_POLISH_TIMEOUT", 8.0) or 8.0
+    timeout = getattr(Config, "LOCAL_POLISH_TIMEOUT", 60.0) or 60.0
     payload = f"{system_text}\n\n===USER_INPUT===\n{raw_text}"
     t0 = time.time()
     try:
