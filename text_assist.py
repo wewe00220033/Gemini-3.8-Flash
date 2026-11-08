@@ -31,6 +31,7 @@ import logkit
 logger = logging.getLogger("text_assist")
 
 _lock = threading.RLock()
+_shelby_cli_lock = threading.Lock()
 _state = {
     "thinking_ok": None,
     "calls": 0,
@@ -40,6 +41,11 @@ _state = {
     "local_calls": 0,
     "local_ok": 0,
     "local_fail": 0,
+    "local_last_error": None,
+    "synth_calls": 0,
+    "synth_ok": 0,
+    "synth_fail": 0,
+    "synth_last_error": None,
 }
 _INVISIBLE_RE = re.compile(r"[\u200b-\u200f\ufeff\u202a-\u202e\s]+")
 
@@ -157,15 +163,16 @@ def _call_local_provider(system_text, raw_text):
             cmd_args = cmd if os.name == "nt" else shlex.split(cmd)
         else:
             cmd_args = cmd
-        res = subprocess.run(
-            cmd_args,
-            input=payload,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout,
-        )
+        with _shelby_cli_lock:
+            res = subprocess.run(
+                cmd_args,
+                input=payload,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout,
+            )
         elapsed = time.time() - t0
         if res.returncode == 0 and res.stdout.strip():
             logger.info("✨ [local] polish في %.1f ث", elapsed)
@@ -278,6 +285,51 @@ def polish(raw_text, role_id=None, glossary=None, context_summary=None):
     if glossary is not None:
         text, _n = glossary.apply(text, target="polished")
     return text.strip(), None
+
+
+def synthesize(raw_text, gemini_draft, shelby_draft, role_id=None, glossary=None, context_summary=None):
+    """
+    يستدعي الوكيل الثالث (السبّاك النهائي Master Synthesizer) لسبك مسودتي جيميني وشلبي
+    في ناتج ذهبي موحد فائق القوة والدقة.
+    يرجع (golden_text, None) عند النجاح، أو (None, reason) عند الفشل.
+    القاموس يُطبَّق على الناتج النهائي.
+    """
+    if is_effective_empty(raw_text) or (is_effective_empty(gemini_draft) and is_effective_empty(shelby_draft)):
+        return None, "نص فارغ"
+    if is_effective_empty(gemini_draft):
+        return (shelby_draft or "").strip(), None
+    if is_effective_empty(shelby_draft):
+        return (gemini_draft or "").strip(), None
+
+    role_id = role_id or Config.DEFAULT_ROLE
+    system_text, user_content = prompts.compose_synthesis_prompt(
+        raw_text=raw_text,
+        gemini_draft=gemini_draft,
+        shelby_draft=shelby_draft,
+        role_id=role_id,
+    )
+    if context_summary:
+        system_text += (
+            "\n\nملخص الجلسة حتى الآن (للفهم فقط — لا تضفه ولا تعِد كتابته، اسبك النص الجديد فقط):\n"
+            + str(context_summary)[:Config.SESSION_SUMMARY_MAX_CHARS]
+        )
+
+    with _lock:
+        _state["synth_calls"] = _state.get("synth_calls", 0) + 1
+
+    text, reason = generate(system_text, user_content)
+    if text:
+        with _lock:
+            _state["synth_ok"] = _state.get("synth_ok", 0) + 1
+        if glossary is not None:
+            text, _n = glossary.apply(text, target="polished")
+        return text.strip(), None
+
+    reason = logkit.redact(reason)
+    with _lock:
+        _state["synth_fail"] = _state.get("synth_fail", 0) + 1
+        _state["synth_last_error"] = str(reason or "")
+    return None, reason
 
 
 def stats():

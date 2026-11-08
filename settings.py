@@ -15,7 +15,7 @@ import store
 
 DELIVERY_MODES = ("dual", "raw_only", "polished_only")
 HEADER_TARGETS = ("both", "raw_only", "polished_only", "off")
-COMPARE_MODES = ("merged", "split", "off")
+COMPARE_MODES = ("synthesizer", "merged", "split", "off")
 _MODE_ALIASES = {"dual": "dual", "both": "dual", "raw": "raw_only", "raw_only": "raw_only",
                  "polished": "polished_only", "polished_only": "polished_only", "خام": "raw_only",
                  "منظم": "polished_only", "الاتنين": "dual", "الاثنين": "dual"}
@@ -40,7 +40,7 @@ def _defaults():
         "delivery_mode": Config.DELIVERY_MODE_DEFAULT if Config.DELIVERY_MODE_DEFAULT in DELIVERY_MODES else "dual",
         "role": Config.DEFAULT_ROLE,
         "header_target": Config.TRANSCRIPT_HEADER_TARGET if Config.TRANSCRIPT_HEADER_ENABLED else "off",
-        "compare_mode": getattr(Config, "COMPARE_MODE", "merged") if getattr(Config, "COMPARE_MODE", "merged") in COMPARE_MODES else "merged",
+        "compare_mode": getattr(Config, "COMPARE_MODE", "synthesizer") if getattr(Config, "COMPARE_MODE", "synthesizer") in COMPARE_MODES else "synthesizer",
     }
 
 
@@ -63,7 +63,7 @@ def _load():
     if merged["header_target"] not in HEADER_TARGETS:
         merged["header_target"] = "both"
     if merged["compare_mode"] not in COMPARE_MODES:
-        merged["compare_mode"] = "merged"
+        merged["compare_mode"] = "synthesizer"
     _cache, _cache_path = merged, Config.SETTINGS_FILE
     return _cache
 

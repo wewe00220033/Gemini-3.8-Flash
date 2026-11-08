@@ -287,3 +287,184 @@ def test_compare_uses_gemini_not_local_for_main_message(monkeypatch):
     assert "*** PURE GEMINI OUTPUT ***" in edited_msg
     assert "🦙 <b>[شلبي]</b>:" in edited_msg
     assert "*** LOCAL/SHELBY OUTPUT ***" in edited_msg
+
+
+def test_settings_and_panel_synthesizer_mode():
+    old = settings.compare_mode()
+    try:
+        assert settings.set_compare_mode("synthesizer") == "synthesizer"
+        assert settings.compare_mode() == "synthesizer"
+
+        ok, val = panel.validate_setting("compare_mode", "synthesizer")
+        assert ok and val == "synthesizer"
+
+        old_cfg, new_cfg = panel.apply_setting("compare_mode", "synthesizer")
+        assert new_cfg == "synthesizer" and Config.COMPARE_MODE == "synthesizer"
+        assert panel.current_setting("compare_mode") == "synthesizer"
+
+        text, kb = panel.setting_view("compare_mode")
+        buttons = [b["text"] for row in kb["inline_keyboard"] for b in row]
+        assert any("synthesizer" in b for b in buttons)
+    finally:
+        settings.set_compare_mode(old)
+
+
+def test_text_assist_synthesize_success(monkeypatch):
+    import importlib
+    real_ta = importlib.reload(text_assist)
+    monkeypatch.setattr(real_ta, "generate", lambda s, u, timeout=None: ("النسخة الذهبية المسبوكة", None))
+
+    class MockGlossary:
+        def apply(self, text, target):
+            return text + " [مُعدل بالقاموس]", 1
+
+    text, err = real_ta.synthesize(
+        raw_text="نص خام صوتي",
+        gemini_draft="مسودة جيميني",
+        shelby_draft="مسودة شلبي",
+        glossary=MockGlossary(),
+    )
+    assert err is None
+    assert "النسخة الذهبية المسبوكة [مُعدل بالقاموس]" in text
+    assert real_ta.stats().get("synth_ok", 0) >= 1
+
+
+def test_deliver_synthesizer_happy_path(monkeypatch):
+    monkeypatch.setattr(Config, "LOCAL_POLISH_CMD", "dummy_local")
+    monkeypatch.setattr(delivery.Config, "LOCAL_POLISH_CMD", "dummy_local")
+    old_mode = settings.compare_mode()
+    settings.set_compare_mode("synthesizer")
+    try:
+        import text_assist
+        monkeypatch.setattr(text_assist, "synthesize", lambda raw, g, s, **kw: ("*** ناتج السبك الذهبي 100% ***", None))
+
+        fs = FakeSender()
+        res = delivery.deliver(
+            raw_text="فويس فحص السبك الثلاثي",
+            model="gemini-3.6-flash",
+            key_name="TestKey",
+            info={},
+            sender=fs.as_sender(),
+            reply_to_id=10,
+            archive_entry=False,
+            polish_fn=lambda r, ro, gl, **kw: ("مسودة جيميني الفورية", None),
+            local_polish_fn=lambda r, ro, gl, **kw: ("مسودة شلبي المحلية", None),
+        )
+        t = res.get("compare_thread")
+        assert t is not None
+        t.join(timeout=3)
+
+        # 1. الرسالة الأولى: تعرض مسودة جيميني مع شريط الانتظار
+        assert len(fs.sent_texts) >= 2
+        init_polished_msg = fs.sent_texts[1][1]
+        assert "مسودة جيميني الفورية" in init_polished_msg
+        assert "جاري توليد النسخة الذهبية" in init_polished_msg
+
+        # 2. التعديل في مكانه: تم تعديل الرسالة بالنسخة الذهبية المسبوكة وتذييل التوقيت
+        assert len(fs.edited_texts) == 1
+        edited_msg = fs.edited_texts[0][1]
+        assert "🏆 النسخة الذهبية المسبوكة" in edited_msg
+        assert "*** ناتج السبك الذهبي 100% ***" in edited_msg
+        assert "فلاش:" in edited_msg
+        assert "شلبي:" in edited_msg
+        assert "السبك:" in edited_msg
+    finally:
+        settings.set_compare_mode(old_mode)
+
+
+def test_deliver_synthesizer_timeout_fallback(monkeypatch):
+    monkeypatch.setattr(Config, "LOCAL_POLISH_CMD", "dummy_local")
+    monkeypatch.setattr(delivery.Config, "LOCAL_POLISH_CMD", "dummy_local")
+    old_mode = settings.compare_mode()
+    settings.set_compare_mode("synthesizer")
+    try:
+        fs = FakeSender()
+        res = delivery.deliver(
+            raw_text="فويس فحص مهلة شلبي",
+            model="gemini-3.6-flash",
+            key_name="TestKey",
+            info={},
+            sender=fs.as_sender(),
+            reply_to_id=20,
+            archive_entry=False,
+            polish_fn=lambda r, ro, gl, **kw: ("مسودة جيميني المعتمدة", None),
+            local_polish_fn=lambda r, ro, gl, **kw: (None, "تجاوز مهلة المزود المحلي (180.0ث)"),
+        )
+        t = res.get("compare_thread")
+        assert t is not None
+        t.join(timeout=3)
+
+        assert len(fs.edited_texts) == 1
+        edited_msg = fs.edited_texts[0][1]
+        assert "مسودة جيميني المعتمدة" in edited_msg
+        assert "تجاوز شلبي المهلة المحددة 180ث" in edited_msg
+    finally:
+        settings.set_compare_mode(old_mode)
+
+
+def test_deliver_synthesizer_synthesis_failure_fallback(monkeypatch):
+    monkeypatch.setattr(Config, "LOCAL_POLISH_CMD", "dummy_local")
+    monkeypatch.setattr(delivery.Config, "LOCAL_POLISH_CMD", "dummy_local")
+    old_mode = settings.compare_mode()
+    settings.set_compare_mode("synthesizer")
+    try:
+        import text_assist
+        monkeypatch.setattr(text_assist, "synthesize", lambda raw, g, s, **kw: (None, "خطأ 503 في السبك"))
+
+        fs = FakeSender()
+        res = delivery.deliver(
+            raw_text="فويس فحص فشل السبك والتراجع لـ merged",
+            model="gemini-3.6-flash",
+            key_name="TestKey",
+            info={},
+            sender=fs.as_sender(),
+            reply_to_id=30,
+            archive_entry=False,
+            polish_fn=lambda r, ro, gl, **kw: ("مسودة جيميني المتاحة", None),
+            local_polish_fn=lambda r, ro, gl, **kw: ("مسودة شلبي المتاحة", None),
+        )
+        t = res.get("compare_thread")
+        assert t is not None
+        t.join(timeout=3)
+
+        # في حالة فشل السبّاك، نتراجع لعرض الاثنين بنمط merged لحماية الناتج
+        assert len(fs.edited_texts) == 1
+        edited_msg = fs.edited_texts[0][1]
+        assert "مسودة جيميني المتاحة" in edited_msg
+        assert "مسودة شلبي المتاحة" in edited_msg
+    finally:
+        settings.set_compare_mode(old_mode)
+
+
+def test_deliver_synthesizer_oversized_fallback(monkeypatch):
+    monkeypatch.setattr(Config, "LOCAL_POLISH_CMD", "dummy_local")
+    monkeypatch.setattr(delivery.Config, "LOCAL_POLISH_CMD", "dummy_local")
+    old_mode = settings.compare_mode()
+    settings.set_compare_mode("synthesizer")
+    try:
+        import text_assist
+        huge_golden = "ذهبي " * 1200  # > 4000 حرف
+        monkeypatch.setattr(text_assist, "synthesize", lambda raw, g, s, **kw: (huge_golden, None))
+
+        fs = FakeSender()
+        res = delivery.deliver(
+            raw_text="فويس فحص الحجم الكبير للسبك",
+            model="gemini-3.6-flash",
+            key_name="TestKey",
+            info={},
+            sender=fs.as_sender(),
+            reply_to_id=40,
+            archive_entry=False,
+            polish_fn=lambda r, ro, gl, **kw: ("مسودة جيميني", None),
+            local_polish_fn=lambda r, ro, gl, **kw: ("مسودة شلبي", None),
+        )
+        t = res.get("compare_thread")
+        assert t is not None
+        t.join(timeout=3)
+
+        # ناتج ضخم يتجاوز حد تليجرام -> لم يعدل بل أرسل كرسالة/مستند مستقل
+        assert len(fs.edited_texts) == 0
+        assert len(fs.sent_texts) >= 3 or len(fs.docs) >= 1
+    finally:
+        settings.set_compare_mode(old_mode)
+

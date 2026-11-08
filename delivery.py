@@ -15,6 +15,7 @@
 
 import html
 import threading
+import time
 
 from config import Config
 import archive
@@ -107,6 +108,73 @@ def merged_compare_message_html(gemini_text, shelby_text=None, role_id=None, ses
         blocks.append(f"⚠️ <i>تعذر تشغيل شلبي محلياً ({html.escape(str(shelby_error))})</i>")
     else:
         blocks.append("⏳ <i>جاري تحضير شلبي محلياً...</i>")
+
+    return "\n".join(blocks)
+
+
+def synthesizer_interim_message_html(gemini_text, role_id=None, session_name=None, title=None, shelby_status="waiting", error_detail=None):
+    """
+    الرسالة الحية الأولى أثناء تشغيل السبك:
+    تعرض مسودة جيميني الفورية كاملة داخل <pre>، مع شريط الحالة الحي بالأسفل خارج <pre>.
+    """
+    role = prompts.get_role(role_id) or {}
+    head_parts = []
+    if title:
+        head_parts.append(f"🏷️ <b>{html.escape(title)}</b>")
+    head_txt = f"<b>📝 النسخة المنظمة</b> · دور: {html.escape(role.get('name', role_id))}"
+    if session_name:
+        head_txt += f" · جلسة: «{html.escape(session_name)}»"
+    head_parts.append(head_txt)
+
+    body = gemini_text
+    if settings.header_for("polished"):
+        body = archive.banner_text() + "\n" + gemini_text
+
+    blocks = [
+        "\n".join(head_parts),
+        f"<pre>{html.escape(body)}</pre>",
+    ]
+
+    if shelby_status == "waiting":
+        blocks.append("⏳ <i>جاري توليد النسخة الذهبية المسبوكة مع شلبي (مهلة 180ث)...</i>")
+    elif shelby_status == "timeout":
+        blocks.append("⚠️ <i>تم اعتماد مسودة جيميني (تجاوز شلبي المهلة المحددة 180ث)</i>")
+    elif shelby_status == "error":
+        err_msg = html.escape(str(error_detail or "خطأ غير معروف"))
+        blocks.append(f"⚠️ <i>تم اعتماد مسودة جيميني (تعذر شلبي: {err_msg})</i>")
+
+    return "\n".join(blocks)
+
+
+def synthesizer_final_message_html(golden_text, role_id=None, session_name=None, title=None, telemetry=None):
+    """
+    الرسالة الذهبية النهائية المسبوكة بعد نجاح الوكيل الثالث:
+    تعرض النسخة الذهبية داخل <pre>، وتذييل التوقيت الدقيق خارج <pre>.
+    """
+    role = prompts.get_role(role_id) or {}
+    head_parts = []
+    if title:
+        head_parts.append(f"🏷️ <b>{html.escape(title)}</b>")
+    head_txt = f"<b>🏆 النسخة الذهبية المسبوكة</b> · دور: {html.escape(role.get('name', role_id))}"
+    if session_name:
+        head_txt += f" · جلسة: «{html.escape(session_name)}»"
+    head_parts.append(head_txt)
+
+    body = golden_text
+    if settings.header_for("polished"):
+        body = archive.banner_text() + "\n" + golden_text
+
+    blocks = [
+        "\n".join(head_parts),
+        f"<pre>{html.escape(body)}</pre>",
+    ]
+
+    if telemetry and isinstance(telemetry, dict):
+        t_gem = f"{telemetry.get('gemini', 0):.1f}ث"
+        t_shl = f"{telemetry.get('shelby', 0):.1f}ث"
+        t_syn = f"{telemetry.get('synth', 0):.1f}ث"
+        t_tot = f"{telemetry.get('total', 0):.1f}ث"
+        blocks.append(f"⚡ فلاش: {t_gem} | 🤖 شلبي: {t_shl} | 🏆 السبك: {t_syn} | ⏱️ إجمالي: {t_tot}")
 
     return "\n".join(blocks)
 
@@ -270,13 +338,14 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
 
         cmp_mode = settings.compare_mode()
         has_local = bool(getattr(Config, "LOCAL_POLISH_CMD", "") or local_polish_fn)
-        is_compare = (cmp_mode in ("merged", "split")) and has_local
+        is_compare = (cmp_mode in ("synthesizer", "merged", "split")) and has_local
 
         if polish_fn is None:
             import text_assist
             polish_fn = text_assist.polish_gemini if is_compare else text_assist.polish
         # L2 (10 §2): ملخص الجلسة التراكمي → طبقة B فقط (لا يُمرَّر لطبقة A إطلاقاً)
         l2 = sessions.summary() if session_name else None
+        t0_gemini = time.time()
         try:
             if l2 and _accepts_context_summary(polish_fn):
                 polished, reason = polish_fn(raw, role_id, gl, context_summary=l2)
@@ -284,6 +353,7 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
                 polished, reason = polish_fn(raw, role_id, gl)
         except Exception as e:  # pragma: no cover - دفاع: التنظيم لا يكسر الخام أبداً
             polished, reason = None, f"{type(e).__name__}: {e}"
+        gemini_elapsed = time.time() - t0_gemini
         anchor = result["raw_msg_id"] or reply_to_id
         if polished:
             result["polished"] = polished
@@ -298,7 +368,93 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
                     sessions.append_polished(polished)
 
             if is_compare:
-                if cmp_mode == "merged":
+                if cmp_mode == "synthesizer":
+                    init_html = synthesizer_interim_message_html(
+                        polished, role_id=role_id, session_name=session_name,
+                        title=result["title"], shelby_status="waiting"
+                    )
+                    mid = _send_long(sender, init_html, polished, anchor, filename_prefix="polished",
+                                     caption="📝 النسخة المنظمة (طويلة → ملف)",
+                                     head_html=_entry_head_html(result["title"], session_name))
+                    result["polished_msg_id"] = mid
+
+                    def _bg_synthesizer():
+                        try:
+                            t0_shelby = time.time()
+                            s_fn = local_polish_fn
+                            if s_fn is None:
+                                import text_assist
+                                s_fn = text_assist.polish_local
+                            s_kwargs = {"context_summary": l2} if _accepts_context_summary(s_fn) else {}
+                            s_text, s_err = s_fn(raw, role_id, gl, **s_kwargs)
+                            shelby_elapsed = time.time() - t0_shelby
+
+                            if s_text:
+                                t0_synth = time.time()
+                                import text_assist
+                                synth_kwargs = {"context_summary": l2} if _accepts_context_summary(text_assist.synthesize) else {}
+                                golden_text, synth_err = text_assist.synthesize(
+                                    raw, polished, s_text, role_id=role_id, glossary=gl, **synth_kwargs
+                                )
+                                synth_elapsed = time.time() - t0_synth
+
+                                if golden_text:
+                                    if archive_entry:
+                                        try:
+                                            archive.append_polished(f"[نسخة ذهبية مسبوكة]\n{golden_text}")
+                                            if session_name:
+                                                sessions.append_polished(golden_text)
+                                        except Exception as e:
+                                            print(f"⚠️ Synth archive update: {e}")
+
+                                    telemetry = {
+                                        "gemini": gemini_elapsed,
+                                        "shelby": shelby_elapsed,
+                                        "synth": synth_elapsed,
+                                        "total": gemini_elapsed + shelby_elapsed + synth_elapsed,
+                                    }
+                                    full_html = synthesizer_final_message_html(
+                                        golden_text, role_id=role_id, session_name=session_name,
+                                        title=result["title"], telemetry=telemetry
+                                    )
+                                    edited = False
+                                    if len(full_html) <= Config.TELEGRAM_MAX_MSG - 50 and getattr(sender, "edit_text", None):
+                                        try:
+                                            res = sender.edit_text(mid, full_html, "HTML")
+                                            edited = (res is not False)
+                                        except Exception as e:
+                                            print(f"⚠️ Edit text exception: {e}")
+                                            edited = False
+                                    if not edited:
+                                        _send_long(
+                                            sender, full_html, golden_text, mid or anchor,
+                                            filename_prefix="golden_synthesized",
+                                            caption="🏆 النسخة الذهبية المسبوكة",
+                                            head_html=_entry_head_html(result["title"], session_name)
+                                        )
+                                else:
+                                    fallback_html = merged_compare_message_html(
+                                        polished, shelby_text=s_text, role_id=role_id, session_name=session_name
+                                    )
+                                    if getattr(sender, "edit_text", None):
+                                        sender.edit_text(mid, fallback_html, "HTML")
+                            else:
+                                is_to = "مهلة" in str(s_err or "") or "timeout" in str(s_err or "").lower()
+                                status = "timeout" if is_to else "error"
+                                to_html = synthesizer_interim_message_html(
+                                    polished, role_id=role_id, session_name=session_name,
+                                    title=result["title"], shelby_status=status, error_detail=s_err
+                                )
+                                if getattr(sender, "edit_text", None):
+                                    sender.edit_text(mid, to_html, "HTML")
+                        except Exception as e:
+                            print(f"⚠️ Synthesizer bg error: {e}")
+
+                    t = threading.Thread(target=_bg_synthesizer, daemon=True)
+                    t.start()
+                    result["compare_thread"] = t
+
+                elif cmp_mode == "merged":
                     init_html = merged_compare_message_html(polished, shelby_text=None, role_id=role_id, session_name=session_name)
                     mid = _send_long(sender, init_html, polished, anchor, filename_prefix="polished",
                                      caption="📝 النسخة المنظمة (طويلة → ملف)",

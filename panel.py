@@ -24,7 +24,7 @@ from config import Config
 # القائمة البيضاء للإعدادات (11 §4): المفتاح → (النوع, المدى/الخيارات, الوصف)
 SET_WHITELIST = {
     "delivery_mode":            ("choice", ("dual", "raw_only", "polished_only"), "وضع الإرسال"),
-    "compare_mode":             ("choice", ("merged", "split", "off"), "وضع مقارنة المنظم"),
+    "compare_mode":             ("choice", ("synthesizer", "merged", "split", "off"), "وضع مقارنة المنظم"),
     "role":                     ("role", None, "الدور العام"),
     "context_mode":             ("choice", ("auto", "simple"), "السياق داخل الجلسة"),
     "transcript_header_target": ("choice", ("both", "raw_only", "polished_only", "off"), "بانر «تفريغ آلي»"),
