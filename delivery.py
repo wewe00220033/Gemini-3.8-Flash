@@ -345,7 +345,8 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
             polish_fn = text_assist.polish_gemini if is_compare else text_assist.polish
         # L2 (10 §2): ملخص الجلسة التراكمي → طبقة B فقط (لا يُمرَّر لطبقة A إطلاقاً)
         l2 = sessions.summary() if session_name else None
-        t0_gemini = time.time()
+        t0_flow = time.time()
+        t0_gemini = t0_flow
         try:
             if l2 and _accepts_context_summary(polish_fn):
                 polished, reason = polish_fn(raw, role_id, gl, context_summary=l2)
@@ -386,7 +387,7 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
                             provider_tag="🦙 <b>[شلبي]</b>", title=result["title"]
                         )
                         edited = False
-                        if len(s_html) <= Config.TELEGRAM_MAX_MSG - 50 and getattr(sender, "edit_text", None):
+                        if mid is not None and len(s_html) <= Config.TELEGRAM_MAX_MSG - 50 and getattr(sender, "edit_text", None):
                             try:
                                 res = sender.edit_text(mid, s_html, "HTML")
                                 edited = (res is not False)
@@ -398,8 +399,15 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
                                        head_html=_entry_head_html(result["title"], session_name))
                     else:
                         err_html = f"⚠️ تعذر التنظيم عبر جيميني وشلبي ({html.escape(str(s_err or reason or ''))}) — الخام فوق."
-                        if getattr(sender, "edit_text", None):
-                            sender.edit_text(mid, err_html, "HTML")
+                        if mid is not None and getattr(sender, "edit_text", None):
+                            try:
+                                res = sender.edit_text(mid, err_html, "HTML")
+                                if res is False:
+                                    sender.send_text(err_html, anchor, "HTML")
+                            except Exception:
+                                sender.send_text(err_html, anchor, "HTML")
+                        else:
+                            sender.send_text(err_html, anchor, "HTML")
                 except Exception as e:
                     print(f"⚠️ Shelby rescue error: {e}")
 
@@ -451,6 +459,7 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
                                 synth_elapsed = time.time() - t0_synth
 
                                 if golden_text:
+                                    result["polished"] = golden_text
                                     if archive_entry:
                                         try:
                                             archive.append_polished(f"[نسخة ذهبية مسبوكة]\n{golden_text}")
@@ -459,18 +468,19 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
                                         except Exception as e:
                                             print(f"⚠️ Synth archive update: {e}")
 
+                                    wall_total = time.time() - t0_flow
                                     telemetry = {
                                         "gemini": gemini_elapsed,
                                         "shelby": shelby_elapsed,
                                         "synth": synth_elapsed,
-                                        "total": gemini_elapsed + shelby_elapsed + synth_elapsed,
+                                        "total": wall_total,
                                     }
                                     full_html = synthesizer_final_message_html(
                                         golden_text, role_id=role_id, session_name=session_name,
                                         title=result["title"], telemetry=telemetry
                                     )
                                     edited = False
-                                    if len(full_html) <= Config.TELEGRAM_MAX_MSG - 50 and getattr(sender, "edit_text", None):
+                                    if mid is not None and len(full_html) <= Config.TELEGRAM_MAX_MSG - 50 and getattr(sender, "edit_text", None):
                                         try:
                                             res = sender.edit_text(mid, full_html, "HTML")
                                             edited = (res is not False)
@@ -488,8 +498,21 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
                                     fallback_html = merged_compare_message_html(
                                         polished, shelby_text=s_text, role_id=role_id, session_name=session_name
                                     )
-                                    if getattr(sender, "edit_text", None):
-                                        sender.edit_text(mid, fallback_html, "HTML")
+                                    edited = False
+                                    if mid is not None and len(fallback_html) <= Config.TELEGRAM_MAX_MSG - 50 and getattr(sender, "edit_text", None):
+                                        try:
+                                            res = sender.edit_text(mid, fallback_html, "HTML")
+                                            edited = (res is not False)
+                                        except Exception as e:
+                                            print(f"⚠️ Fallback edit exception: {e}")
+                                            edited = False
+                                    if not edited:
+                                        _send_long(
+                                            sender, fallback_html, f"{polished}\n\n{s_text}", mid or anchor,
+                                            filename_prefix="fallback_compare",
+                                            caption="📝 المقارنة المدمجة (بديل لفشل السبك)",
+                                            head_html=_entry_head_html(result["title"], session_name)
+                                        )
                             else:
                                 is_to = "مهلة" in str(s_err or "") or "timeout" in str(s_err or "").lower()
                                 status = "timeout" if is_to else "error"
@@ -497,8 +520,15 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
                                     polished, role_id=role_id, session_name=session_name,
                                     title=result["title"], shelby_status=status, error_detail=s_err
                                 )
-                                if getattr(sender, "edit_text", None):
-                                    sender.edit_text(mid, to_html, "HTML")
+                                edited = False
+                                if mid is not None and len(to_html) <= Config.TELEGRAM_MAX_MSG - 50 and getattr(sender, "edit_text", None):
+                                    try:
+                                        res = sender.edit_text(mid, to_html, "HTML")
+                                        edited = (res is not False)
+                                    except Exception:
+                                        edited = False
+                                if not edited and mid is None:
+                                    sender.send_text(to_html, anchor, "HTML")
                         except Exception as e:
                             print(f"⚠️ Synthesizer bg error: {e}")
 

@@ -150,7 +150,8 @@ def header_for(kind):
 
 
 def compare_mode():
-    return get("compare_mode", "merged")
+    default_cmp = getattr(Config, "COMPARE_MODE", "synthesizer")
+    return get("compare_mode", default_cmp if default_cmp in COMPARE_MODES else "synthesizer")
 
 
 def set_compare_mode(mode):

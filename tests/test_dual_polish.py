@@ -530,3 +530,64 @@ def test_deliver_synthesizer_gemini_503_shelby_rescues(monkeypatch):
         settings.set_compare_mode(old_mode)
 
 
+def test_deliver_synthesizer_updates_result_polished(monkeypatch):
+    monkeypatch.setattr(Config, "LOCAL_POLISH_CMD", "dummy_local")
+    monkeypatch.setattr(delivery.Config, "LOCAL_POLISH_CMD", "dummy_local")
+    old_mode = settings.compare_mode()
+    settings.set_compare_mode("synthesizer")
+    try:
+        fs = FakeSender()
+        monkeypatch.setattr(text_assist, "synthesize", lambda raw, g, s, **kw: ("النسخة الذهبية المحدثة في النتيجة", None))
+        res = delivery.deliver(
+            raw_text="فحص تحديث result dict بالنسخة الذهبية",
+            model="gemini-3.6-flash",
+            key_name="TestKey",
+            info={},
+            sender=fs.as_sender(),
+            reply_to_id=70,
+            archive_entry=False,
+            polish_fn=lambda r, ro, gl, **kw: ("مسودة فلاش", None),
+            local_polish_fn=lambda r, ro, gl, **kw: ("مسودة شلبي", None),
+        )
+        t = res.get("compare_thread")
+        assert t is not None
+        t.join(timeout=3)
+        assert res["polished"] == "النسخة الذهبية المحدثة في النتيجة"
+    finally:
+        settings.set_compare_mode(old_mode)
+
+
+def test_deliver_synthesizer_mid_none_graceful_fallback(monkeypatch):
+    """فحص عدم حدوث انهيار لو فشل إرسال أول رسالة وكان mid=None."""
+    monkeypatch.setattr(Config, "LOCAL_POLISH_CMD", "dummy_local")
+    monkeypatch.setattr(delivery.Config, "LOCAL_POLISH_CMD", "dummy_local")
+    old_mode = settings.compare_mode()
+    settings.set_compare_mode("synthesizer")
+    try:
+        class NoneSender(FakeSender):
+            def send_text(self, text, reply_to, parse_mode=None):
+                # أول رسالة ترجع None لمحاكاة فشل الإرسال الأولي
+                return None
+
+        ns = NoneSender()
+        monkeypatch.setattr(text_assist, "synthesize", lambda raw, g, s, **kw: ("النسخة الذهبية مع mid=None", None))
+        res = delivery.deliver(
+            raw_text="فحص الأمان عند mid=None",
+            model="gemini-3.6-flash",
+            key_name="TestKey",
+            info={},
+            sender=ns.as_sender(),
+            reply_to_id=80,
+            archive_entry=False,
+            polish_fn=lambda r, ro, gl, **kw: ("مسودة فلاش", None),
+            local_polish_fn=lambda r, ro, gl, **kw: ("مسودة شلبي", None),
+        )
+        t = res.get("compare_thread")
+        assert t is not None
+        t.join(timeout=3)
+        assert res["polished"] == "النسخة الذهبية مع mid=None"
+    finally:
+        settings.set_compare_mode(old_mode)
+
+
+
