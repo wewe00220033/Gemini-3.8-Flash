@@ -153,8 +153,26 @@ def test_local_provider_nonzero_exit_still_reports_code(monkeypatch):
     assert text is None and "boom" in err
 
 
+def test_call_local_provider_does_not_use_shell_true(monkeypatch):
+    """إثبات أمان SEC-01: التأكد من أن المزود المحلي لا يستدعي shell=True أبداً."""
+    import text_assist
+    import subprocess
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["shell"] = kwargs.get("shell", False)
+        return subprocess.CompletedProcess(cmd, 0, stdout="منظم", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(text_assist.Config, "LOCAL_POLISH_CMD", "python dummy.py")
+    out, err = text_assist._call_local_provider("sys", "raw")
+    assert out == "منظم"
+    assert captured["shell"] is False, "خطر أمني: تم رصد shell=True في subprocess.run!"
+
+
 # ---------------------------------------------------------------- 4) Secure cookie
-def test_cookie_secure_only_on_https():
+def test_cookie_secure_only_on_https(monkeypatch):
     import web_service
 
     class H:
@@ -162,9 +180,15 @@ def test_cookie_secure_only_on_https():
             self.headers = {"X-Forwarded-Proto": proto}
             self.request = object()
 
+    # خلف proxy موثوق (TRUST_PROXY=1)
+    monkeypatch.setattr(web_service.Config, "TRUST_PROXY", 1)
     assert web_service._is_https(H("https")) is True
     assert web_service._is_https(H("http")) is False
     assert web_service._is_https(H("")) is False
+
+    # بلا proxy موثوق (TRUST_PROXY=0) -> لا يعتمد على X-Forwarded-Proto
+    monkeypatch.setattr(web_service.Config, "TRUST_PROXY", 0)
+    assert web_service._is_https(H("https")) is False
 
 
 # ---------------------------------------------------------------- 5) النسخ الاحتياطي

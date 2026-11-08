@@ -27,11 +27,12 @@ from http.cookies import SimpleCookie
 
 
 def _is_https(handler):
-    """هل الطلب وصل عبر HTTPS؟ (خلف وكيل عكسي أو مباشرة) — يحدد إضافة Secure للكعكة."""
+    """هل الطلب وصل عبر HTTPS؟ (خلف وكيل عكسي موثوق TRUST_PROXY=1 أو مباشرة) — يحدد إضافة Secure للكعكة."""
     try:
-        proto = (handler.headers.get("X-Forwarded-Proto") or "").split(",")[0].strip().lower()
-        if proto:
-            return proto == "https"
+        if Config.TRUST_PROXY:
+            proto = (handler.headers.get("X-Forwarded-Proto") or "").split(",")[0].strip().lower()
+            if proto:
+                return proto == "https"
         return bool(getattr(handler.request, "getpeercert", None) and handler.request.getpeercert())
     except Exception:
         return False
