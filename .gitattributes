@@ -1,2 +1,3 @@
 # Set default behaviour to automatically normalize line endings and use LF on checkout
 * text=auto eol=lf
+
