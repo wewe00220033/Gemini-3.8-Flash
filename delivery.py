@@ -242,7 +242,7 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
 
         if polish_fn is None:
             import text_assist
-            polish_fn = text_assist.polish
+            polish_fn = text_assist.polish_gemini if is_compare else text_assist.polish
         # L2 (10 §2): ملخص الجلسة التراكمي → طبقة B فقط (لا يُمرَّر لطبقة A إطلاقاً)
         l2 = sessions.summary() if session_name else None
         try:

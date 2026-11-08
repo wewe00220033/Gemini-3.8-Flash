@@ -88,15 +88,15 @@ def test_panel_compare_mode():
 
 
 def test_text_assist_helpers(monkeypatch):
-    import sys
-    ta = sys.modules.get("text_assist") or text_assist
-    monkeypatch.setattr(ta, "generate", lambda s, u, timeout=None: ("جيميني منظم", None))
-    gem_text, gem_err = ta.polish_gemini("نص تجريبي")
+    import importlib
+    real_ta = importlib.reload(text_assist)
+    monkeypatch.setattr(real_ta, "generate", lambda s, u, timeout=None: ("جيميني منظم", None))
+    gem_text, gem_err = real_ta.polish_gemini("نص تجريبي")
     assert gem_text == "جيميني منظم" and gem_err is None
 
-    monkeypatch.setattr(ta, "_call_local_provider", lambda s, u: ("شلبي منظم", None))
-    monkeypatch.setattr(ta.Config, "LOCAL_POLISH_CMD", "dummy_command")
-    loc_text, loc_err = ta.polish_local("نص تجريبي")
+    monkeypatch.setattr(real_ta, "_call_local_provider", lambda s, u: ("شلبي منظم", None))
+    monkeypatch.setattr(real_ta.Config, "LOCAL_POLISH_CMD", "dummy_command")
+    loc_text, loc_err = real_ta.polish_local("نص تجريبي")
     assert loc_text == "شلبي منظم" and loc_err is None
 
 
@@ -246,3 +246,44 @@ def test_edit_telegram_message(monkeypatch):
     assert len(calls) == 2
     assert calls[0][1]["parse_mode"] == "HTML"
     assert "parse_mode" not in calls[1][1]
+
+
+def test_compare_uses_gemini_not_local_for_main_message(monkeypatch):
+    """الإنتاج الحقيقي: polish_fn غير محقون (None) + LOCAL_POLISH_CMD مضبوط → الرسالة الرئيسية تكون جيميني وليست شلبي."""
+    import importlib
+    real_ta = importlib.reload(text_assist)
+    monkeypatch.setattr(real_ta, "_call_local_provider", lambda s, r: ("*** LOCAL/SHELBY OUTPUT ***", None))
+    monkeypatch.setattr(real_ta, "generate", lambda s, u, timeout=None: ("*** PURE GEMINI OUTPUT ***", None))
+    monkeypatch.setattr(Config, "LOCAL_POLISH_CMD", "dummy_local")
+    monkeypatch.setattr(delivery.Config, "LOCAL_POLISH_CMD", "dummy_local")
+    monkeypatch.setattr(real_ta.Config, "LOCAL_POLISH_CMD", "dummy_local")
+    settings.set_compare_mode("merged")
+
+    fs = FakeSender()
+    # استدعاء deliver بدون تمرير polish_fn (تماماً كما يناديه telegram_bot.py:480 في الإنتاج)
+    res = delivery.deliver(
+        raw_text="فويس اختبار مسار الإنتاج الحقيقي",
+        model="gemini-3.6-flash",
+        key_name="TestKey",
+        info={},
+        sender=fs.as_sender(),
+        reply_to_id=50,
+        archive_entry=False,
+    )
+
+    t = res.get("compare_thread")
+    assert t is not None
+    t.join(timeout=3)
+
+    # الرسالة الأولى (جيميني): يجب أن تحتوي على ناتج جيميني فقط ولا تحتوي على شلبي
+    init_msg = fs.sent_texts[1][1]
+    assert "🤖 <b>[جيميني]</b>:" in init_msg
+    assert "*** PURE GEMINI OUTPUT ***" in init_msg
+    assert "*** LOCAL/SHELBY OUTPUT ***" not in init_msg
+
+    # الرسالة بعد التعديل: تحتوي على الاثنين كل في كتلته الخاصة
+    edited_msg = fs.edited_texts[0][1]
+    assert "🤖 <b>[جيميني]</b>:" in edited_msg
+    assert "*** PURE GEMINI OUTPUT ***" in edited_msg
+    assert "🦙 <b>[شلبي]</b>:" in edited_msg
+    assert "*** LOCAL/SHELBY OUTPUT ***" in edited_msg

@@ -132,6 +132,7 @@ def _no_network_polish(monkeypatch):
         raise AssertionError("text_assist: network call in tests is forbidden")
 
     monkeypatch.setattr(text_assist, "polish", _stub_polish)
+    monkeypatch.setattr(text_assist, "polish_gemini", _stub_polish)
     monkeypatch.setattr(text_assist.requests, "post", _no_post)
     # مرحلة 4: التسمية الذكية (flash-lite نصياً) بلا شبكة أيضاً — عنوان حتمي قصير
     try:
