@@ -183,6 +183,52 @@ def _call_local_provider(system_text, raw_text):
         return None, f"خطأ استدعاء المزود المحلي ({type(e).__name__})"
 
 
+def polish_gemini(raw_text, role_id=None, glossary=None, context_summary=None):
+    """تنظيم نصي مباشر عبر Gemini Flash-Lite (السحابي فقط) مع تطبيق القاموس."""
+    if is_effective_empty(raw_text):
+        return None, "نص فارغ"
+    role_id = role_id or Config.DEFAULT_ROLE
+    system_text = prompts.compose_prompt("polish", role_id)
+    if context_summary:
+        system_text += ("\n\nملخص الجلسة حتى الآن (للفهم فقط — لا تضفه ولا تعِد كتابته، نظّم النص الجديد فقط):\n"
+                        + str(context_summary)[:Config.SESSION_SUMMARY_MAX_CHARS])
+    text, reason = generate(system_text, raw_text)
+    if text is None:
+        return None, logkit.redact(reason)
+    if glossary is not None:
+        text, _n = glossary.apply(text, target="polished")
+    return text.strip(), None
+
+
+def polish_local(raw_text, role_id=None, glossary=None, context_summary=None):
+    """تنظيم نصي مباشر عبر المزود المحلي المستقل (LOCAL_POLISH_CMD) مع تطبيق القاموس."""
+    if is_effective_empty(raw_text):
+        return None, "نص فارغ"
+    if not getattr(Config, "LOCAL_POLISH_CMD", ""):
+        return None, "لا يوجد مزود محلي مهيأ"
+    role_id = role_id or Config.DEFAULT_ROLE
+    system_text = prompts.compose_prompt("polish", role_id)
+    if context_summary:
+        system_text += ("\n\nملخص الجلسة حتى الآن (للفهم فقط — لا تضفه ولا تعِد كتابته، نظّم النص الجديد فقط):\n"
+                        + str(context_summary)[:Config.SESSION_SUMMARY_MAX_CHARS])
+    text, reason = _call_local_provider(system_text, raw_text)
+    if text:
+        with _lock:
+            _state["local_calls"] = _state.get("local_calls", 0) + 1
+            _state["local_ok"] = _state.get("local_ok", 0) + 1
+            _state["calls"] += 1
+            _state["ok"] += 1
+        if glossary is not None:
+            text, _n = glossary.apply(text, target="polished")
+        return text.strip(), None
+    reason = logkit.redact(reason)
+    with _lock:
+        _state["local_calls"] = _state.get("local_calls", 0) + 1
+        _state["local_fail"] = _state.get("local_fail", 0) + 1
+        _state["local_last_error"] = str(reason or "")
+    return None, reason
+
+
 def polish(raw_text, role_id=None, glossary=None, context_summary=None):
     """
     يحوّل الخام إلى منظم (طبقة B). يرجع (polished, None) أو (None, reason). لا يلمس الخام ولا الصوت.

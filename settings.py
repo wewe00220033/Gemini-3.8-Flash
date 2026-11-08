@@ -15,6 +15,7 @@ import store
 
 DELIVERY_MODES = ("dual", "raw_only", "polished_only")
 HEADER_TARGETS = ("both", "raw_only", "polished_only", "off")
+COMPARE_MODES = ("merged", "split", "off")
 _MODE_ALIASES = {"dual": "dual", "both": "dual", "raw": "raw_only", "raw_only": "raw_only",
                  "polished": "polished_only", "polished_only": "polished_only", "خام": "raw_only",
                  "منظم": "polished_only", "الاتنين": "dual", "الاثنين": "dual"}
@@ -39,6 +40,7 @@ def _defaults():
         "delivery_mode": Config.DELIVERY_MODE_DEFAULT if Config.DELIVERY_MODE_DEFAULT in DELIVERY_MODES else "dual",
         "role": Config.DEFAULT_ROLE,
         "header_target": Config.TRANSCRIPT_HEADER_TARGET if Config.TRANSCRIPT_HEADER_ENABLED else "off",
+        "compare_mode": getattr(Config, "COMPARE_MODE", "merged") if getattr(Config, "COMPARE_MODE", "merged") in COMPARE_MODES else "merged",
     }
 
 
@@ -49,7 +51,7 @@ def _load():
     data = store.load_json_tolerant(Config.SETTINGS_FILE, default={})
     merged = _defaults()
     if isinstance(data, dict):
-        for k in ("delivery_mode", "role", "header_target"):
+        for k in ("delivery_mode", "role", "header_target", "compare_mode"):
             if isinstance(data.get(k), str) and data[k]:
                 merged[k] = data[k]
         # 11 §4: تجاوزات /set الأخرى (أرقام/منطقية/نصوص) تبقى كما هي — panel.apply_persisted_overrides يتحقق منها عند الإقلاع
@@ -60,6 +62,8 @@ def _load():
         merged["delivery_mode"] = "dual"
     if merged["header_target"] not in HEADER_TARGETS:
         merged["header_target"] = "both"
+    if merged["compare_mode"] not in COMPARE_MODES:
+        merged["compare_mode"] = "merged"
     _cache, _cache_path = merged, Config.SETTINGS_FILE
     return _cache
 
@@ -143,3 +147,14 @@ def header_for(kind):
     if t == "off":
         return False
     return t == "both" or t == f"{kind}_only"
+
+
+def compare_mode():
+    return get("compare_mode", "merged")
+
+
+def set_compare_mode(mode):
+    m = (mode or "").strip().lower()
+    if m not in COMPARE_MODES:
+        return None
+    return set_value("compare_mode", m)

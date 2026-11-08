@@ -24,6 +24,7 @@ from config import Config
 # القائمة البيضاء للإعدادات (11 §4): المفتاح → (النوع, المدى/الخيارات, الوصف)
 SET_WHITELIST = {
     "delivery_mode":            ("choice", ("dual", "raw_only", "polished_only"), "وضع الإرسال"),
+    "compare_mode":             ("choice", ("merged", "split", "off"), "وضع مقارنة المنظم"),
     "role":                     ("role", None, "الدور العام"),
     "context_mode":             ("choice", ("auto", "simple"), "السياق داخل الجلسة"),
     "transcript_header_target": ("choice", ("both", "raw_only", "polished_only", "off"), "بانر «تفريغ آلي»"),
@@ -40,6 +41,7 @@ SET_FORBIDDEN = ("keys", "token", "telegram_bot_token", "web_access_token", "dat
                  "bot_workers", "api_key", "gemini_api_key")
 # مفاتيح /set التي تُطبَّق كتجاوز فوري على Config (الطبقتان: Config افتراضي، settings.json تجاوز)
 SET_CONFIG_ATTR = {
+    "compare_mode": "COMPARE_MODE",
     "log_retention_days": "LOG_RETENTION_DAYS", "panel_page_size": "PANEL_PAGE_SIZE",
     "retry_budget_seconds": "RETRY_BUDGET_SECONDS", "model_503_key_hops": "MODEL_503_KEY_HOPS",
     "backup_weekly_day": "BACKUP_WEEKLY_DAY", "notify_on_start": "NOTIFY_ON_START",
@@ -355,6 +357,8 @@ def current_setting(key):
     import settings
     if key == "delivery_mode":
         return settings.delivery_mode()
+    if key == "compare_mode":
+        return settings.compare_mode()
     if key == "role":
         return settings.role()
     if key == "transcript_header_target":
@@ -418,6 +422,9 @@ def apply_setting(key, value):
     old = current_setting(k)
     if k == "delivery_mode":
         settings.set_delivery_mode(value)
+    elif k == "compare_mode":
+        settings.set_compare_mode(value)
+        Config.COMPARE_MODE = value
     elif k == "role":
         settings.set_role(value)
     elif k == "transcript_header_target":

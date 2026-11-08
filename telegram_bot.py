@@ -225,6 +225,36 @@ def send_html_get_id(token, chat_id, text, reply_to_id=None):
     return first_id
 
 
+def edit_telegram_message(token, chat_id, message_id, text, parse_mode="HTML"):
+    """
+    تعديل رسالة نصية موجودة في تليجرام عبر editMessageText.
+    لو فشل التنسيق (400) يحاول مجدداً بدون parse_mode (نص عادي) لضمان وصول التعديل دون ضياع.
+    يرجع True لو نجح التعديل، وFalse لو فشل.
+    """
+    if not message_id:
+        return False
+    payload = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "text": text,
+    }
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
+    try:
+        r = _tg_post(token, "editMessageText", payload, timeout=15)
+        if r.status_code == 200:
+            return True
+        if parse_mode and r.status_code == 400:
+            p2 = dict(payload)
+            p2.pop("parse_mode", None)
+            r2 = _tg_post(token, "editMessageText", p2, timeout=15)
+            return r2.status_code == 200
+        return False
+    except Exception as e:
+        print(f"⚠️ edit_telegram_message error: {e}")
+        return False
+
+
 def make_sender(token, chat_id, reaction_msg_id=None):
     """Sender لخط الإنتاج (delivery.deliver) فوق دوال تليجرام الحقيقية."""
     return delivery.Sender(
@@ -232,6 +262,7 @@ def make_sender(token, chat_id, reaction_msg_id=None):
         send_document=lambda fn, data, mime, caption, reply_to: _send_document(token, chat_id, fn, data, mime, caption, reply_to),
         send_action=lambda action="typing": send_chat_action(token, chat_id, action),
         set_reaction=(lambda emoji: set_reaction(token, chat_id, reaction_msg_id, emoji)) if reaction_msg_id else None,
+        edit_text=lambda message_id, text, parse_mode="HTML": edit_telegram_message(token, chat_id, message_id, text, parse_mode),
     )
 
 

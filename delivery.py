@@ -14,6 +14,7 @@
 """
 
 import html
+import threading
 
 from config import Config
 import archive
@@ -25,13 +26,14 @@ import logkit
 
 
 class Sender:
-    """واجهة الإرسال القابلة للحقن: send_text(text, reply_to, parse_mode) -> message_id|None ؛ send_document(...) ؛ send_action(...) ؛ set_reaction(...)"""
+    """واجهة الإرسال القابلة للحقن: send_text(text, reply_to, parse_mode) -> message_id|None ؛ send_document(...) ؛ send_action(...) ؛ set_reaction(...) ؛ edit_text(...)"""
 
-    def __init__(self, send_text, send_document=None, send_action=None, set_reaction=None):
+    def __init__(self, send_text, send_document=None, send_action=None, set_reaction=None, edit_text=None):
         self.send_text = send_text
         self.send_document = send_document
         self.send_action = send_action
         self.set_reaction = set_reaction
+        self.edit_text = edit_text
 
 
 def prepare_texts(raw_text, glossary=None):
@@ -63,15 +65,47 @@ def _entry_head_html(title, session_name):
     return " · ".join(parts)
 
 
-def polished_message_html(polished_text, role_id, session_name=None):
+def polished_message_html(polished_text, role_id, session_name=None, provider_tag=None):
     role = prompts.get_role(role_id) or {}
     head = f"<b>📝 النسخة المنظمة</b> · دور: {html.escape(role.get('name', role_id))}"
     if session_name:
         head += f" · جلسة: «{html.escape(session_name)}»"
+    if provider_tag:
+        head += f" · {provider_tag}"
     body = polished_text
     if settings.header_for("polished"):
         body = archive.banner_text() + "\n" + polished_text
     return head + "\n" + f"<pre>{html.escape(body)}</pre>"
+
+
+def merged_compare_message_html(gemini_text, shelby_text=None, role_id=None, session_name=None, shelby_error=None):
+    role = prompts.get_role(role_id) or {}
+    head = f"<b>📝 النسخة المنظمة</b> · دور: {html.escape(role.get('name', role_id))}"
+    if session_name:
+        head += f" · جلسة: «{html.escape(session_name)}»"
+
+    body_gemini = gemini_text
+    if settings.header_for("polished"):
+        body_gemini = archive.banner_text() + "\n" + gemini_text
+
+    blocks = [
+        head,
+        "🤖 <b>[جيميني]</b>:",
+        f"<pre>{html.escape(body_gemini)}</pre>",
+    ]
+
+    if shelby_text:
+        body_shelby = shelby_text
+        if settings.header_for("polished"):
+            body_shelby = archive.banner_text() + "\n" + shelby_text
+        blocks.append("🦙 <b>[شلبي]</b>:")
+        blocks.append(f"<pre>{html.escape(body_shelby)}</pre>")
+    elif shelby_error:
+        blocks.append(f"⚠️ <i>تعذر تشغيل شلبي محلياً ({html.escape(str(shelby_error))})</i>")
+    else:
+        blocks.append("⏳ <i>جاري تحضير شلبي محلياً...</i>")
+
+    return "\n".join(blocks)
 
 
 def prepare_for_web(raw_text, model=None, key_name=None, info=None, polish_fn=None):
@@ -134,7 +168,7 @@ def _voice_title(raw, title_fn):
 
 
 def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn=None, glossary=None,
-            session_name=None, footer_html="", archive_entry=True, title_fn=None):
+            session_name=None, footer_html="", archive_entry=True, title_fn=None, local_polish_fn=None):
     """
     ينفّذ خط الإنتاج كاملاً. يرجع قاموساً: {raw, polished, raw_msg_id, polished_msg_id, mode, archived, polish_error,
     role, session, title, session_written, title_suggestion}.
@@ -201,6 +235,11 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
                 sender.set_reaction(Config.REACTION_POLISHING)
             except Exception:
                 pass
+
+        cmp_mode = settings.compare_mode()
+        has_local = bool(getattr(Config, "LOCAL_POLISH_CMD", "") or local_polish_fn)
+        is_compare = (cmp_mode in ("merged", "split")) and has_local
+
         if polish_fn is None:
             import text_assist
             polish_fn = text_assist.polish
@@ -225,10 +264,71 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
                 archive.append_polished(polished)
                 if session_name:
                     sessions.append_polished(polished)
-            result["polished_msg_id"] = _send_long(sender, polished_message_html(polished, role_id, session_name),
-                                                   polished, anchor, filename_prefix="polished",
-                                                   caption="📝 النسخة المنظمة (طويلة → ملف)",
-                                                   head_html=_entry_head_html(result["title"], session_name))
+
+            if is_compare:
+                if cmp_mode == "merged":
+                    init_html = merged_compare_message_html(polished, shelby_text=None, role_id=role_id, session_name=session_name)
+                    mid = _send_long(sender, init_html, polished, anchor, filename_prefix="polished",
+                                     caption="📝 النسخة المنظمة (طويلة → ملف)",
+                                     head_html=_entry_head_html(result["title"], session_name))
+                    result["polished_msg_id"] = mid
+
+                    def _bg_shelby():
+                        try:
+                            s_fn = local_polish_fn
+                            if s_fn is None:
+                                import text_assist
+                                s_fn = text_assist.polish_local
+                            s_kwargs = {"context_summary": l2} if _accepts_context_summary(s_fn) else {}
+                            s_text, s_err = s_fn(raw, role_id, gl, **s_kwargs)
+                            if s_text:
+                                full_html = merged_compare_message_html(polished, shelby_text=s_text, role_id=role_id, session_name=session_name)
+                                if len(full_html) <= Config.TELEGRAM_MAX_MSG - 50 and getattr(sender, "edit_text", None):
+                                    sender.edit_text(mid, full_html, "HTML")
+                                else:
+                                    s_single = polished_message_html(s_text, role_id, session_name, provider_tag="🦙 <b>[شلبي]</b>")
+                                    _send_long(sender, s_single, s_text, mid or anchor, filename_prefix="shelby_polished", caption="🦙 نسخة شلبي المنظمة")
+                            elif s_err and getattr(sender, "edit_text", None):
+                                err_html = merged_compare_message_html(polished, shelby_text=None, role_id=role_id, session_name=session_name, shelby_error=s_err)
+                                sender.edit_text(mid, err_html, "HTML")
+                        except Exception as e:
+                            print(f"⚠️ Dual polish bg error: {e}")
+
+                    t = threading.Thread(target=_bg_shelby, daemon=True)
+                    t.start()
+                    result["compare_thread"] = t
+
+                elif cmp_mode == "split":
+                    gemini_html = polished_message_html(polished, role_id, session_name, provider_tag="🤖 <b>[جيميني]</b>")
+                    mid = _send_long(sender, gemini_html, polished, anchor, filename_prefix="gemini_polished",
+                                     caption="🤖 نسخة جيميني المنظمة (طويلة → ملف)",
+                                     head_html=_entry_head_html(result["title"], session_name))
+                    result["polished_msg_id"] = mid
+
+                    def _bg_shelby_split():
+                        try:
+                            s_fn = local_polish_fn
+                            if s_fn is None:
+                                import text_assist
+                                s_fn = text_assist.polish_local
+                            s_kwargs = {"context_summary": l2} if _accepts_context_summary(s_fn) else {}
+                            s_text, s_err = s_fn(raw, role_id, gl, **s_kwargs)
+                            if s_text:
+                                s_html = polished_message_html(s_text, role_id, session_name, provider_tag="🦙 <b>[شلبي]</b>")
+                                _send_long(sender, s_html, s_text, mid or anchor, filename_prefix="shelby_polished", caption="🦙 نسخة شلبي المنظمة")
+                            elif s_err:
+                                sender.send_text(f"⚠️ تعذر تشغيل شلبي محلياً ({html.escape(str(s_err))})", mid or anchor, "HTML")
+                        except Exception as e:
+                            print(f"⚠️ Dual polish split bg error: {e}")
+
+                    t = threading.Thread(target=_bg_shelby_split, daemon=True)
+                    t.start()
+                    result["compare_thread"] = t
+            else:
+                result["polished_msg_id"] = _send_long(sender, polished_message_html(polished, role_id, session_name),
+                                                       polished, anchor, filename_prefix="polished",
+                                                       caption="📝 النسخة المنظمة (طويلة → ملف)",
+                                                       head_html=_entry_head_html(result["title"], session_name))
         else:
             redacted_reason = logkit.redact(reason) if reason else None
             result["polish_error"] = redacted_reason
