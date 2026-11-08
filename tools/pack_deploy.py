@@ -43,12 +43,25 @@ OPTIONAL_FILES = (
 # مجلدات تُضمَّن كاملة (ملفات .py/.html/.css/.js/.txt/.md فقط)
 INCLUDE_DIRS = ("static",)
 INCLUDE_EXTS = (".py", ".html", ".css", ".js", ".txt", ".md", ".json")
-# وحدات بايثون في الجذر — تُضمَّن كلها ما عدا المستبعد أدناه
+# وحدات بايثون في الجذر — Allowlist حازمة تمنع تسريب أي سكريبت غير موثق صراحة
+KNOWN_ROOT_MODULES = (
+    "archive.py", "assistant.py", "audit.py", "backup.py", "clock.py",
+    "config.py", "delivery.py", "extra_module.py", "fsm.py", "glossary.py", "heartbeat.py",
+    "incidents.py", "interactions_client.py", "jobs.py", "key_manager.py",
+    "logkit.py", "main.py", "model_state.py", "netsession.py",
+    "observability.py", "panel.py", "preflight.py", "prompts.py",
+    "sessions.py", "settings.py", "smoke_failover.py", "store.py",
+    "supervisor.py", "telegram_bot.py", "text_assist.py", "transcribe_tool.py",
+    "transcriber.py", "voice_queue.py", "watchdog.py", "web_service.py",
+)
 ROOT_PY_EXCLUDE = ("test_360_exhaustive.py", "provider_local.py", "local_provider.py", "custom_provider.py", "polish_provider.py", "my_polish.py", "custom_polish.py")
 
 # حارس الأسرار/البيانات: أي عضو يطابق أحد هذه الأنماط يُفشل الأرشيف
 SECRET_BASENAMES = ("keys.json", "keys.txt", ".env", ".persist_probe", "backup_state.json", "current_session.json")
-SECRET_PREFIXES = (".env.", "provider_local", "local_provider", "custom_provider", "my_polish", "custom_polish", ".local")                     # .env.local, .env.prod … (لكن .env.example مسموح صراحة)
+SECRET_PREFIXES = (
+    ".env.", "provider_local", "local_provider", "custom_provider",
+    "my_polish", "custom_polish", ".local", "local_", "custom_", "my_", "polish_",
+)                     # .env.local, .env.prod … (لكن .env.example مسموح صراحة)
 SECRET_DIR_PARTS = ("state", "logs", "backups", "transcripts", "sessions", "incidents", "data",
                     ".git", "__pycache__", ".smoke_failover", ".pytest_cache", ".local", ".secrets")
 SECRET_EXTS = (".ndjson", ".log", ".pyc")
@@ -94,7 +107,7 @@ def collect(root=None, with_tests=False):
     for f in REQUIRED_FILES + OPTIONAL_FILES:
         add(f)
     for fn in sorted(os.listdir(root)):
-        if fn.endswith(".py") and fn not in ROOT_PY_EXCLUDE and not fn.startswith("test_"):
+        if fn.endswith(".py") and fn in KNOWN_ROOT_MODULES and fn not in ROOT_PY_EXCLUDE and not fn.startswith("test_"):
             add(fn)
     for d in INCLUDE_DIRS + (("tests",) if with_tests else ()):
         dp = os.path.join(root, d)

@@ -15,7 +15,6 @@ import re
 import os
 import threading
 import requests
-from concurrent.futures import ThreadPoolExecutor
 from config import Config
 from key_manager import key_manager
 import incidents
@@ -1925,8 +1924,7 @@ def main(stop_event=None, pool=None, poll_params=None):
         STATE["started_at"] = time.time()
     STATE["alive"] = True
     STATE["stopped_reason"] = None
-    own_pool = pool is None
-    pool = pool or ThreadPoolExecutor(max_workers=max(1, Config.BOT_WORKERS), thread_name_prefix="transcribe")
+    _ = pool  # محفوظ للتوافق مع main.py واختبارات المرونة (الطابور الموحد voice_queue يدير المعالجة)
     offset = None
     stop_event = stop_event or threading.Event()
     backoff = netsession.NetBackoff()
@@ -2048,8 +2046,6 @@ def main(stop_event=None, pool=None, poll_params=None):
     finally:
         STATE["alive"] = False
         netsession.reset(reason=f"poller #{gen} exit")
-        if own_pool:
-            pool.shutdown(wait=False)
 
 
 def _wait(stop_event, seconds):

@@ -15,6 +15,7 @@ import time
 import pytest
 
 VALID_A = "AIzaSy" + "A" * 33
+VALID_AQ = "AQ.Ab8RN6Jx9YkLmNoPqRsTuVwXyZ0123456789abcd"
 TG_TOKEN = "1234567890:" + "B" * 35
 M1 = "gemini-3.6-flash"
 
@@ -88,12 +89,20 @@ def _voice_job(uid, mid=5):
 def test_redact_masks_gemini_telegram_web_tokens(fresh_env, monkeypatch):
     import logkit
     monkeypatch.setattr(logkit.Config, "WEB_ACCESS_TOKEN", "webtok-SECRET-12345")
-    txt = f"خطأ 403 للمفتاح {VALID_A} والتوكن {TG_TOKEN} و token=webtok-SECRET-12345 x-goog-api-key: {VALID_A}"
+    txt = f"خطأ 403 للمفتاح {VALID_A} ومفتاح {VALID_AQ} والتوكن {TG_TOKEN} و token=webtok-SECRET-12345 x-goog-api-key: {VALID_A}"
     out = logkit.redact(txt)
-    assert VALID_A not in out and TG_TOKEN not in out and "webtok-SECRET-12345" not in out
-    assert "AIza…****" in out and "****:****" in out
+    assert VALID_A not in out and VALID_AQ not in out and TG_TOKEN not in out and "webtok-SECRET-12345" not in out
+    assert "AIza…****" in out and "AQ.****" in out and "****:****" in out
     assert logkit.redact("") == "" and logkit.redact(None) is None
     assert logkit.redact("نص عادي بلا أسرار 123") == "نص عادي بلا أسرار 123"
+
+
+def test_redact_masks_aq_keys():
+    import logkit
+    raw = "key=AQ.Ab8RN6Jx9YkLmNoPqRsTuVwXyZ0123456789abcd error occurred"
+    redacted = logkit.redact(raw)
+    assert "AQ.Ab8RN6" not in redacted
+    assert "AQ.****" in redacted
 
 
 def test_redact_filter_protects_file_and_stream(LK, tmp_path):
