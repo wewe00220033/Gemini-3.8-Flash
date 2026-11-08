@@ -567,7 +567,7 @@ def test_local_provider_disabled_default(monkeypatch):
 
 def test_local_provider_redacts_secret_paths_and_tokens(monkeypatch, tmp_path):
     """التحقق الصارم من حجب المسارات السرية والتوكنات في مخرجات الخطأ وعدم تسريبها."""
-    import sys, importlib, text_assist, logkit
+    import sys, importlib, text_assist
     importlib.reload(text_assist)
     secret_script = tmp_path / "secrets" / "my_secret_worker.py"
     secret_script.parent.mkdir(parents=True, exist_ok=True)
