@@ -23,7 +23,7 @@ def pack():
 def _fake_project(tmp_path, with_secrets=True):
     """شجرة مشروع مصغّرة: ملفات تشغيل + أسرار وبيانات حية يجب ألا تدخل الأرشيف."""
     for f in ("main.py", "config.py", "key_manager.py", "telegram_bot.py", "web_service.py", "transcriber.py",
-              "requirements.txt", "VERSION", "README.md", ".env.example", "extra_module.py", "test_360_exhaustive.py"):
+              "requirements.txt", "VERSION", "README.md", ".env.example", "sessions.py", "test_360_exhaustive.py"):
         (tmp_path / f).write_text(f"# {f}\n", encoding="utf-8")
     (tmp_path / "static").mkdir()
     (tmp_path / "static" / "index.html").write_text("<html></html>", encoding="utf-8")
@@ -54,7 +54,7 @@ def test_pack_includes_runtime_only_and_excludes_secrets(pack, tmp_path):
     names = sorted(rel for rel, _ in members)
     with zipfile.ZipFile(out) as z:
         assert sorted(z.namelist()) == names and z.testzip() is None
-    assert "main.py" in names and "static/index.html" in names and "extra_module.py" in names
+    assert "main.py" in names and "static/index.html" in names and "sessions.py" in names
     assert ".env.example" in names                                   # القالب مسموح صراحة
     for forbidden in ("keys.json", ".env", ".env.prod", "state/jobs.ndjson", "logs/2026-10-26.log",
                       "backups/backup_2026-10-24_0300.zip", "__pycache__/main.cpython-312.pyc",
@@ -63,6 +63,21 @@ def test_pack_includes_runtime_only_and_excludes_secrets(pack, tmp_path):
         assert forbidden not in names, forbidden
     assert total == sum(os.path.getsize(ap) for _, ap in members) > 0
     assert not os.path.exists(out + ".tmp")
+
+
+def test_unknown_root_module_not_packed(pack, tmp_path):
+    """التحقق من أن الـ allowlist ترفض حزم أي موديول غير معتمد حتى لو كان برمجياً عادياً."""
+    root = _fake_project(tmp_path)
+    (tmp_path / "rogue_secret_worker.py").write_text("# rogue\n", encoding="utf-8")
+    (tmp_path / "arbitrary_script.py").write_text("# arbitrary\n", encoding="utf-8")
+    out = str(tmp_path / "test_out.zip")
+    members, _ = pack.build(out, root=str(root))
+    names = [rel for rel, _ in members]
+    assert "rogue_secret_worker.py" not in names
+    assert "arbitrary_script.py" not in names
+    with zipfile.ZipFile(out) as z:
+        assert "rogue_secret_worker.py" not in z.namelist()
+        assert "arbitrary_script.py" not in z.namelist()
 
 
 def test_pack_with_tests_flag_and_list_dry_run(pack, tmp_path):
@@ -95,6 +110,7 @@ def test_secret_guard_rejects_leak_even_if_allowlisted(pack, tmp_path, monkeypat
 def test_is_forbidden_patterns(pack):
     f = pack.is_forbidden
     assert f("keys.json") and f("sub/keys.json") and f(".env") and f(".env.local") and f("x/.env")
+    assert f("Keys.json") and f("KEYS.JSON") and f(".ENV") and f("x/KEYS.json")
     assert f("state/jobs.ndjson") and f("logs/a.log") and f("backups/b.zip") and f("transcripts/ALL.md")
     assert f("sessions/session_1.md") and f("data/x.txt") and f(".git/config") and f("a/__pycache__/b.pyc")
     assert f("glossary.json") and f("settings.json") and f("roles.json") and f("glossary.json.corrupt-1")
@@ -129,6 +145,9 @@ def test_real_repo_archive_has_no_secrets(pack, tmp_path):
         assert not rel.startswith(("tests/", "architecture-v2/", "genspark-review/", "requirements/", ".github/")), rel
         assert not rel.endswith(".bat"), rel
     assert "test_360_exhaustive.py" not in names
+    for mod in pack.KNOWN_ROOT_MODULES:
+        assert os.path.isfile(os.path.join(ROOT, mod)), f"موديول شبح داخل KNOWN_ROOT_MODULES: {mod}"
+        assert mod in names, f"موديول تشغيلي مفقود من حزمة الإنتاج: {mod}"
 
 
 def test_env_example_lists_only_vars_the_code_reads():

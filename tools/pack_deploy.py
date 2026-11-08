@@ -46,7 +46,7 @@ INCLUDE_EXTS = (".py", ".html", ".css", ".js", ".txt", ".md", ".json")
 # وحدات بايثون في الجذر — Allowlist حازمة تمنع تسريب أي سكريبت غير موثق صراحة
 KNOWN_ROOT_MODULES = (
     "archive.py", "assistant.py", "audit.py", "backup.py", "clock.py",
-    "config.py", "delivery.py", "extra_module.py", "fsm.py", "glossary.py", "heartbeat.py",
+    "config.py", "delivery.py", "fsm.py", "glossary.py", "heartbeat.py",
     "incidents.py", "interactions_client.py", "jobs.py", "key_manager.py",
     "logkit.py", "main.py", "model_state.py", "netsession.py",
     "observability.py", "panel.py", "preflight.py", "prompts.py",
@@ -72,16 +72,17 @@ def is_forbidden(rel):
     """True لو المسار النسبي سري/بيانات حية — يُستخدم كحارس نهائي على كل عضو."""
     rel = rel.replace("\\", "/")
     base = os.path.basename(rel)
+    base_lower = base.lower()
     parts = rel.split("/")
     if base == ".env.example":
         return False
-    if base in SECRET_BASENAMES or base in RUNTIME_JSON:
+    if base_lower in SECRET_BASENAMES or base_lower in RUNTIME_JSON:
         return True
-    if any(base.startswith(p) for p in SECRET_PREFIXES):
+    if any(base_lower.startswith(p) for p in SECRET_PREFIXES):
         return True
-    if any(p in SECRET_DIR_PARTS for p in parts[:-1]):
+    if any(p.lower() in SECRET_DIR_PARTS for p in parts[:-1]):
         return True
-    if rel.endswith(SECRET_EXTS) or ".corrupt-" in base:
+    if rel.lower().endswith(SECRET_EXTS) or ".corrupt-" in base_lower:
         return True
     return False
 
