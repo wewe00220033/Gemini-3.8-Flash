@@ -18,6 +18,7 @@ import re
 import os
 import subprocess
 import shlex
+import logging
 
 import requests
 
@@ -25,9 +26,21 @@ from config import Config
 from key_manager import key_manager
 import prompts
 import transcriber
+import logkit
+
+logger = logging.getLogger("text_assist")
 
 _lock = threading.RLock()
-_state = {"thinking_ok": None, "calls": 0, "ok": 0, "fail": 0, "last_error": None}
+_state = {
+    "thinking_ok": None,
+    "calls": 0,
+    "ok": 0,
+    "fail": 0,
+    "last_error": None,
+    "local_calls": 0,
+    "local_ok": 0,
+    "local_fail": 0,
+}
 _INVISIBLE_RE = re.compile(r"[\u200b-\u200f\ufeff\u202a-\u202e\s]+")
 
 
@@ -155,12 +168,18 @@ def _call_local_provider(system_text, raw_text):
         )
         elapsed = time.time() - t0
         if res.returncode == 0 and res.stdout.strip():
-            print(f"✨ [local] polish في {elapsed:.1f} ث")
+            logger.info("✨ [local] polish في %.1f ث", elapsed)
+            print(logkit.redact(f"✨ [local] polish في {elapsed:.1f} ث"))
             return res.stdout.strip(), None
-        err_msg = res.stderr.strip()[:100] if res.stderr else f"خروج غير صفري ({res.returncode})"
-        return None, f"فشل المزود المحلي: {err_msg}"
+        raw_err = res.stderr.strip().splitlines()[-1][:120] if res.stderr else f"خروج غير صفري ({res.returncode})"
+        clean_err = re.sub(r'([A-Za-z]:[\\/][^\s:"\'\)]+|/(?:home|var|usr|etc|root|data)[^\s:"\'\)]+)', '<PATH>', raw_err)
+        clean_err = logkit.redact(clean_err)
+        return None, f"فشل المزود المحلي: {clean_err}"
     except subprocess.TimeoutExpired:
         return None, f"تجاوز مهلة المزود المحلي ({timeout}ث)"
+    except FileNotFoundError:
+        exec_name = cmd_args[0] if isinstance(cmd_args, list) and cmd_args else str(cmd)
+        return None, logkit.redact(f"أمر المزود المحلي غير موجود (FileNotFoundError: {exec_name})")
     except Exception as e:
         return None, f"خطأ استدعاء المزود المحلي ({type(e).__name__})"
 
@@ -187,16 +206,24 @@ def polish(raw_text, role_id=None, glossary=None, context_summary=None):
         text, reason = _call_local_provider(system_text, raw_text)
         if text:
             with _lock:
+                _state["local_calls"] = _state.get("local_calls", 0) + 1
+                _state["local_ok"] = _state.get("local_ok", 0) + 1
+                _state["calls"] += 1
                 _state["ok"] += 1
         else:
-            print(f"⚠️ المزود المحلي: {reason} — تحويل تلقائي فوري إلى Gemini...")
+            with _lock:
+                _state["local_calls"] = _state.get("local_calls", 0) + 1
+                _state["local_fail"] = _state.get("local_fail", 0) + 1
+            reason = logkit.redact(reason)
+            logger.warning("⚠️ المزود المحلي: %s — تحويل تلقائي فوري إلى Gemini...", reason)
+            print(logkit.redact(f"⚠️ المزود المحلي: {reason} — تحويل تلقائي فوري إلى Gemini..."))
 
     # 2. المسار السحابي الافتراضي (Gemini Flash-Lite) لو المحلي غير مفعل أو فشل
     if text is None:
         text, reason = generate(system_text, raw_text)
 
     if text is None:
-        return None, reason
+        return None, logkit.redact(reason)
     if glossary is not None:
         text, _n = glossary.apply(text, target="polished")
     return text.strip(), None

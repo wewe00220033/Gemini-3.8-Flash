@@ -21,6 +21,7 @@ import settings
 import prompts
 import glossary as glossary_mod
 import sessions
+import logkit
 
 
 class Sender:
@@ -227,7 +228,8 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
                                                    caption="📝 النسخة المنظمة (طويلة → ملف)",
                                                    head_html=_entry_head_html(result["title"], session_name))
         else:
-            result["polish_error"] = reason
+            redacted_reason = logkit.redact(reason) if reason else None
+            result["polish_error"] = redacted_reason
             if getattr(sender, "set_reaction", None):
                 try:
                     sender.set_reaction(Config.REACTION_DONE)
@@ -237,10 +239,10 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
                 # لا خام أُرسل: نرسل الخام كبديل حتى لا يضيع الفويس (07 §2.2 روح القرار: لا رفض)
                 result["raw_msg_id"] = _send_long(sender, raw_message_html(raw, footer_html), raw, reply_to_id,
                                                   filename_prefix="transcript", caption="📄 التفريغ الخام")
-                sender.send_text(f"⚠️ تعذر التنظيم الآن ({html.escape(str(reason or ''))}) — أرسلت الخام بدلاً منه.",
+                sender.send_text(f"⚠️ تعذر التنظيم الآن ({html.escape(str(redacted_reason or ''))}) — أرسلت الخام بدلاً منه.",
                                  result["raw_msg_id"], "HTML")
             else:
-                sender.send_text(f"⚠️ تعذر التنظيم الآن ({html.escape(str(reason or ''))}) — الخام فوق.", anchor, "HTML")
+                sender.send_text(f"⚠️ تعذر التنظيم الآن ({html.escape(str(redacted_reason or ''))}) — الخام فوق.", anchor, "HTML")
 
     # 5) L2 (10 §2): كل SESSION_SUMMARY_EVERY فويسات → تحديث ملخص الجلسة (نداء lite نصي واحد) — للتنظيم القادم فقط
     if archive_entry and session_name:

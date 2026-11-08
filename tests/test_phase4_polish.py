@@ -564,3 +564,46 @@ def test_local_provider_disabled_default(monkeypatch):
     assert err is None
     assert res == "جيميني الافتراضي"
 
+
+def test_local_provider_redacts_secret_paths_and_tokens(monkeypatch, tmp_path):
+    """التحقق الصارم من حجب المسارات السرية والتوكنات في مخرجات الخطأ وعدم تسريبها."""
+    import sys, importlib, text_assist, logkit
+    importlib.reload(text_assist)
+    secret_script = tmp_path / "secrets" / "my_secret_worker.py"
+    secret_script.parent.mkdir(parents=True, exist_ok=True)
+    secret_script.write_text(
+        'import sys\n'
+        'sys.stderr.write("boom at D:/private/secrets/my_org.py with token=123456789012345678\\n")\n'
+        'sys.exit(1)\n',
+        encoding="utf-8"
+    )
+    cmd = f'"{sys.executable}" "{secret_script}"'
+    monkeypatch.setattr(text_assist.Config, "LOCAL_POLISH_CMD", cmd)
+    text, reason = text_assist._call_local_provider("sys", "usr")
+    assert text is None
+    # التحقق القاطع: لا يظهر المسار السري ولا التوكن في reason
+    assert "D:/private/secrets/my_org.py" not in reason
+    assert "123456789012345678" not in reason
+    assert "<PATH>" in reason or "<LOCAL_PROVIDER" in reason
+
+
+def test_local_provider_observability_and_stats(monkeypatch, tmp_path):
+    """التحقق من دقة المقاييس التشغيلية (Observability) وعدم تضخيم _state['ok']."""
+    import sys, importlib, text_assist
+    real_polish = importlib.reload(text_assist).polish
+    monkeypatch.setattr(text_assist, "polish", real_polish)
+    script = tmp_path / "quick_ok.py"
+    script.write_text('import sys\nsys.stdout.write("منظم محلي\\n")\n', encoding="utf-8")
+    monkeypatch.setattr(text_assist.Config, "LOCAL_POLISH_CMD", f'"{sys.executable}" "{script}"')
+
+    st_before = text_assist.stats()
+    res, err = text_assist.polish("نص خام")
+    st_after = text_assist.stats()
+
+    assert res == "منظم محلي" and err is None
+    # الزيادة واحدة فقط وليست مضاعفة (لا تضخم)
+    assert st_after["calls"] == st_before["calls"] + 1
+    assert st_after["ok"] == st_before["ok"] + 1
+    assert st_after["local_calls"] == st_before.get("local_calls", 0) + 1
+    assert st_after["local_ok"] == st_before.get("local_ok", 0) + 1
+
