@@ -1244,12 +1244,17 @@ def _sessions_text():
 
 
 def _pipeline_text():
-    """سطر خط الإنتاج في /status (المرحلة 3): الدور، وضع الإرسال، البانر، حجم الأرشيف، القاموس."""
+    """سطر خط الإنتاج في /status (المرحلة 3): الدور، وضع الإرسال، البانر، حجم الأرشيف، القاموس، والمزود المحلي."""
     r = prompts.get_role(settings.role()) or {}
     gl = glossary_mod.get_glossary()
     pend = sum(1 for e in gl.entries(False) if e.get("status") == "pending")
+    import text_assist
+    st = text_assist.stats()
+    local_info = ""
+    if getattr(Config, "LOCAL_POLISH_CMD", ""):
+        local_info = f" | مزود محلي نشط (نجح {st.get('local_ok', 0)}/{st.get('local_calls', 0)})"
     return (f"🏭 خط الإنتاج: دور {settings.role()} ({r.get('name', '?')}) | إرسال {settings.delivery_mode()} | بانر {settings.header_target()} | "
-            f"أرشيف {archive.count_entries()} تفريغ | قاموس {len(gl.entries(False))} مدخل" + (f" ({pend} معلَّق — /glossary)" if pend else ""))
+            f"أرشيف {archive.count_entries()} تفريغ | قاموس {len(gl.entries(False))} مدخل" + (f" ({pend} معلَّق — /glossary)" if pend else "") + local_info)
 
 
 def _models_state_text():

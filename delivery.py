@@ -97,8 +97,10 @@ def prepare_for_web(raw_text, model=None, key_name=None, info=None, polish_fn=No
                 polish_fn = text_assist.polish
             kwargs = {"context_summary": sessions.summary()} if _accepts_context_summary(polish_fn) else {}
             polished, polish_error = polish_fn(raw, role_id, gl, **kwargs)
+            if polish_error:
+                polish_error = logkit.redact(polish_error)
         except Exception as e:
-            polished, polish_error = None, f"{type(e).__name__}: {e}"
+            polished, polish_error = None, logkit.redact(f"{type(e).__name__}: {e}")
             print(f"⚠️ التنظيم (ويب): {polish_error}")
     try:
         archived = archive.append(raw, model=model, elapsed=info.get("elapsed"), key_name=key_name,

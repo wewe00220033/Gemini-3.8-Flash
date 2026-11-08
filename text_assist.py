@@ -169,7 +169,6 @@ def _call_local_provider(system_text, raw_text):
         elapsed = time.time() - t0
         if res.returncode == 0 and res.stdout.strip():
             logger.info("✨ [local] polish في %.1f ث", elapsed)
-            print(logkit.redact(f"✨ [local] polish في {elapsed:.1f} ث"))
             return res.stdout.strip(), None
         raw_err = res.stderr.strip().splitlines()[-1][:120] if res.stderr else f"خروج غير صفري ({res.returncode})"
         clean_err = re.sub(r'([A-Za-z]:[\\/][^\s:"\'\)]+|/(?:home|var|usr|etc|root|data)[^\s:"\'\)]+)', '<PATH>', raw_err)
@@ -211,12 +210,12 @@ def polish(raw_text, role_id=None, glossary=None, context_summary=None):
                 _state["calls"] += 1
                 _state["ok"] += 1
         else:
+            reason = logkit.redact(reason)
             with _lock:
                 _state["local_calls"] = _state.get("local_calls", 0) + 1
                 _state["local_fail"] = _state.get("local_fail", 0) + 1
-            reason = logkit.redact(reason)
+                _state["local_last_error"] = str(reason or "")
             logger.warning("⚠️ المزود المحلي: %s — تحويل تلقائي فوري إلى Gemini...", reason)
-            print(logkit.redact(f"⚠️ المزود المحلي: {reason} — تحويل تلقائي فوري إلى Gemini..."))
 
     # 2. المسار السحابي الافتراضي (Gemini Flash-Lite) لو المحلي غير مفعل أو فشل
     if text is None:
