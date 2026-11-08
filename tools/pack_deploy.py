@@ -44,13 +44,13 @@ OPTIONAL_FILES = (
 INCLUDE_DIRS = ("static",)
 INCLUDE_EXTS = (".py", ".html", ".css", ".js", ".txt", ".md", ".json")
 # وحدات بايثون في الجذر — تُضمَّن كلها ما عدا المستبعد أدناه
-ROOT_PY_EXCLUDE = ("test_360_exhaustive.py",)
+ROOT_PY_EXCLUDE = ("test_360_exhaustive.py", "provider_local.py", "local_provider.py", "custom_provider.py", "polish_provider.py")
 
 # حارس الأسرار/البيانات: أي عضو يطابق أحد هذه الأنماط يُفشل الأرشيف
 SECRET_BASENAMES = ("keys.json", "keys.txt", ".env", ".persist_probe", "backup_state.json", "current_session.json")
-SECRET_PREFIXES = (".env.",)                     # .env.local, .env.prod … (لكن .env.example مسموح صراحة)
+SECRET_PREFIXES = (".env.", "provider_local", "local_provider", "custom_provider", ".local")                     # .env.local, .env.prod … (لكن .env.example مسموح صراحة)
 SECRET_DIR_PARTS = ("state", "logs", "backups", "transcripts", "sessions", "incidents", "data",
-                    ".git", "__pycache__", ".smoke_failover", ".pytest_cache")
+                    ".git", "__pycache__", ".smoke_failover", ".pytest_cache", ".local", ".secrets")
 SECRET_EXTS = (".ndjson", ".log", ".pyc")
 RUNTIME_JSON = ("glossary.json", "roles.json", "settings.json", "sessions_index.json")
 

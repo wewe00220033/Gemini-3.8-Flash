@@ -3,6 +3,8 @@ keys.txt
 keys.json
 .env
 *.env
+.local/
+.secrets/
 
 # Python Cache
 __pycache__/

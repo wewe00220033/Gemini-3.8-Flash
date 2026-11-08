@@ -32,6 +32,9 @@ def redact(text):
     wt = getattr(Config, "WEB_ACCESS_TOKEN", "") or ""
     if len(wt) >= 8:
         t = t.replace(wt, "****")
+    lcmd = getattr(Config, "LOCAL_POLISH_CMD", "") or ""
+    if len(lcmd) >= 4:
+        t = t.replace(lcmd, "<LOCAL_POLISH_CMD>")
     t = _BEARER_RE.sub(lambda m: m.group(1) + m.group(2) + "****", t)
     return t
 

@@ -15,6 +15,9 @@
 import time
 import threading
 import re
+import os
+import subprocess
+import shlex
 
 import requests
 
@@ -125,11 +128,49 @@ def generate(system_text, user_text, timeout=None):
     return None, last_reason
 
 
+def _call_local_provider(system_text, raw_text):
+    """
+    استدعاء المزود المحلي المستقل كـ Black-Box CLI عبر subprocess.run بمهلة وإغلاق آمن.
+    يرجع (text, None) عند النجاح، أو (None, reason) عند الفشل/المهلة.
+    """
+    cmd = getattr(Config, "LOCAL_POLISH_CMD", "") or ""
+    if not cmd:
+        return None, "لا يوجد مزود محلي مهيأ"
+    timeout = getattr(Config, "LOCAL_POLISH_TIMEOUT", 8.0) or 8.0
+    payload = f"{system_text}\n\n===USER_INPUT===\n{raw_text}"
+    t0 = time.time()
+    try:
+        if isinstance(cmd, str):
+            cmd_args = cmd if os.name == "nt" else shlex.split(cmd)
+        else:
+            cmd_args = cmd
+        res = subprocess.run(
+            cmd_args,
+            input=payload,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+        )
+        elapsed = time.time() - t0
+        if res.returncode == 0 and res.stdout.strip():
+            print(f"✨ [local] polish في {elapsed:.1f} ث")
+            return res.stdout.strip(), None
+        err_msg = res.stderr.strip()[:100] if res.stderr else f"خروج غير صفري ({res.returncode})"
+        return None, f"فشل المزود المحلي: {err_msg}"
+    except subprocess.TimeoutExpired:
+        return None, f"تجاوز مهلة المزود المحلي ({timeout}ث)"
+    except Exception as e:
+        return None, f"خطأ استدعاء المزود المحلي ({type(e).__name__})"
+
+
 def polish(raw_text, role_id=None, glossary=None, context_summary=None):
     """
     يحوّل الخام إلى منظم (طبقة B). يرجع (polished, None) أو (None, reason). لا يلمس الخام ولا الصوت.
     القاموس (scope polished) يُطبَّق على الناتج.
     context_summary (10 §2 L2): ملخص الجلسة التراكمي — يُضاف لنص النظام «للفهم فقط»؛ لا يُعاد كتابته ولا يُدمج في الناتج.
+    يدعم المزود المحلي المستقل (LOCAL_POLISH_CMD) مع التحويل التلقائي لـ Gemini Flash-Lite.
     """
     if is_effective_empty(raw_text):
         return None, "نص فارغ"
@@ -138,7 +179,22 @@ def polish(raw_text, role_id=None, glossary=None, context_summary=None):
     if context_summary:
         system_text += ("\n\nملخص الجلسة حتى الآن (للفهم فقط — لا تضفه ولا تعِد كتابته، نظّم النص الجديد فقط):\n"
                         + str(context_summary)[:Config.SESSION_SUMMARY_MAX_CHARS])
-    text, reason = generate(system_text, raw_text)
+
+    text = None
+    reason = None
+    # 1. محاولة المزود المحلي أولاً إذا كان معرّفاً
+    if getattr(Config, "LOCAL_POLISH_CMD", ""):
+        text, reason = _call_local_provider(system_text, raw_text)
+        if text:
+            with _lock:
+                _state["ok"] += 1
+        else:
+            print(f"⚠️ المزود المحلي: {reason} — تحويل تلقائي فوري إلى Gemini...")
+
+    # 2. المسار السحابي الافتراضي (Gemini Flash-Lite) لو المحلي غير مفعل أو فشل
+    if text is None:
+        text, reason = generate(system_text, raw_text)
+
     if text is None:
         return None, reason
     if glossary is not None:

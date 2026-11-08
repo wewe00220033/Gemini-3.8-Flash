@@ -178,6 +178,9 @@ class Config:
     TEXT_ASSIST_THINKING_BUDGET = int(os.environ.get("TEXT_ASSIST_THINKING_BUDGET", "2048"))   # أقصى تفكير (قرار المالك)
     TEXT_ASSIST_TIMEOUT = int(os.environ.get("TEXT_ASSIST_TIMEOUT", "40"))
     TEXT_ASSIST_DAILY_QUOTA = 500
+    # المزود المحلي لطبقة التنظيم النصي (Pluggable Local Polish Provider)
+    LOCAL_POLISH_CMD = os.environ.get("LOCAL_POLISH_CMD", "").strip()
+    LOCAL_POLISH_TIMEOUT = float(os.environ.get("LOCAL_POLISH_TIMEOUT", "8.0"))
     POLISH_FILE_THRESHOLD = 12000          # 07 §4: نص > ~3 رسائل → يُرسل كملف .md + معاينة
     PANEL_PAGE_SIZE = 5
 

@@ -461,3 +461,106 @@ def test_delivery_passes_summary_to_polish_never_to_transcription(S, fresh_env, 
     S.end()
     res = delivery.deliver("بلا جلسة الآن", M1, "A", {}, sender, polish_fn=polish_fn, title_fn=lambda r: None)
     assert seen[-1] is None and res["summary_updated"] is False
+
+
+# ==============================================================
+# 8. اختبارات المزود المحلي المستقل (Pluggable Local Polish Provider)
+# ==============================================================
+
+def test_local_provider_success(monkeypatch, tmp_path):
+    """سكربت محلي حقيقي يقرأ من stdin ويرجع نصاً منظماً بترميز UTF-8."""
+    import sys, importlib
+    script = tmp_path / "mock_polish.py"
+    script.write_text(
+        '# -*- coding: utf-8 -*-\n'
+        'import sys\n'
+        'txt = sys.stdin.read()\n'
+        'assert "===USER_INPUT===" in txt\n'
+        'sys.stdout.write("نص منظم محلياً بنجاح ✨\\n")\n',
+        encoding="utf-8"
+    )
+    import text_assist
+    real_polish = importlib.reload(text_assist).polish
+    monkeypatch.setattr(text_assist, "polish", real_polish)
+    monkeypatch.setattr(text_assist.Config, "LOCAL_POLISH_CMD", f'"{sys.executable}" "{script}"')
+    monkeypatch.setattr(text_assist.Config, "LOCAL_POLISH_TIMEOUT", 5.0)
+
+    res, err = text_assist.polish("فويس خام للتجربة")
+    assert err is None
+    assert "نص منظم محلياً بنجاح ✨" in res
+
+
+def test_local_provider_timeout_fallback(monkeypatch, tmp_path):
+    """لو السكربت المحلي دخل في نوم/مهلة، يُقتل تلقائياً ويحول فوراً لـ Gemini."""
+    import sys, importlib
+    script = tmp_path / "hang_polish.py"
+    script.write_text(
+        'import time, sys\n'
+        'time.sleep(2.0)\n'
+        'sys.stdout.write("متأخر جداً")\n',
+        encoding="utf-8"
+    )
+    import text_assist
+    real_polish = importlib.reload(text_assist).polish
+    monkeypatch.setattr(text_assist, "polish", real_polish)
+    monkeypatch.setattr(text_assist.Config, "LOCAL_POLISH_CMD", f'"{sys.executable}" "{script}"')
+    monkeypatch.setattr(text_assist.Config, "LOCAL_POLISH_TIMEOUT", 0.1)
+    monkeypatch.setattr(text_assist, "generate", lambda sys_t, raw_t: ("بديل سحابي من Gemini", None))
+
+    res, err = text_assist.polish("فويس خام")
+    assert err is None
+    assert res == "بديل سحابي من Gemini"
+
+
+def test_local_provider_error_fallback(monkeypatch, tmp_path):
+    """لو السكربت المحلي رمى استثناء أو خرج بـ exit code != 0، يحول تلقائياً لـ Gemini."""
+    import sys, importlib
+    script = tmp_path / "fail_polish.py"
+    script.write_text(
+        'import sys\n'
+        'sys.stderr.write("Internal secret error at D:/private/key.py\\n")\n'
+        'sys.exit(1)\n',
+        encoding="utf-8"
+    )
+    import text_assist
+    real_polish = importlib.reload(text_assist).polish
+    monkeypatch.setattr(text_assist, "polish", real_polish)
+    monkeypatch.setattr(text_assist.Config, "LOCAL_POLISH_CMD", f'"{sys.executable}" "{script}"')
+    monkeypatch.setattr(text_assist.Config, "LOCAL_POLISH_TIMEOUT", 5.0)
+    monkeypatch.setattr(text_assist, "generate", lambda sys_t, raw_t: ("بديل سحابي بعد الفشل", None))
+
+    res, err = text_assist.polish("فويس خام")
+    assert err is None
+    assert res == "بديل سحابي بعد الفشل"
+
+
+def test_local_provider_empty_stdout_fallback(monkeypatch, tmp_path):
+    """لو السكربت المحلي خرج بـ 0 لكن stdout فارغ، يحول تلقائياً لـ Gemini."""
+    import sys, importlib
+    script = tmp_path / "empty_polish.py"
+    script.write_text('import sys\nsys.exit(0)\n', encoding="utf-8")
+    import text_assist
+    real_polish = importlib.reload(text_assist).polish
+    monkeypatch.setattr(text_assist, "polish", real_polish)
+    monkeypatch.setattr(text_assist.Config, "LOCAL_POLISH_CMD", f'"{sys.executable}" "{script}"')
+    monkeypatch.setattr(text_assist.Config, "LOCAL_POLISH_TIMEOUT", 5.0)
+    monkeypatch.setattr(text_assist, "generate", lambda sys_t, raw_t: ("بديل سحابي بعد الفراغ", None))
+
+    res, err = text_assist.polish("فويس خام")
+    assert err is None
+    assert res == "بديل سحابي بعد الفراغ"
+
+
+def test_local_provider_disabled_default(monkeypatch):
+    """لو LOCAL_POLISH_CMD فارغ، يستمر المسار الطبيعي لـ Gemini دون محاولة استدعاء subprocess."""
+    import importlib
+    import text_assist
+    real_polish = importlib.reload(text_assist).polish
+    monkeypatch.setattr(text_assist, "polish", real_polish)
+    monkeypatch.setattr(text_assist.Config, "LOCAL_POLISH_CMD", "")
+    monkeypatch.setattr(text_assist, "generate", lambda sys_t, raw_t: ("جيميني الافتراضي", None))
+
+    res, err = text_assist.polish("فويس عادي")
+    assert err is None
+    assert res == "جيميني الافتراضي"
+

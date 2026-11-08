@@ -60,3 +60,4 @@
 3. **الكود التنفيذي في `text_assist.py`:**
    دالة خفيفة `_call_local_provider(prompt, raw_text)` تستخدم `subprocess.run` المباشرة، وتُستدعى داخل `polish()` فقط، وتتحول تلقائياً وسلساً لـ `generate()` السحابية لـ Gemini Flash-Lite في حال الغياب أو الفشل.
 4. **تأمين النشر:** استبعاد بادئات المزودات المحلية من `tools/pack_deploy.py`.
+
