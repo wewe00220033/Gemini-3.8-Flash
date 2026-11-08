@@ -370,5 +370,5 @@ class Config:
     # فاضي = البوت يرفض الجميع حتى تضبط TELEGRAM_CHAT_ID في البيئة أو .env
     DEFAULT_CHAT_ID = ""
 
-    # مسار تسجيلات الصوت الافتراضي للكمبيوتر
-    DEFAULT_RECORDINGS_DIR = r"C:\Users\USER\Documents\تسجيلات الصوت"
+    # مسار تسجيلات الصوت الافتراضي للكمبيوتر (يُحدد عبر RECORDINGS_DIR في .env)
+    DEFAULT_RECORDINGS_DIR = os.environ.get("RECORDINGS_DIR", "")

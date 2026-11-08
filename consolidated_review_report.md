@@ -58,7 +58,7 @@
 
 #### [B1] ثغرة حجب مفاتيح الـ API في `logkit.py`
 - **التشخيص:**
-  في [`logkit.py`](file:///c:/Users/USER/Downloads/111/منظومة_التفريغ_الصوتي_الذكي_Gemini/logkit.py#L21):
+  في [`logkit.py`](logkit.py#L21):
   ```python
   _GEMINI_RE = re.compile(r"AIza[0-9A-Za-z_\-]{35}")
   ```
@@ -107,19 +107,19 @@
 ## 🛠️ خطة العمل التنفيذية لمعالجة كافة الثغرات (Consolidated Action Plan)
 
 ### المرحلة الأولى: تصحيح التوثيق ودفاتر الاستئناف (Documentation & Drift Sync)
-1. تحديث [`RESUME.md`](file:///c:/Users/USER/Downloads/111/منظومة_التفريغ_الصوتي_الذكي_Gemini/RESUME.md) و [`Antigravity/RESUME.md`](file:///c:/Users/USER/Downloads/111/منظومة_التفريغ_الصوتي_الذكي_Gemini/Antigravity/RESUME.md):
+1. تحديث [`RESUME.md`](RESUME.md) و [`Antigravity/RESUME.md`](Antigravity/RESUME.md):
    - تصحيح أسماء الموديلات (3.6-flash و 3.5-transcribe).
    - توحيد مهلة 8.0s والمتغيرات والـ 502 اختباراً.
-2. تحديث [`README.md`](file:///c:/Users/USER/Downloads/111/منظومة_التفريغ_الصوتي_الذكي_Gemini/README.md):
+2. تحديث [`README.md`](README.md):
    - تحديث العداد إلى 502 اختباراً.
    - تصحيح سطر المرحلة القادمة وتحديث جدول المتغيرات.
-3. تحديث [`Antigravity/02_التدقيق_المقارن_وتفنيد_تقرير_Arena_AI.md`](file:///c:/Users/USER/Downloads/111/منظومة_التفريغ_الصوتي_الذكي_Gemini/Antigravity/02_التدقيق_المقارن_وتفنيد_تقرير_Arena_AI.md) في سطور 69 و 78 لتصبح 8.0s.
+3. تحديث [`Antigravity/02_التدقيق_المقارن_وتفنيد_تقرير_Arena_AI.md`](Antigravity/02_التدقيق_المقارن_وتفنيد_تقرير_Arena_AI.md) في سطور 69 و 78 لتصبح 8.0s.
 
 ### المرحلة الثانية: التحصين الأمني وتنظيف الكود (Security & Dead-Code Purge)
-1. تحديث [`logkit.py`](file:///c:/Users/USER/Downloads/111/منظومة_التفريغ_الصوتي_الذكي_Gemini/logkit.py): حجب كافة مفاتيح `key_manager` ديناميكياً ودعم بادئات `AQ...`.
-2. تنظيف [`telegram_bot.py`](file:///c:/Users/USER/Downloads/111/منظومة_التفريغ_الصوتي_الذكي_Gemini/telegram_bot.py): حذف كائن `pool = ThreadPoolExecutor` وسطور الطباعة الميتة المرتبطة به.
-3. تحصين [`tools/pack_deploy.py`](file:///c:/Users/USER/Downloads/111/منظومة_التفريغ_الصوتي_الذكي_Gemini/tools/pack_deploy.py): استبعاد أي ملف يطابق `*polish*.py` و `*provider*.py` في الجذر.
-4. تحسين [`text_assist.py`](file:///c:/Users/USER/Downloads/111/منظومة_التفريغ_الصوتي_الذكي_Gemini/text_assist.py): معالجة رسالة الخطأ المتناقضة `"خروج غير صفري (0)"` عند فراغ المخرجات.
+1. تحديث [`logkit.py`](logkit.py): حجب كافة مفاتيح `key_manager` ديناميكياً ودعم بادئات `AQ...`.
+2. تنظيف [`telegram_bot.py`](telegram_bot.py): حذف كائن `pool = ThreadPoolExecutor` وسطور الطباعة الميتة المرتبطة به.
+3. تحصين [`tools/pack_deploy.py`](tools/pack_deploy.py): استبعاد أي ملف يطابق `*polish*.py` و `*provider*.py` في الجذر.
+4. تحسين [`text_assist.py`](text_assist.py): معالجة رسالة الخطأ المتناقضة `"خروج غير صفري (0)"` عند فراغ المخرجات.
 
 ---
 
