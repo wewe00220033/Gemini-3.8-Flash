@@ -468,3 +468,43 @@ def test_deliver_synthesizer_oversized_fallback(monkeypatch):
     finally:
         settings.set_compare_mode(old_mode)
 
+
+def test_deliver_synthesizer_gemini_503_shelby_rescues(monkeypatch):
+    monkeypatch.setattr(Config, "LOCAL_POLISH_CMD", "dummy_local")
+    monkeypatch.setattr(delivery.Config, "LOCAL_POLISH_CMD", "dummy_local")
+    old_mode = settings.compare_mode()
+    settings.set_compare_mode("synthesizer")
+    try:
+        fs = FakeSender()
+        res = delivery.deliver(
+            raw_text="فويس فحص إنقاذ شلبي عند سقوط جيميني 503",
+            model="gemini-3.6-flash",
+            key_name="TestKey",
+            info={},
+            sender=fs.as_sender(),
+            reply_to_id=60,
+            archive_entry=False,
+            # محاكاة خطأ MODEL_DOWN 503 من جيميني
+            polish_fn=lambda r, ro, gl, **kw: (None, "MODEL_DOWN (503)"),
+            # شلبي ينجح محلياً
+            local_polish_fn=lambda r, ro, gl, **kw: ("مسودة شلبي المنقذة للبشرية", None),
+        )
+        t = res.get("compare_thread")
+        assert t is not None
+        t.join(timeout=3)
+
+        # 1. الرسالة الأولى كانت إشعار إنقاذ
+        assert len(fs.sent_texts) >= 2
+        rescue_init_msg = fs.sent_texts[1][1]
+        assert "تعذر منظم جيميني" in rescue_init_msg
+        assert "جاري تنظيم النص عبر شلبي" in rescue_init_msg
+
+        # 2. تعديل الرسالة في مكانها بمسودة شلبي بعد نجاحه!
+        assert len(fs.edited_texts) == 1
+        edited_msg = fs.edited_texts[0][1]
+        assert "مسودة شلبي المنقذة للبشرية" in edited_msg
+        assert "🦙 <b>[شلبي]</b>" in edited_msg
+    finally:
+        settings.set_compare_mode(old_mode)
+
+

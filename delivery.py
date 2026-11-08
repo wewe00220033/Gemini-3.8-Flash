@@ -355,7 +355,59 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
             polished, reason = None, f"{type(e).__name__}: {e}"
         gemini_elapsed = time.time() - t0_gemini
         anchor = result["raw_msg_id"] or reply_to_id
-        if polished:
+        if not polished and is_compare:
+            # 🛡️ صمام الأمان الفولاذي: إذا تعذر جيميني السحابي (503 / 429 / مهلة)،
+            # لا نستسلم ولا نوقف شلبي أبداً! نستدعي شلبي المحلي فوراً كمنقذ وبديل في نفس الرسالة.
+            rescue_msg = f"⏳ <i>تعذر منظم جيميني السحابي ({html.escape(str(reason or '503'))}) — جاري تنظيم النص عبر شلبي محلياً...</i>"
+            mid = sender.send_text(rescue_msg, anchor, "HTML")
+            result["polished_msg_id"] = mid
+
+            def _bg_shelby_rescue():
+                try:
+                    s_fn = local_polish_fn
+                    if s_fn is None:
+                        import text_assist
+                        s_fn = text_assist.polish_local
+                    s_kwargs = {"context_summary": l2} if _accepts_context_summary(s_fn) else {}
+                    s_text, s_err = s_fn(raw, role_id, gl, **s_kwargs)
+                    if s_text:
+                        result["polished"] = s_text
+                        if getattr(sender, "set_reaction", None):
+                            try:
+                                sender.set_reaction(Config.REACTION_DONE)
+                            except Exception:
+                                pass
+                        if archive_entry:
+                            archive.append_polished(s_text)
+                            if session_name:
+                                sessions.append_polished(s_text)
+                        s_html = polished_message_html(
+                            s_text, role_id, session_name,
+                            provider_tag="🦙 <b>[شلبي]</b>", title=result["title"]
+                        )
+                        edited = False
+                        if len(s_html) <= Config.TELEGRAM_MAX_MSG - 50 and getattr(sender, "edit_text", None):
+                            try:
+                                res = sender.edit_text(mid, s_html, "HTML")
+                                edited = (res is not False)
+                            except Exception:
+                                edited = False
+                        if not edited:
+                            _send_long(sender, s_html, s_text, mid or anchor, filename_prefix="shelby_polished",
+                                       caption="🦙 نسخة شلبي المنظمة (بديل لتعذر جيميني السحابي)",
+                                       head_html=_entry_head_html(result["title"], session_name))
+                    else:
+                        err_html = f"⚠️ تعذر التنظيم عبر جيميني وشلبي ({html.escape(str(s_err or reason or ''))}) — الخام فوق."
+                        if getattr(sender, "edit_text", None):
+                            sender.edit_text(mid, err_html, "HTML")
+                except Exception as e:
+                    print(f"⚠️ Shelby rescue error: {e}")
+
+            t = threading.Thread(target=_bg_shelby_rescue, daemon=True)
+            t.start()
+            result["compare_thread"] = t
+
+        elif polished:
             result["polished"] = polished
             if getattr(sender, "set_reaction", None):
                 try:
