@@ -304,10 +304,32 @@ def send_html_get_id(token, chat_id, text, reply_to_id=None):
     return first_id
 
 
+def _extract_retry_after(resp):
+    """يقرأ retry_after من استجابة تليجرام 429 (JSON أو Header) مع حد أدنى آمن."""
+    try:
+        if callable(getattr(resp, "json", None)):
+            data = resp.json()
+            if isinstance(data, dict):
+                ra = (data.get("parameters") or {}).get("retry_after")
+                if ra is not None:
+                    return float(ra)
+    except Exception:
+        pass
+    try:
+        hdrs = getattr(resp, "headers", None) or {}
+        ra = hdrs.get("Retry-After") or hdrs.get("retry-after")
+        if ra is not None:
+            return float(ra)
+    except Exception:
+        pass
+    return 1.0
+
+
 def edit_telegram_message(token, chat_id, message_id, text, parse_mode="HTML"):
     """
     تعديل رسالة نصية موجودة في تليجرام عبر editMessageText.
-    لو فشل التنسيق (400) يحاول مجدداً بدون parse_mode (نص عادي) لضمان وصول التعديل دون ضياع.
+    - يعيد المحاولة مرة واحدة عند HTTP 429 وفق retry_after (بحد أقصى 10ث).
+    - لو فشل التنسيق (400) يحاول مجدداً بدون parse_mode (نص عادي) لضمان وصول التعديل دون ضياع.
     يرجع True لو نجح التعديل، وFalse لو فشل.
     """
     if not message_id:
@@ -321,6 +343,10 @@ def edit_telegram_message(token, chat_id, message_id, text, parse_mode="HTML"):
         payload["parse_mode"] = parse_mode
     try:
         r = _tg_post(token, "editMessageText", payload, timeout=15)
+        if r.status_code == 429:
+            delay = min(10.0, max(0.5, _extract_retry_after(r)))
+            time.sleep(delay)
+            r = _tg_post(token, "editMessageText", payload, timeout=15)
         if r.status_code == 200:
             return True
         if parse_mode and r.status_code == 400:
@@ -342,14 +368,18 @@ def make_sender(token, chat_id, reaction_msg_id=None):
         send_action=lambda action="typing": send_chat_action(token, chat_id, action),
         set_reaction=(lambda emoji: set_reaction(token, chat_id, reaction_msg_id, emoji)) if reaction_msg_id else None,
         edit_text=lambda message_id, text, parse_mode="HTML": edit_telegram_message(token, chat_id, message_id, text, parse_mode),
+        delete_text=lambda message_id: delete_message(token, chat_id, message_id),
     )
 
 
 def delete_message(token, chat_id, message_id):
+    if not message_id:
+        return False
     try:
-        _tg_post(token, "deleteMessage", {"chat_id": chat_id, "message_id": message_id}, timeout=10)
+        r = _tg_post(token, "deleteMessage", {"chat_id": chat_id, "message_id": message_id}, timeout=10)
+        return getattr(r, "status_code", None) == 200
     except Exception:
-        pass
+        return False
 
 
 class ProgressKeeper:
@@ -527,11 +557,21 @@ def process_job(job):
         polish_fn = (lambda raw, role, gl: (cached_polished, None)) if cached_polished else None
         res = delivery.deliver(cached["text"], c_model, c_key, c_info, make_sender(token, chat_id, reaction_msg_id=reply_to), reply_to_id=reply_to,
                                polish_fn=polish_fn, footer_html=_footer(c_model, c_key, c_info) + " · ♻️ مكرر",
-                               archive_entry=False)
-        jobs.record(job.job_id, "sent", dedup_of=cached.get("job_id"), text=cached["text"][:2000],
-                    model=cached.get("model"), key=cached.get("key"), mode=res["mode"],
-                    polished=bool(res["polished"]), polished_text=(res["polished"] or "")[:2000] or None,
-                    **_session_fields())
+                               archive_entry=False, job_id=job.job_id)
+        _rlock = res.get("_lock")
+
+        def _record_dedup():
+            _pol = res["polished"]
+            jobs.record(job.job_id, "sent", dedup_of=cached.get("job_id"), text=cached["text"][:2000],
+                        model=cached.get("model"), key=cached.get("key"), mode=res["mode"],
+                        polished=bool(_pol), polished_text=(_pol or "")[:2000] or None,
+                        **_session_fields())
+
+        if _rlock:
+            with _rlock:
+                _record_dedup()
+        else:
+            _record_dedup()
         if QUEUE:
             QUEUE.stats["deduped"] += 1
         return {"text": cached["text"], "dedup": True, "polished": res["polished"]}

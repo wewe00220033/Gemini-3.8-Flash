@@ -23,6 +23,7 @@ from config import Config
 from key_manager import key_manager
 import web_service
 import telegram_bot
+import delivery
 import preflight
 import watchdog
 import supervisor
@@ -190,12 +191,17 @@ class Runtime:
         left = self._in_flight()
         pending = telegram_bot.QUEUE.size() if telegram_bot.QUEUE is not None else 0
         telegram_bot.stop_queue(timeout=1)
+        bg_left = 0
+        if hasattr(delivery, "active_background_threads") and delivery.active_background_threads():
+            bg_wait = max(min(2.0, float(Config.SHUTDOWN_GRACE)), deadline - time.monotonic())
+            print(f"⏳ انتظار اكتمال خيوط التنظيم/السبك الخلفية (≤ {bg_wait:.1f}ث)...")
+            bg_left = delivery.wait_background_threads(timeout=bg_wait)
         self.pool.shutdown(wait=False, cancel_futures=True)
         if self.notifier is not None:
             self.notifier.stop(timeout=1)
         self._beat_stop.set()
-        if left or pending:
-            print(f"⚠️ {left} مهمة جارية لم تكتمل + {max(0, pending - left)} في الانتظار — مهام تليجرام ستُستأنف بعد الإقلاع من jobs.ndjson (P0).")
+        if left or pending or bg_left:
+            print(f"⚠️ {left} مهمة جارية لم تكتمل + {max(0, pending - left)} في الانتظار + {bg_left} خيط سبك خلفي — مهام تليجرام ستُستأنف بعد الإقلاع من jobs.ndjson (P0).")
         else:
             print("👋 تم إيقاف المنظومة بنجاح (0 مهام معلقة).")
         return left

@@ -14,6 +14,7 @@
 """
 
 import html
+import re
 import threading
 import time
 
@@ -27,14 +28,71 @@ import logkit
 
 
 class Sender:
-    """واجهة الإرسال القابلة للحقن: send_text(text, reply_to, parse_mode) -> message_id|None ؛ send_document(...) ؛ send_action(...) ؛ set_reaction(...) ؛ edit_text(...)"""
+    """واجهة الإرسال القابلة للحقن: send_text(text, reply_to, parse_mode) -> message_id|None ؛ send_document(...) ؛ send_action(...) ؛ set_reaction(...) ؛ edit_text(...) ؛ delete_text(...)"""
 
-    def __init__(self, send_text, send_document=None, send_action=None, set_reaction=None, edit_text=None):
+    def __init__(self, send_text, send_document=None, send_action=None, set_reaction=None, edit_text=None, delete_text=None):
         self.send_text = send_text
         self.send_document = send_document
         self.send_action = send_action
         self.set_reaction = set_reaction
         self.edit_text = edit_text
+        self.delete_text = delete_text
+
+
+_bg_threads_lock = threading.Lock()
+_bg_threads = set()
+
+
+def _track_bg_thread(t):
+    with _bg_threads_lock:
+        _bg_threads.add(t)
+
+
+def _untrack_bg_thread(t=None):
+    cur = t or threading.current_thread()
+    with _bg_threads_lock:
+        _bg_threads.discard(cur)
+
+
+def _start_bg_thread(target):
+    """يشغّل مهمة خلفية مع تسجيلها لضمان إمكانية انتظارها عند الإغلاق الرشيق."""
+    def _runner():
+        try:
+            target()
+        finally:
+            _untrack_bg_thread()
+
+    t = threading.Thread(target=_runner, daemon=True)
+    _track_bg_thread(t)
+    try:
+        t.start()
+    except Exception:
+        _untrack_bg_thread(t)
+        raise
+    return t
+
+
+def active_background_threads():
+    """يرجع قائمة خيوط التنظيم/السبك الخلفية الحية حالياً."""
+    with _bg_threads_lock:
+        return [t for t in list(_bg_threads) if t.is_alive()]
+
+
+def wait_background_threads(timeout=15.0):
+    """ينتظر اكتمال خيوط التنظيم/السبك الخلفية حتى timeout ثانية (يرجع عدد المتبقي)."""
+    deadline = time.monotonic() + max(0.0, float(timeout))
+    while True:
+        alive = active_background_threads()
+        if not alive:
+            return 0
+        rem = deadline - time.monotonic()
+        if rem <= 0:
+            return len(alive)
+        for t in alive:
+            r = deadline - time.monotonic()
+            if r <= 0:
+                break
+            t.join(timeout=r)
 
 
 def prepare_texts(raw_text, glossary=None):
@@ -242,7 +300,7 @@ def _voice_title(raw, title_fn):
 
 def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn=None, glossary=None,
             session_name=None, footer_html="", archive_entry=True, title_fn=None, local_polish_fn=None,
-            job_id=None):
+            job_id=None, on_polished=None):
     """
     ينفّذ خط الإنتاج كاملاً. يرجع قاموساً: {raw, polished, raw_msg_id, polished_msg_id, mode, archived, polish_error,
     role, session, title, session_written, title_suggestion}.
@@ -394,6 +452,16 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
                                 sessions.append_polished(session_text if session_text is not None else archive_text)
                         except Exception as e:
                             print(f"⚠️ Archive/session polished update: {e}")
+            if on_polished is not None and approved_text is not None:
+                try:
+                    on_polished(approved_text, is_golden=is_golden, synth_elapsed=synth_elapsed)
+                except TypeError:
+                    try:
+                        on_polished(approved_text)
+                    except Exception as e:
+                        print(f"⚠️ on_polished callback error: {e}")
+                except Exception as e:
+                    print(f"⚠️ on_polished callback error: {e}")
 
         if not polished and is_compare:
             # 🛡️ صمام الأمان الفولاذي: إذا تعذر جيميني السحابي (503 / 429 / مهلة)،
@@ -431,7 +499,7 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
                         err_txt = logkit.redact(str(s_err or reason or ""))
                         err_html = f"⚠️ <i>تعذر التنظيم عبر جيميني وشلبي ({html.escape(err_txt)}) — الخام فوق.</i>"
                         _replace_or_send(
-                            sender, mid, anchor, err_html, err_html,
+                            sender, mid, anchor, err_html, _html_to_plain(err_html),
                             filename_prefix="polish_error",
                             caption="⚠️ تعذر التنظيم",
                             head_html=_entry_head_html(result["title"], session_name),
@@ -441,15 +509,13 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
                     print(f"⚠️ Shelby rescue error: {err_txt}")
                     err_html = f"⚠️ <i>تعذر التنظيم عبر جيميني وشلبي ({html.escape(err_txt)}) — الخام فوق.</i>"
                     _replace_or_send(
-                        sender, mid, anchor, err_html, err_html,
+                        sender, mid, anchor, err_html, _html_to_plain(err_html),
                         filename_prefix="polish_error",
                         caption="⚠️ تعذر التنظيم",
                         head_html=_entry_head_html(result["title"], session_name),
                     )
 
-            t = threading.Thread(target=_bg_shelby_rescue, daemon=True)
-            t.start()
-            result["compare_thread"] = t
+            result["compare_thread"] = _start_bg_thread(_bg_shelby_rescue)
 
         elif polished:
             result["polished"] = polished
@@ -524,7 +590,8 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
                                             title=result["title"], shelby_status="noop"
                                         )
                                     _replace_or_send(
-                                        sender, mid, anchor, noop_html, polished,
+                                        sender, mid, anchor, noop_html,
+                                        (_html_to_plain(noop_html) if draft_separated else polished),
                                         filename_prefix="polished",
                                         caption="📝 النسخة المنظمة (اعتماد جيميني)",
                                         head_html=_entry_head_html(result["title"], session_name),
@@ -590,7 +657,8 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
                                         title=result["title"], shelby_status=status, error_detail=s_err
                                     )
                                 _replace_or_send(
-                                    sender, mid, anchor, to_html, polished,
+                                    sender, mid, anchor, to_html,
+                                    (_html_to_plain(to_html) if draft_separated else polished),
                                     filename_prefix="polished",
                                     caption="📝 النسخة المنظمة (اعتماد جيميني بعد تعذر شلبي)",
                                     head_html=_entry_head_html(result["title"], session_name),
@@ -607,15 +675,14 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
                                     title=result["title"], shelby_status="error", error_detail=err_txt
                                 )
                             _replace_or_send(
-                                sender, mid, anchor, err_html, polished,
+                                sender, mid, anchor, err_html,
+                                (_html_to_plain(err_html) if draft_separated else polished),
                                 filename_prefix="polished",
                                 caption="📝 النسخة المنظمة (اعتماد جيميني بعد خطأ السبك)",
                                 head_html=_entry_head_html(result["title"], session_name),
                             )
 
-                    t = threading.Thread(target=_bg_synthesizer, daemon=True)
-                    t.start()
-                    result["compare_thread"] = t
+                    result["compare_thread"] = _start_bg_thread(_bg_synthesizer)
 
                 elif cmp_mode == "merged":
                     init_html = merged_compare_message_html(polished, shelby_text=None, role_id=role_id, session_name=session_name)
@@ -666,9 +733,7 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
                         except Exception as e:
                             print(f"⚠️ Dual polish bg error: {logkit.redact(f'{type(e).__name__}: {e}')}")
 
-                    t = threading.Thread(target=_bg_shelby, daemon=True)
-                    t.start()
-                    result["compare_thread"] = t
+                    result["compare_thread"] = _start_bg_thread(_bg_shelby)
 
                 elif cmp_mode == "split":
                     gemini_html = polished_message_html(polished, role_id, session_name, provider_tag="🤖 <b>[جيميني]</b>", title=result["title"])
@@ -700,9 +765,7 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
                         except Exception as e:
                             print(f"⚠️ Dual polish split bg error: {logkit.redact(f'{type(e).__name__}: {e}')}")
 
-                    t = threading.Thread(target=_bg_shelby_split, daemon=True)
-                    t.start()
-                    result["compare_thread"] = t
+                    result["compare_thread"] = _start_bg_thread(_bg_shelby_split)
             else:
                 result["polished_msg_id"] = _send_long(sender, polished_message_html(polished, role_id, session_name, title=result["title"]),
                                                        polished, anchor, filename_prefix="polished",
@@ -744,45 +807,82 @@ def _accepts_context_summary(fn):
         return False
 
 
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _html_to_plain(text):
+    """تحويل HTML إلى نص عادي مقروء للاستخدام كبديل عند رفض parse_mode='HTML'."""
+    return html.unescape(_HTML_TAG_RE.sub("", text or ""))
+
+
+def _try_edit(sender, mid, text, parse_mode, label=""):
+    if mid is None or getattr(sender, "edit_text", None) is None:
+        return False
+    try:
+        res = sender.edit_text(mid, text, parse_mode)
+        return res is not False
+    except Exception as e:
+        print(f"⚠️ Edit text exception ({label}): {e}")
+        return False
+
+
 def _replace_or_send(sender, mid, anchor, full_html, plain_text, filename_prefix, caption,
                      head_html="", close_notice="✅ <i>اكتملت المعالجة — تم إرسال النتيجة في ملف أدناه.</i>",
                      max_edit_len=None):
     """
-    محرك التسليم الموحد (P0-01):
-    - ضمن حد التعديل (3950): يعدّل الرسالة في مكانها؛ وإن فشل التعديل أو غاب mid يُرسل مباشرة عبر _send_long.
-    - فوق حد التعديل: يغلق رسالة الانتظار بإشعار قصير ومتوازن HTML (<i>...</i>) ثم يرسل النتيجة كملف .md (أو نص).
+    محرك التسليم الموحد رباعي الطبقات (P0-01):
+    - ضمن حد التعديل (3950): يعدّل الرسالة في مكانها (HTML ثم Plain بدون HTML ثم إغلاق قصير)،
+      وإن فشلت كل محاولات التعديل يرسل النتيجة عبر _send_long ويحذف رسالة الانتظار المعلقة إن توفّر delete_text.
+    - فوق حد التعديل: يغلق رسالة الانتظار بإشعار قصير (HTML ثم Plain) ثم يرسل النتيجة كملف .md (أو نص)،
+      وإن فشل إغلاقها يرسل النتيجة أولاً ثم يحذف رسالة الانتظار المعلقة.
     """
     if max_edit_len is None:
         max_edit_len = Config.TELEGRAM_MAX_MSG - 50
     can_edit = mid is not None and getattr(sender, "edit_text", None) is not None
+    can_delete = mid is not None and getattr(sender, "delete_text", None) is not None
     has_doc = getattr(sender, "send_document", None) is not None
     oversized = len(full_html) > max_edit_len
 
-    if can_edit and not oversized:
-        try:
-            res = sender.edit_text(mid, full_html, "HTML")
-            if res is not False:
-                return mid
-        except Exception as e:
-            print(f"⚠️ Edit text exception ({filename_prefix}): {e}")
+    if not oversized:
+        if can_edit and _try_edit(sender, mid, full_html, "HTML", filename_prefix):
+            return mid
+        plain_full = _html_to_plain(full_html)
+        if can_edit and len(plain_full) <= max_edit_len and _try_edit(sender, mid, plain_full, None, f"{filename_prefix}:plain"):
+            return mid
+        notice_html = "✅ <i>اكتملت المعالجة — تم إرسال النتيجة أدناه.</i>"
+        notice_plain = _html_to_plain(notice_html)
+    else:
+        notice_html = close_notice if has_doc else "✅ <i>اكتملت المعالجة — تم إرسال النتيجة أدناه.</i>"
+        notice_plain = _html_to_plain(notice_html)
 
-    if can_edit and oversized:
-        notice = close_notice if has_doc else "✅ <i>اكتملت المعالجة — تم إرسال النتيجة أدناه.</i>"
-        try:
-            sender.edit_text(mid, notice, "HTML")
-        except Exception as e:
-            print(f"⚠️ Close notice edit exception ({filename_prefix}): {e}")
+    mid_closed = False
+    if can_edit:
+        mid_closed = (
+            _try_edit(sender, mid, notice_html, "HTML", f"{filename_prefix}:close")
+            or _try_edit(sender, mid, notice_plain, None, f"{filename_prefix}:close-plain")
+        )
 
-    return _send_long(
+    should_delete_waiting = (mid is not None and can_delete and not mid_closed)
+    target_reply = anchor if should_delete_waiting else (mid or anchor)
+
+    sent_mid = _send_long(
         sender,
         full_html,
         plain_text,
-        mid or anchor,
+        target_reply,
         filename_prefix=filename_prefix,
         caption=caption,
         head_html=head_html,
         force_document=(oversized and has_doc),
     )
+
+    if should_delete_waiting and sent_mid is not None:
+        try:
+            sender.delete_text(mid)
+        except Exception as e:
+            print(f"⚠️ Delete waiting message exception ({filename_prefix}): {e}")
+
+    return sent_mid
 
 
 def _send_long(sender, html_text, plain_text, reply_to_id, filename_prefix, caption, head_html="", force_document=False):

@@ -410,3 +410,274 @@ def test_p0_02_telegram_process_job_thread_safety(monkeypatch, bg_finishes_first
     assert st.get("synth_golden") is True
     assert jobs.pending_jobs() == []
     assert jobs.find_recent_result(fuid)["polished_text"] == "النسخة الذهبية المتكاملة"
+
+
+class _StatefulChatSender:
+    """محاكي شات فعلي يتتبع الرسائل بالمعرف (إنشاء / تعديل / حذف) مثل تليجرام تماماً."""
+
+    def __init__(self, policy="all_ok", with_delete=True, with_doc=True):
+        self.messages = {}   # mid -> {"text": str, "parse_mode": str|None, "reply_to": int|None}
+        self.docs = []
+        self.edits = []
+        self.deletes = []
+        self._next_id = 1
+        self.policy = policy
+        self.with_delete = with_delete
+        self.with_doc = with_doc
+
+    def send_text(self, text, reply_to=None, parse_mode=None):
+        mid = self._next_id
+        self._next_id += 1
+        self.messages[mid] = {"text": text, "parse_mode": parse_mode, "reply_to": reply_to}
+        return mid
+
+    def edit_text(self, mid, text, parse_mode="HTML"):
+        self.edits.append((mid, text, parse_mode))
+        if self.policy == "html_only":
+            if parse_mode == "HTML":
+                return False
+        elif self.policy == "full_only":
+            if len(text) > 120:
+                return False
+        elif self.policy == "html_notice_rejected":
+            if parse_mode == "HTML":
+                return False
+        elif self.policy == "all_edits_fail":
+            return False
+        elif self.policy == "all_edits_raise":
+            raise RuntimeError("Telegram edit failure")
+
+        if mid in self.messages:
+            self.messages[mid]["text"] = text
+            self.messages[mid]["parse_mode"] = parse_mode
+        return True
+
+    def delete_text(self, mid):
+        self.deletes.append(mid)
+        self.messages.pop(mid, None)
+        return True
+
+    def send_document(self, fn, data, mime, caption, reply_to):
+        self.docs.append((fn, data, mime, caption, reply_to))
+        return 900 + len(self.docs)
+
+    def as_sender(self):
+        return delivery.Sender(
+            send_text=self.send_text,
+            send_document=self.send_document if self.with_doc else None,
+            edit_text=self.edit_text,
+            delete_text=self.delete_text if self.with_delete else None,
+        )
+
+
+@pytest.mark.parametrize("is_oversized", [False, True])
+@pytest.mark.parametrize("policy", [
+    "html_only",
+    "full_only",
+    "html_notice_rejected",
+    "all_edits_fail",
+    "all_edits_raise",
+])
+def test_t06_failed_edit_must_close_original_message(monkeypatch, is_oversized, policy):
+    """T-06: أي فشل لـ edit_text (small أو oversized) لا يترك رسالة ⏳ معلقة أبداً، ويوصل الذهبية كاملة."""
+    _setup_synth(monkeypatch)
+    golden = ("ذهبية-T06 " * 550) if is_oversized else "ذهبية-T06 قصيرة واضحة"
+    monkeypatch.setattr(text_assist, "synthesize", lambda *a, **kw: (golden, None))
+
+    chat = _StatefulChatSender(policy=policy, with_delete=True, with_doc=True)
+    _deliver_and_join(
+        raw_text="نص خام لـ T-06",
+        model="gemini-3.6-flash",
+        key_name="K1",
+        info={},
+        sender=chat.as_sender(),
+        reply_to_id=10,
+        archive_entry=False,
+        polish_fn=lambda r, ro, gl, **kw: ("مسودة جيميني", None),
+        local_polish_fn=lambda r, ro, gl, **kw: ("مسودة شلبي", None),
+    )
+
+    remaining_texts = [m["text"] for m in chat.messages.values()]
+    hanging = [t for t in remaining_texts if "⏳" in t or "جاري توليد" in t]
+    assert hanging == [], f"Found hanging waiting message(s): {hanging}"
+
+    if is_oversized:
+        assert any(d[0] == "golden_synthesized.md" and d[1] == golden.encode("utf-8") for d in chat.docs)
+    else:
+        assert any("ذهبية-T06" in t for t in remaining_texts)
+
+    if not is_oversized and policy == "html_only":
+        # تراجع من HTML إلى Plain في نفس الرسالة بدون رسالة إضافية
+        assert len(chat.messages) == 2
+    if policy in ("all_edits_fail", "all_edits_raise"):
+        assert len(chat.deletes) == 1
+
+
+def test_t06_rescue_failed_edit_closes_waiting_message(monkeypatch):
+    """T-06 على مسار _bg_shelby_rescue: لو فشل edit_text لا تبقى رسالة 'جاري تنظيم النص عبر شلبي' معلقة."""
+    _setup_synth(monkeypatch)
+    chat = _StatefulChatSender(policy="all_edits_fail", with_delete=True, with_doc=True)
+    _deliver_and_join(
+        raw_text="نص خام للإنقاذ",
+        model="gemini-3.6-flash",
+        key_name="K1",
+        info={},
+        sender=chat.as_sender(),
+        reply_to_id=10,
+        archive_entry=False,
+        polish_fn=lambda r, ro, gl, **kw: (None, "503 unavailable"),
+        local_polish_fn=lambda r, ro, gl, **kw: ("نتيجة شلبي المنقذة", None),
+    )
+
+    remaining_texts = [m["text"] for m in chat.messages.values()]
+    assert [t for t in remaining_texts if "⏳" in t] == []
+    assert any("نتيجة شلبي المنقذة" in t for t in remaining_texts)
+    assert len(chat.deletes) == 1
+
+
+def test_edit_telegram_message_retries_on_429(monkeypatch):
+    """telegram_bot.edit_telegram_message يعيد المحاولة مرة واحدة عند HTTP 429 وفق retry_after."""
+    import time
+    import telegram_bot
+
+    calls = []
+    slept = []
+
+    class Resp:
+        def __init__(self, code, payload=None):
+            self.status_code = code
+            self._payload = payload or {}
+            self.headers = {}
+
+        def json(self):
+            return self._payload
+
+    def fake_post(token, method, payload, timeout=None):
+        calls.append(payload)
+        if len(calls) == 1:
+            return Resp(429, {"parameters": {"retry_after": 0.5}})
+        return Resp(200, {"ok": True})
+
+    monkeypatch.setattr(telegram_bot, "_tg_post", fake_post)
+    monkeypatch.setattr(time, "sleep", lambda s: slept.append(s))
+
+    ok = telegram_bot.edit_telegram_message("TOK", "1", 99, "<b>تم</b>", parse_mode="HTML")
+    assert ok is True
+    assert len(calls) == 2
+    assert slept == [0.5]
+
+
+def test_wait_background_threads_and_on_polished_callback(monkeypatch):
+    """تفعيل on_polished callback وانتظار خيوط الخلفية عبر delivery.wait_background_threads()."""
+    import time
+
+    _setup_synth(monkeypatch)
+    events = []
+
+    def _slow_local(raw, role, gl, **kw):
+        time.sleep(0.12)
+        return ("شلبي البطيء", None)
+
+    monkeypatch.setattr(text_assist, "synthesize", lambda *a, **kw: ("ذهبية مع callback", None))
+
+    fs = _FakeSender()
+    res = delivery.deliver(
+        raw_text="خام مع callback",
+        model="gemini-3.6-flash",
+        key_name="K1",
+        info={},
+        sender=fs.as_sender(),
+        reply_to_id=5,
+        archive_entry=False,
+        polish_fn=lambda r, ro, gl, **kw: ("مسودة أولى", None),
+        local_polish_fn=_slow_local,
+        on_polished=lambda txt, **kw: events.append((txt, kw.get("is_golden"))),
+    )
+    assert len(delivery.active_background_threads()) >= 1
+    rem = delivery.wait_background_threads(timeout=3.0)
+    assert rem == 0
+    assert delivery.active_background_threads() == []
+    assert res["polished"] == "ذهبية مع callback"
+    assert events == [("ذهبية مع callback", True)]
+
+
+def test_main_shutdown_waits_for_active_delivery_thread(monkeypatch):
+    """Runtime.shutdown() لا يقتل خيط السبك النشط بل ينتظره لحفظ الذهبية في ALL.md وjobs.ndjson."""
+    import time
+    import main
+
+    _setup_synth(monkeypatch)
+    sessions.start("جلسة إغلاق")
+
+    def _slow_local(raw, role, gl, **kw):
+        time.sleep(0.12)
+        return ("شلبي قبل الإغلاق", None)
+
+    monkeypatch.setattr(text_assist, "synthesize", lambda *a, **kw: ("ذهبية محفوظة قبل الإغلاق", None))
+    monkeypatch.setattr(main.telegram_bot, "stop_queue", lambda timeout=1: None)
+    monkeypatch.setattr(main.telegram_bot, "queue_in_flight", lambda: 0)
+
+    jid = "job-shutdown-01"
+    jobs.record(jid, "received", file_id="F_SD", file_unique_id="U_SD", chat_id="1", message_id=7)
+
+    fs = _FakeSender()
+    delivery.deliver(
+        raw_text="نص خام قبل SIGTERM",
+        model="gemini-3.6-flash",
+        key_name="K1",
+        info={},
+        sender=fs.as_sender(),
+        reply_to_id=7,
+        archive_entry=True,
+        polish_fn=lambda r, ro, gl, **kw: ("مسودة فلاش", None),
+        local_polish_fn=_slow_local,
+        job_id=jid,
+    )
+
+    rt = main.Runtime("TOK", "1")
+    left = rt.shutdown(reason="SIGTERM")
+    assert left == 0
+    assert delivery.active_background_threads() == []
+    assert archive.last()["polished"] == "[نسخة ذهبية مسبوكة]\nذهبية محفوظة قبل الإغلاق"
+    assert jobs.load_state()[jid].get("synth_golden") is True
+
+
+def test_telegram_dedup_path_thread_safety_with_job_id(monkeypatch):
+    """مسار dedup في telegram_bot.process_job يمرر job_id ويعمل بأمان مع res['_lock']."""
+    import time
+    import telegram_bot
+    import voice_queue
+
+    _setup_synth(monkeypatch)
+    fs = _FakeSender()
+    orig_deliver = delivery.deliver
+    seen_job_ids = []
+
+    def _spy_deliver(*args, **kwargs):
+        seen_job_ids.append(kwargs.get("job_id"))
+        res = orig_deliver(*args, **kwargs)
+        if res.get("compare_thread"):
+            res["compare_thread"].join(timeout=5)
+        return res
+
+    jobs.record("job-orig-1", "sent", file_id="F_DUP", file_unique_id="U_DUP_1",
+                text="نص مفرغ سابقاً", model="gemini-3.6-flash", key="K1", elapsed=1.0)
+
+    monkeypatch.setattr(delivery, "deliver", _spy_deliver)
+    monkeypatch.setattr(telegram_bot, "_runtime_token", lambda: "TEST_TOKEN")
+    monkeypatch.setattr(telegram_bot, "make_sender", lambda *a, **kw: fs.as_sender())
+    monkeypatch.setattr(text_assist, "polish_gemini", lambda raw, role=None, gl=None, **kw: ("مسودة معاد تنظيمها", None))
+    monkeypatch.setattr(text_assist, "polish_local", lambda *a, **kw: (time.sleep(0.05) or "شلبي المكرر", None))
+    monkeypatch.setattr(text_assist, "synthesize", lambda *a, **kw: ("ذهبية المكرر", None))
+
+    job = voice_queue.Job(
+        source="telegram", file_id="F_DUP", mime_type="audio/ogg",
+        chat_id="100", message_id=55, file_unique_id="U_DUP_1", job_id="job-dedup-2",
+    )
+    out = telegram_bot.process_job(job)
+    assert out["dedup"] is True
+    assert seen_job_ids == ["job-dedup-2"]
+    st = jobs.load_state()["job-dedup-2"]
+    assert st["state"] == "sent"
+    assert st["dedup_of"] == "job-orig-1"
+    assert st["polished_text"] == "ذهبية المكرر"

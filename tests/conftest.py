@@ -4,14 +4,72 @@
 - يوجّه keys.json لمجلد مؤقت حتى لا تلمس الاختبارات ملفات المستخدم الحقيقية.
 - يمسح متغيرات البيئة الحساسة حتى تكون النتائج حتمية.
 """
+import atexit
 import os
+import shutil
 import sys
 import importlib
+import tempfile
 import pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
+
+_CONFIG_MODULES = (
+    "glossary", "archive", "settings", "prompts", "text_assist", "transcriber",
+    "sessions", "delivery", "logkit", "observability", "incidents", "watchdog",
+    "jobs", "voice_queue", "backup", "audit", "panel", "fsm", "assistant",
+    "interactions_client", "web_service", "key_manager", "telegram_bot",
+    "main", "supervisor", "model_state",
+)
+
+
+def _apply_tmp_paths(mp, cfg_cls, base_dir):
+    base = str(base_dir)
+    mappings = {
+        "DATA_DIR": base,
+        "KEYS_JSON_FILE": os.path.join(base, "keys.json"),
+        "KEYS_TXT_FILE": os.path.join(base, "keys.txt"),
+        "JOBS_FILE": os.path.join(base, "state", "jobs.ndjson"),
+        "CIRCUIT_FILE": os.path.join(base, "state", "circuit.json"),
+        "KEY_GROUPS_FILE": os.path.join(base, "state", "key_groups.json"),
+        "WORKER_BEAT_FILE": os.path.join(base, "state", "worker.beat"),
+        "RESTART_REASON_FILE": os.path.join(base, "state", "restart_reason.json"),
+        "BACKUP_STATE_FILE": os.path.join(base, "state", "backup_state.json"),
+        "TRANSCRIPTS_DIR": os.path.join(base, "transcripts"),
+        "GLOSSARY_FILE": os.path.join(base, "glossary.json"),
+        "ROLES_FILE": os.path.join(base, "roles.json"),
+        "SETTINGS_FILE": os.path.join(base, "settings.json"),
+        "SESSIONS_DIR": os.path.join(base, "sessions"),
+        "SESSIONS_INDEX_FILE": os.path.join(base, "sessions", "sessions_index.json"),
+        "CURRENT_SESSION_FILE": os.path.join(base, "sessions", "current_session.json"),
+        "LOGS_DIR": os.path.join(base, "logs"),
+        "AUDIT_FILE": os.path.join(base, "logs", "audit.log"),
+        "INCIDENTS_DIR": os.path.join(base, "incidents"),
+        "BACKUPS_DIR": os.path.join(base, "backups"),
+        "PERSIST_PROBE_FILE": os.path.join(base, ".persist_probe"),
+        "LOG_TO_FILE": False,
+    }
+    for attr, val in mappings.items():
+        if mp is not None:
+            mp.setattr(cfg_cls, attr, val)
+        else:
+            setattr(cfg_cls, attr, val)
+
+
+def _sync_loaded_configs(mp, cfg_cls):
+    for mod_name in _CONFIG_MODULES:
+        mod = sys.modules.get(mod_name)
+        if mod is not None and hasattr(mod, "Config"):
+            mp.setattr(mod, "Config", cfg_cls)
+
+
+# BUG-06: توجيه كل مسارات التشغيل لمجلد مؤقت منذ لحظة collection الأولى (قبل استيراد telegram_bot/key_manager في أي ملف اختبار)
+_BOOT_TMP = tempfile.mkdtemp(prefix="gvt_pytest_boot_")
+atexit.register(shutil.rmtree, _BOOT_TMP, ignore_errors=True)
+import config as _boot_config  # noqa: E402
+_apply_tmp_paths(None, _boot_config.Config, _BOOT_TMP)
 
 ENV_KEYS = [
     "GEMINI_API_KEYS", "GEMINI_API_KEY", "TELEGRAM_BOT_TOKEN",
@@ -28,37 +86,9 @@ def fresh_env(monkeypatch, tmp_path):
         monkeypatch.delenv(k, raising=False)
     import config
     importlib.reload(config)
-    monkeypatch.setattr(config.Config, "KEYS_JSON_FILE", str(tmp_path / "keys.json"))
-    monkeypatch.setattr(config.Config, "KEYS_TXT_FILE", str(tmp_path / "keys.txt"))
-    # 1b: سجل المهام jobs.ndjson في مجلد مؤقت دائماً (jobs/voice_queue يحملان مرجعهما الخاص لـ Config)
-    jobs_file = str(tmp_path / "state" / "jobs.ndjson")
-    monkeypatch.setattr(config.Config, "JOBS_FILE", jobs_file)
-    import jobs
-    import voice_queue
-    monkeypatch.setattr(jobs.Config, "JOBS_FILE", jobs_file)
-    monkeypatch.setattr(voice_queue.Config, "JOBS_FILE", jobs_file)
-    # مرحلة 2: ملفا القاطع ومجموعات المفاتيح في المجلد المؤقت أيضاً (لا نلمس state/ الحقيقي)
-    monkeypatch.setattr(config.Config, "CIRCUIT_FILE", str(tmp_path / "state" / "circuit.json"))
-    monkeypatch.setattr(config.Config, "KEY_GROUPS_FILE", str(tmp_path / "state" / "key_groups.json"))
-    # مرحلة 3: الأرشيف/القاموس/الأدوار/الإعدادات في المجلد المؤقت + تصفير الكاشات (singletons)
-    monkeypatch.setattr(config.Config, "DATA_DIR", str(tmp_path))
-    monkeypatch.setattr(config.Config, "TRANSCRIPTS_DIR", str(tmp_path / "transcripts"))
-    monkeypatch.setattr(config.Config, "GLOSSARY_FILE", str(tmp_path / "glossary.json"))
-    monkeypatch.setattr(config.Config, "ROLES_FILE", str(tmp_path / "roles.json"))
-    monkeypatch.setattr(config.Config, "SETTINGS_FILE", str(tmp_path / "settings.json"))
-    # مرحلة 4: الجلسات في المجلد المؤقت + تصفير كاش الجلسة النشطة
-    monkeypatch.setattr(config.Config, "SESSIONS_DIR", str(tmp_path / "sessions"))
-    monkeypatch.setattr(config.Config, "SESSIONS_INDEX_FILE", str(tmp_path / "sessions" / "sessions_index.json"))
-    monkeypatch.setattr(config.Config, "CURRENT_SESSION_FILE", str(tmp_path / "sessions" / "current_session.json"))
-    # مرحلة 5: السجلات/الحوادث/مسبار الاستمرارية في المجلد المؤقت + ملف السجل معطّل افتراضياً (الاختبار يفعّله صراحةً)
-    monkeypatch.setattr(config.Config, "LOGS_DIR", str(tmp_path / "logs"))
-    monkeypatch.setattr(config.Config, "INCIDENTS_DIR", str(tmp_path / "incidents"))
-    monkeypatch.setattr(config.Config, "PERSIST_PROBE_FILE", str(tmp_path / ".persist_probe"))
-    monkeypatch.setattr(config.Config, "LOG_TO_FILE", False)
-    # مرحلة 5.1: قناة audit + النسخ المحلية + حالة الجدولة في المجلد المؤقت
-    monkeypatch.setattr(config.Config, "AUDIT_FILE", str(tmp_path / "logs" / "audit.log"))
-    monkeypatch.setattr(config.Config, "BACKUPS_DIR", str(tmp_path / "backups"))
-    monkeypatch.setattr(config.Config, "BACKUP_STATE_FILE", str(tmp_path / "state" / "backup_state.json"))
+    # نضبط الأساس المؤقت قبل monkeypatch حتى لا يعود الكلاس الجديد لمسارات الجذر عند teardown
+    _apply_tmp_paths(None, config.Config, _BOOT_TMP)
+    _apply_tmp_paths(monkeypatch, config.Config, tmp_path)
     aud = sys.modules.get("audit")
     if aud is not None:
         aud.set_actor(None)
@@ -73,12 +103,7 @@ def fresh_env(monkeypatch, tmp_path):
         inc.reset_state()
         inc.set_notifier(None)
     # هذه الوحدات تحمل مرجعها الخاص لـ Config (from config import Config) — بعد reload(config) يصبح قديماً
-    for mod_name in ("glossary", "archive", "settings", "prompts", "text_assist", "transcriber", "sessions", "delivery",
-                     "logkit", "observability", "incidents", "watchdog", "jobs", "voice_queue", "backup", "audit", "panel", "fsm",
-                     "assistant", "interactions_client", "web_service"):
-        mod = sys.modules.get(mod_name)
-        if mod is not None and hasattr(mod, "Config"):
-            monkeypatch.setattr(mod, "Config", config.Config)
+    _sync_loaded_configs(monkeypatch, config.Config)
     for mod_name in ("settings", "prompts"):
         mod = sys.modules.get(mod_name)
         if mod is not None:
@@ -101,22 +126,28 @@ def fresh_env(monkeypatch, tmp_path):
 
 @pytest.fixture(autouse=True)
 def _runtime_dirs_in_tmp(monkeypatch, tmp_path):
-    """مرحلة 5.1: حتى الاختبارات التي لا تستخدم fresh_env (watchdog/l4) لا تكتب incidents/ logs/ backups/ audit داخل المستودع."""
+    """عزل كل ملفات التشغيل داخل tmp_path حتى في الاختبارات التي لا تستخدم fresh_env (glossary/keys/settings/incidents/logs...)."""
     import config
-    monkeypatch.setattr(config.Config, "INCIDENTS_DIR", str(tmp_path / "incidents"))
-    monkeypatch.setattr(config.Config, "LOGS_DIR", str(tmp_path / "logs"))
-    monkeypatch.setattr(config.Config, "AUDIT_FILE", str(tmp_path / "logs" / "audit.log"))
-    monkeypatch.setattr(config.Config, "BACKUPS_DIR", str(tmp_path / "backups"))
-    monkeypatch.setattr(config.Config, "BACKUP_STATE_FILE", str(tmp_path / "state" / "backup_state.json"))
-    # الوحدات التي حملت Config بالاسم قد تحمل نسخة قديمة بعد reload(config) في fresh_env → نعيد ربطها هنا أيضاً
-    for mod_name in ("incidents", "logkit", "observability", "backup", "audit", "watchdog"):
+    _apply_tmp_paths(monkeypatch, config.Config, tmp_path)
+    _sync_loaded_configs(monkeypatch, config.Config)
+    for mod_name in ("settings", "prompts", "sessions"):
         mod = sys.modules.get(mod_name)
-        if mod is not None and hasattr(mod, "Config"):
-            monkeypatch.setattr(mod, "Config", config.Config)
+        if mod is not None:
+            mod.reset_cache()
+    gl = sys.modules.get("glossary")
+    if gl is not None:
+        gl._singleton = None
     inc = sys.modules.get("incidents")
     if inc is not None:
         inc.reset_state()
     yield
+    gl = sys.modules.get("glossary")
+    if gl is not None:
+        gl._singleton = None
+    for mod_name in ("settings", "prompts", "sessions"):
+        mod = sys.modules.get(mod_name)
+        if mod is not None:
+            mod.reset_cache()
 
 
 @pytest.fixture(autouse=True)
