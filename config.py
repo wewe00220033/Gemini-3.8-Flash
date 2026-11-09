@@ -188,6 +188,10 @@ class Config:
         if os.path.isfile(_DEFAULT_LOCAL_SCRIPT):
             LOCAL_POLISH_CMD = f'"{sys.executable}" "{_DEFAULT_LOCAL_SCRIPT}"'
     LOCAL_POLISH_TIMEOUT = float(os.environ.get("LOCAL_POLISH_TIMEOUT", "180.0"))
+    LOCAL_LOCK_WAIT_SEC = float(os.environ.get("LOCAL_LOCK_WAIT_SEC", "45.0"))
+    SYNTH_TOTAL_BUDGET_SEC = float(os.environ.get("SYNTH_TOTAL_BUDGET_SEC", "420.0"))
+    MIN_SHELBY_EXEC_SEC = float(os.environ.get("MIN_SHELBY_EXEC_SEC", "5.0"))
+    SYNTH_PROMPT_MAX_CHARS = int(os.environ.get("SYNTH_PROMPT_MAX_CHARS", "28000"))
     COMPARE_MODE = os.environ.get("COMPARE_MODE", "synthesizer").strip().lower()   # synthesizer | merged | split | off
     POLISH_FILE_THRESHOLD = 12000          # 07 §4: نص > ~3 رسائل → يُرسل كملف .md + معاينة
     PANEL_PAGE_SIZE = 5

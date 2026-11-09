@@ -17,6 +17,7 @@ import threading
 import re
 import difflib
 import os
+import signal
 import subprocess
 import shlex
 import logging
@@ -31,8 +32,94 @@ import logkit
 
 logger = logging.getLogger("text_assist")
 
+
+class _ShelbyQueueCoordinator:
+    """
+    منسّق صف FIFO عادل لاستدعاءات المزود المحلي (شلبي) لمنع استنزاف موارد النظام (GPU/CPU/RAM).
+    يدعم:
+      - سقف أقصى للمنتظرين (MAX_WAITERS = 8).
+      - مهلة انتظار منفصلة للقفل (LOCAL_LOCK_WAIT_SEC = 45.0ث).
+      - أسبقية اختيارية للفويس النشط في مرحلة السبك النهائي (priority=True).
+      - توافق كامل كبديل لـ Lock العادي (.acquire(timeout=...), .release()).
+    """
+    def __init__(self, max_waiters=8):
+        self.max_waiters = max_waiters
+        self._lock = threading.Lock()
+        self._busy = False
+        self._waiters = []  # list of [ticket_id, event, is_priority]
+        self._ticket_counter = 0
+
+    def acquire(self, timeout=None, priority=False):
+        """
+        طلب دور لتشغيل المزود المحلي. يرجع True عند الحصول على القفل، أو False عند انتهاء المهلة أو امتلاء الصف.
+        """
+        if timeout is None:
+            timeout = getattr(Config, "LOCAL_LOCK_WAIT_SEC", 45.0)
+        else:
+            timeout = float(timeout)
+
+        with self._lock:
+            if not self._busy and not self._waiters:
+                self._busy = True
+                return True
+
+            if len(self._waiters) >= self.max_waiters:
+                return False
+
+            self._ticket_counter += 1
+            ticket_id = self._ticket_counter
+            evt = threading.Event()
+            entry = [ticket_id, evt, priority]
+            if priority:
+                idx = 0
+                while idx < len(self._waiters) and self._waiters[idx][2]:
+                    idx += 1
+                self._waiters.insert(idx, entry)
+            else:
+                self._waiters.append(entry)
+
+        signaled = evt.wait(timeout=max(0.0, timeout))
+        if not signaled and evt.is_set():
+            signaled = True
+
+        with self._lock:
+            if signaled:
+                self._busy = True
+                return True
+            else:
+                still_in = any(w[0] == ticket_id for w in self._waiters)
+                if still_in:
+                    self._waiters = [w for w in self._waiters if w[0] != ticket_id]
+                    return False
+                else:
+                    if self._waiters:
+                        _tid, next_evt, _prio = self._waiters.pop(0)
+                        self._busy = True
+                        next_evt.set()
+                    else:
+                        self._busy = False
+                    return False
+
+    def release(self):
+        """إفساح المجال للمنتظر التالي في الصف."""
+        with self._lock:
+            if self._waiters:
+                _tid, next_evt, _prio = self._waiters.pop(0)
+                self._busy = True
+                next_evt.set()
+            else:
+                self._busy = False
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.release()
+
+
 _lock = threading.RLock()
-_shelby_cli_lock = threading.Lock()
+_shelby_cli_lock = _ShelbyQueueCoordinator(max_waiters=8)
 _state = {
     "thinking_ok": None,
     "calls": 0,
@@ -48,6 +135,7 @@ _state = {
     "synth_ok": 0,
     "synth_fail": 0,
     "synth_last_error": None,
+    "synth_fallback_calls": 0,
 }
 _INVISIBLE_RE = re.compile(r"[\u200b-\u200f\ufeff\u202a-\u202e\s]+")
 
@@ -161,56 +249,120 @@ def generate(system_text, user_text, timeout=None):
     return None, last_reason
 
 
-def _call_local_provider(system_text, raw_text):
+def _kill_process_tree(proc):
+    """قتل شجرة العمليات بالكامل (العملية وأي أبناء متفرعين) على Windows وPOSIX."""
+    if proc is None:
+        return
+    pid = getattr(proc, "pid", None)
+    if not pid:
+        return
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(pid)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+                check=False,
+            )
+        except Exception:
+            pass
+    else:
+        try:
+            pgid = os.getpgid(pid)
+            sig = getattr(signal, "SIGKILL", 9)
+            os.killpg(pgid, sig)
+        except (OSError, ProcessLookupError, PermissionError):
+            pass
+    try:
+        proc.kill()
+    except (OSError, ProcessLookupError):
+        pass
+
+
+def _call_local_provider(system_text, raw_text, stage="polish", timeout=None, process_factory=None, priority=False):
     """
-    استدعاء المزود المحلي المستقل كـ Black-Box CLI عبر subprocess.run بمهلة وإغلاق آمن.
+    استدعاء المزود المحلي المستقل كـ Black-Box CLI عبر subprocess.Popen بمهلة وإغلاق آمن وقتل شجرة العمليات.
     يرجع (text, None) عند النجاح، أو (None, reason) عند الفشل/المهلة.
     """
     cmd = getattr(Config, "LOCAL_POLISH_CMD", "") or ""
     if not cmd:
         return None, "لا يوجد مزود محلي مهيأ"
-    timeout = getattr(Config, "LOCAL_POLISH_TIMEOUT", 60.0) or 60.0
+
+    if timeout is None:
+        timeout = getattr(Config, "LOCAL_POLISH_TIMEOUT", 180.0) or 180.0
+    else:
+        timeout = float(timeout)
+
     payload = f"{system_text}\n\n===USER_INPUT===\n{raw_text}"
-    lock_wait = float(timeout)
-    acquired = _shelby_cli_lock.acquire(timeout=lock_wait)
+
+    lock_wait = min(getattr(Config, "LOCAL_LOCK_WAIT_SEC", 45.0), timeout)
+    acquired = _shelby_cli_lock.acquire(timeout=lock_wait, priority=priority)
     if not acquired:
-        return None, f"المزود المحلي مشغول بمهمة أخرى (تجاوز انتظار القفل {timeout}ث)"
+        return None, f"المزود المحلي مشغول بمهمة أخرى (تجاوز انتظار القفل {lock_wait}ث)"
+
     cmd_args = cmd
     t0 = time.monotonic()
+    proc = None
     try:
         if isinstance(cmd, str):
             cmd_args = cmd if os.name == "nt" else shlex.split(cmd)
         else:
             cmd_args = cmd
-        res = subprocess.run(
-            cmd_args,
-            input=payload,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout,
-        )
+
+        popen_fn = process_factory or subprocess.Popen
+        popen_kwargs = {
+            "stdin": subprocess.PIPE,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "text": True,
+            "encoding": "utf-8",
+            "errors": "replace",
+            "shell": False,
+            "env": dict(os.environ),
+        }
+        if os.name == "nt":
+            popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        else:
+            popen_kwargs["start_new_session"] = True
+
+        proc = popen_fn(cmd_args, **popen_kwargs)
+        try:
+            stdout_data, stderr_data = proc.communicate(input=payload, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _kill_process_tree(proc)
+            try:
+                proc.communicate(timeout=2)
+            except Exception:
+                pass
+            return None, f"تجاوز مهلة المزود المحلي ({timeout}ث)"
+
         elapsed = time.monotonic() - t0
-        if res.returncode == 0 and res.stdout.strip():
-            logger.info("✨ [local] polish في %.1f ث", elapsed)
-            return res.stdout.strip(), None
-        if res.stderr and res.stderr.strip():
-            raw_err = res.stderr.strip().splitlines()[-1][:120]
-        elif res.returncode == 0:
-            # خرج بنجاح لكن مخرجاته فارغة — ليست "خروج غير صفري (0)" بل عقد CLI مخروق
+        returncode = proc.returncode if proc.returncode is not None else 0
+        stdout_str = (stdout_data or "").strip()
+        stderr_str = (stderr_data or "").strip()
+
+        if returncode == 0 and stdout_str:
+            logger.info("✨ [local] %s في %.1f ث", stage, elapsed)
+            return stdout_str, None
+
+        if stderr_str:
+            raw_err = stderr_str.splitlines()[-1][:120]
+        elif returncode == 0:
             raw_err = "المزود خرج بنجاح لكن stdout فارغ (لا نص منظم)"
         else:
-            raw_err = f"خروج غير صفري ({res.returncode})"
+            raw_err = f"خروج غير صفري ({returncode})"
+
         clean_err = re.sub(r'([A-Za-z]:[\\/][^\s:"\'\)]+|/(?:home|var|usr|etc|root|data)[^\s:"\'\)]+)', '<PATH>', raw_err)
         clean_err = logkit.redact(clean_err)
         return None, f"فشل المزود المحلي: {clean_err}"
-    except subprocess.TimeoutExpired:
-        return None, f"تجاوز مهلة المزود المحلي ({timeout}ث)"
+
     except FileNotFoundError:
         exec_name = cmd_args[0] if isinstance(cmd_args, list) and cmd_args else str(cmd)
         return None, logkit.redact(f"أمر المزود المحلي غير موجود (FileNotFoundError: {exec_name})")
     except Exception as e:
+        if proc is not None:
+            _kill_process_tree(proc)
         return None, f"خطأ استدعاء المزود المحلي ({type(e).__name__})"
     finally:
         _shelby_cli_lock.release()
@@ -353,20 +505,17 @@ def polish(raw_text, role_id=None, glossary=None, context_summary=None):
     return text.strip(), None
 
 
-def synthesize(raw_text, gemini_draft, shelby_draft, role_id=None, glossary=None, context_summary=None):
+def synthesize(raw_text, gemini_draft=None, shelby_draft=None, role_id=None, glossary=None, context_summary=None):
     """
     يستدعي الوكيل الثالث (السبّاك النهائي Master Synthesizer) لسبك مسودتي جيميني وشلبي
     في ناتج ذهبي موحد فائق القوة والدقة.
     يرجع (golden_text, None) عند النجاح، أو (None, reason) عند الفشل.
     القاموس يُطبَّق على الناتج النهائي.
+    يدعم السبك مع مسودتين، مسودة واحدة، أو من النص الخام مباشرة.
     """
     assert_not_forbidden_assist_model()
-    if is_effective_empty(raw_text) or (is_effective_empty(gemini_draft) and is_effective_empty(shelby_draft)):
+    if is_effective_empty(raw_text):
         return None, "نص فارغ"
-    if is_effective_empty(gemini_draft):
-        return (shelby_draft or "").strip(), None
-    if is_effective_empty(shelby_draft):
-        return (gemini_draft or "").strip(), None
 
     role_id = role_id or Config.DEFAULT_ROLE
     system_text, user_content = prompts.compose_synthesis_prompt(
@@ -397,6 +546,147 @@ def synthesize(raw_text, gemini_draft, shelby_draft, role_id=None, glossary=None
         _state["synth_fail"] = _state.get("synth_fail", 0) + 1
         _state["synth_last_error"] = str(reason or "")
     return None, reason
+
+
+def synthesize_ex(raw_text, gemini_draft=None, shelby_draft=None, role_id=None, glossary=None, context_summary=None, flow_start=None):
+    """
+    آلة حالات السبك المحكمة (Master Synthesizer State Machine) بميزانية مطلقة 420ث:
+      1. SYNTH_SHELBY2: محاولة السبك بمزود شلبي المحلي (timeout <= min(180, remaining)).
+      2. SYNTH_FLASH_FALLBACK: ارتداد فوري إلى Gemini Flash-Lite ضمن المتبقي فقط.
+      3. RESCUE_DRAFT_OR_RAW: إنقاذ بأفضل مسودة متوفرة أو النص الخام.
+    يرجع قاموساً موحداً:
+      {
+        "text": <str>,
+        "source_tag": "shelby2" | "flash_fallback" | "rescue_shelby_draft" | "rescue_gemini_draft" | "rescue_raw" | "empty",
+        "fallback_used": <bool>,
+        "error_reason": <str or None>
+      }
+    """
+    assert_not_forbidden_assist_model()
+    if is_effective_empty(raw_text):
+        return {
+            "text": None,
+            "source_tag": "empty",
+            "fallback_used": False,
+            "error_reason": "نص فارغ",
+        }
+
+    flow_start = flow_start if flow_start is not None else time.monotonic()
+    total_budget = getattr(Config, "SYNTH_TOTAL_BUDGET_SEC", 420.0)
+    total_budget_deadline = flow_start + total_budget
+    min_exec = getattr(Config, "MIN_SHELBY_EXEC_SEC", 5.0)
+
+    role_id = role_id or Config.DEFAULT_ROLE
+    system_text, user_content = prompts.compose_synthesis_prompt(
+        raw_text=raw_text,
+        gemini_draft=gemini_draft,
+        shelby_draft=shelby_draft,
+        role_id=role_id,
+    )
+    if context_summary:
+        system_text += (
+            "\n\nملخص الجلسة حتى الآن (للفهم فقط — لا تضفه ولا تعِد كتابته، اسبك النص الجديد فقط):\n"
+            + str(context_summary)[:Config.SESSION_SUMMARY_MAX_CHARS]
+        )
+
+    last_error = None
+
+    # المرحلة 2 - أ: السبّاك الأساسي شلبي محلياً
+    local_cmd = getattr(Config, "LOCAL_POLISH_CMD", "") or ""
+    now = time.monotonic()
+    remaining = total_budget_deadline - now
+
+    if local_cmd and remaining >= min_exec:
+        shelby_timeout = min(getattr(Config, "LOCAL_POLISH_TIMEOUT", 180.0), remaining)
+        with _lock:
+            _state["synth_calls"] = _state.get("synth_calls", 0) + 1
+
+        text, reason = _call_local_provider(
+            system_text,
+            user_content,
+            stage="synthesis",
+            timeout=shelby_timeout,
+            priority=True,
+        )
+        if text:
+            if not is_shelby_noop(raw_text, text, role_id=role_id):
+                with _lock:
+                    _state["synth_ok"] = _state.get("synth_ok", 0) + 1
+                if glossary is not None:
+                    text, _n = glossary.apply(text, target="polished")
+                return {
+                    "text": text.strip(),
+                    "source_tag": "shelby2",
+                    "fallback_used": False,
+                    "error_reason": None,
+                }
+            else:
+                note_shelby_noop()
+                last_error = "المزود المحلي أعاد النص دون تنظيم فعلي في السبك (No-Op)"
+                with _lock:
+                    _state["synth_fail"] = _state.get("synth_fail", 0) + 1
+                    _state["synth_last_error"] = last_error
+        else:
+            last_error = reason
+            with _lock:
+                _state["synth_fail"] = _state.get("synth_fail", 0) + 1
+                _state["synth_last_error"] = str(reason or "")
+    elif local_cmd and remaining < min_exec:
+        last_error = f"نفاد ميزانية السبك لشلبي (المتبقي {remaining:.1f}ث < {min_exec}ث)"
+        logger.warning("⏱️ %s", last_error)
+
+    # المرحلة 2 - ب: احتياطي السبك Gemini Flash-Lite
+    now = time.monotonic()
+    remaining = total_budget_deadline - now
+    if remaining > 0:
+        with _lock:
+            _state["synth_calls"] = _state.get("synth_calls", 0) + 1
+            _state["synth_fallback_calls"] = _state.get("synth_fallback_calls", 0) + 1
+
+        text, reason = generate(system_text, user_content)
+        if text:
+            with _lock:
+                _state["synth_ok"] = _state.get("synth_ok", 0) + 1
+            if glossary is not None:
+                text, _n = glossary.apply(text, target="polished")
+            return {
+                "text": text.strip(),
+                "source_tag": "flash_fallback",
+                "fallback_used": True,
+                "error_reason": None,
+            }
+        else:
+            last_error = reason or last_error
+            with _lock:
+                _state["synth_fail"] = _state.get("synth_fail", 0) + 1
+                _state["synth_last_error"] = str(reason or "")
+    else:
+        last_error = f"نفاد الميزانية الإجمالية للسبك ({total_budget}ث)"
+
+    # المرحلة 2 - ج: إنقاذ بأفضل مسودة متوفرة أو النص الخام
+    s_clean = (shelby_draft or "").strip()
+    g_clean = (gemini_draft or "").strip()
+    raw_clean = (raw_text or "").strip()
+
+    if s_clean and not is_shelby_noop(raw_clean, s_clean, role_id=role_id):
+        rescue_text = s_clean
+        source_tag = "rescue_shelby_draft"
+    elif g_clean:
+        rescue_text = g_clean
+        source_tag = "rescue_gemini_draft"
+    else:
+        rescue_text = raw_clean
+        source_tag = "rescue_raw"
+
+    if glossary is not None:
+        rescue_text, _n = glossary.apply(rescue_text, target="polished")
+
+    return {
+        "text": rescue_text,
+        "source_tag": source_tag,
+        "fallback_used": True,
+        "error_reason": logkit.redact(str(last_error or "فشل السبك والارتداد للمسودة/الخام")),
+    }
 
 
 def stats():

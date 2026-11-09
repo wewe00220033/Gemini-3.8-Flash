@@ -273,10 +273,12 @@ SYNTHESIZER_SYSTEM_PROMPT = (
 )
 
 
-def compose_synthesis_prompt(raw_text, gemini_draft, shelby_draft, role_id="general", roles=None):
+def compose_synthesis_prompt(raw_text, gemini_draft=None, shelby_draft=None, role_id="general", roles=None, max_chars=None):
     """
     يركب برومبت السبك الثلاثي شاملاً الدستور التحريري الـ 12 قسماً بالكامل (_POLISH_COMMON)
     وتوجيهات الدور، مع تحديد سلطة الحكم الأعلى بوضوح.
+    يدعم العمل مع مسودتين، مسودة واحدة، أو بدون مسودات (السبك من الخام مباشرة).
+    يفرض سقف الحروف SYNTH_PROMPT_MAX_CHARS (28000) مع حماية أصل التفريغ ودستور النظام.
     """
     roles = roles if roles is not None else all_roles()
     role = roles.get(role_id) or roles.get("general") or DEFAULT_ROLES["general"]
@@ -290,11 +292,87 @@ def compose_synthesis_prompt(raw_text, gemini_draft, shelby_draft, role_id="gene
         f"{_POLISH_COMMON}"
     )
 
-    user_content = (
-        f"=== 🎙️ أصل التفريغ الصوتي الخام (مرجع الحقيقة المطلق) ===\n{raw_text}\n\n"
-        f"=== ⚡ المسودة الاسترشادية 1 (منظم جيميني السحابي) ===\n{gemini_draft}\n\n"
-        f"=== 🤖 المسودة الاسترشادية 2 (منظم شلبي المحلي) ===\n{shelby_draft}\n\n"
-        "المطلوب: طبق الدستور التحريري الصارم على النص الخام، واقتبس أفضل ما في المسودتين الاسترشاديتين لإنتاج «النسخة الذهبية المسبوكة» النهائية مباشرة."
-    )
+    max_chars = max_chars or getattr(Config, "SYNTH_PROMPT_MAX_CHARS", 28000)
+
+    raw = str(raw_text or "").strip()
+    g_draft = str(gemini_draft or "").strip() if gemini_draft else ""
+    s_draft = str(shelby_draft or "").strip() if shelby_draft else ""
+
+    has_g = bool(g_draft)
+    has_s = bool(s_draft)
+
+    # 1. صياغة التذييل والترويسات بحسب توفر المسودات
+    if has_g and has_s:
+        tail = "المطلوب: طبق الدستور التحريري الصارم على النص الخام، واقتبس أفضل ما في المسودتين الاسترشاديتين لإنتاج «النسخة الذهبية المسبوكة» النهائية مباشرة."
+        g_header = "=== ⚡ المسودة الاسترشادية 1 (منظم جيميني السحابي) ===\n"
+        s_header = "=== 🤖 المسودة الاسترشادية 2 (منظم شلبي المحلي) ===\n"
+    elif has_g:
+        tail = "المطلوب: طبق الدستور التحريري الصارم على النص الخام، واقتبس أفضل ما في المسودة الاسترشادية لإنتاج «النسخة الذهبية المسبوكة» النهائية مباشرة."
+        g_header = "=== ⚡ المسودة الاسترشادية (منظم جيميني السحابي) ===\n"
+        s_header = ""
+    elif has_s:
+        tail = "المطلوب: طبق الدستور التحريري الصارم على النص الخام، واقتبس أفضل ما في المسودة الاسترشادية لإنتاج «النسخة الذهبية المسبوكة» النهائية مباشرة."
+        g_header = ""
+        s_header = "=== 🤖 المسودة الاسترشادية (منظم شلبي المحلي) ===\n"
+    else:
+        tail = "المطلوب: طبق الدستور التحريري الصارم على النص الخام مباشرة لإنتاج «النسخة الذهبية المسبوكة» النهائية مباشرة."
+        g_header = ""
+        s_header = ""
+
+    raw_header = "=== 🎙️ أصل التفريغ الصوتي الخام (مرجع الحقيقة المطلق) ===\n"
+
+    # 2. حساب السقف واقتطاع المسودات إذا لزم الأمر لحماية الخام والدستور
+    fixed_overhead = len(sys_text) + len(raw_header) + len(raw) + len(tail) + 16
+    draft_headers_len = (len(g_header) + 4 if has_g else 0) + (len(s_header) + 4 if has_s else 0)
+    avail_drafts = max_chars - fixed_overhead - draft_headers_len
+
+    trunc_marker = "\n[...تم اقتطاع باقي المسودة للسقف الحجمي...]"
+
+    if (has_g or has_s) and avail_drafts < (len(g_draft) + len(s_draft)):
+        if avail_drafts <= len(trunc_marker) * (int(has_g) + int(has_s)):
+            # الميزانية ضيقة جداً للمسودات: أسقط المسودات تماماً واعتمد على الخام
+            g_draft = ""
+            s_draft = ""
+            has_g = False
+            has_s = False
+            tail = "المطلوب: طبق الدستور التحريري الصارم على النص الخام مباشرة لإنتاج «النسخة الذهبية المسبوكة» النهائية مباشرة."
+        elif has_g and has_s:
+            half = avail_drafts // 2
+            if len(g_draft) <= half:
+                s_limit = avail_drafts - len(g_draft)
+                if len(s_draft) > s_limit:
+                    s_draft = s_draft[:max(0, s_limit - len(trunc_marker))].rstrip() + trunc_marker
+            elif len(s_draft) <= half:
+                g_limit = avail_drafts - len(s_draft)
+                if len(g_draft) > g_limit:
+                    g_draft = g_draft[:max(0, g_limit - len(trunc_marker))].rstrip() + trunc_marker
+            else:
+                lim = max(0, half - len(trunc_marker))
+                g_draft = g_draft[:lim].rstrip() + trunc_marker
+                s_draft = s_draft[:lim].rstrip() + trunc_marker
+        elif has_g:
+            g_limit = max(0, avail_drafts - len(trunc_marker))
+            g_draft = g_draft[:g_limit].rstrip() + trunc_marker
+        elif has_s:
+            s_limit = max(0, avail_drafts - len(trunc_marker))
+            s_draft = s_draft[:s_limit].rstrip() + trunc_marker
+
+    # في حال كان الخام نفسه ضخماً للغاية وتجاوز السقف مع الدستور
+    cur_draft_headers_len = (len(g_header) + 4 if has_g else 0) + (len(s_header) + 4 if has_s else 0)
+    total_len = len(sys_text) + len(raw_header) + len(raw) + len(tail) + cur_draft_headers_len + len(g_draft) + len(s_draft)
+    if total_len > max_chars:
+        raw_trunc_marker = "\n[...تم اقتطاع النص الخام لضخامته...]"
+        allowed_raw = max_chars - (len(sys_text) + len(raw_header) + len(tail) + cur_draft_headers_len + len(g_draft) + len(s_draft) + len(raw_trunc_marker) + 16)
+        if allowed_raw > 100:
+            raw = raw[:allowed_raw].rstrip() + raw_trunc_marker
+
+    parts = [f"{raw_header}{raw}"]
+    if has_g and g_draft:
+        parts.append(f"{g_header}{g_draft}")
+    if has_s and s_draft:
+        parts.append(f"{s_header}{s_draft}")
+    parts.append(tail)
+
+    user_content = "\n\n".join(parts)
     return sys_text, user_content
 

@@ -159,16 +159,30 @@ def test_call_local_provider_does_not_use_shell_true(monkeypatch):
     import subprocess
     captured = {}
 
-    def fake_run(cmd, **kwargs):
-        captured["cmd"] = cmd
-        captured["shell"] = kwargs.get("shell", False)
-        return subprocess.CompletedProcess(cmd, 0, stdout="منظم", stderr="")
+    class FakeProc:
+        def __init__(self, cmd, **kwargs):
+            captured["cmd"] = cmd
+            captured["shell"] = kwargs.get("shell", False)
+            self.pid = 12345
+            self.returncode = 0
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+        def communicate(self, input=None, timeout=None):
+            return "منظم", ""
+
+        def poll(self):
+            return 0
+
+        def kill(self):
+            pass
+
+        def wait(self, timeout=None):
+            return 0
+
+    monkeypatch.setattr(subprocess, "Popen", FakeProc)
     monkeypatch.setattr(text_assist.Config, "LOCAL_POLISH_CMD", "python dummy.py")
     out, err = text_assist._call_local_provider("sys", "raw")
     assert out == "منظم"
-    assert captured["shell"] is False, "خطر أمني: تم رصد shell=True في subprocess.run!"
+    assert captured["shell"] is False, "خطر أمني: تم رصد shell=True في subprocess.Popen!"
 
 
 # ---------------------------------------------------------------- 4) Secure cookie

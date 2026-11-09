@@ -35,6 +35,37 @@ def _env_int(name, default):
         return default
 
 
+def _kill_process_tree(proc):
+    """قتل شجرة العمليات بالكامل (العملية وأي أبناء متفرعين) على Windows وPOSIX."""
+    if proc is None:
+        return
+    pid = getattr(proc, "pid", None)
+    if not pid:
+        return
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(pid)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+                check=False,
+            )
+        except Exception:
+            pass
+    else:
+        try:
+            pgid = os.getpgid(pid)
+            sig = getattr(signal, "SIGKILL", 9)
+            os.killpg(pgid, sig)
+        except (OSError, ProcessLookupError, PermissionError):
+            pass
+    try:
+        proc.kill()
+    except (OSError, ProcessLookupError):
+        pass
+
+
 def _env_tuple(name, default):
     raw = os.environ.get(name, "")
     if not raw:
@@ -162,10 +193,7 @@ class Supervisor:
             try:
                 return p.wait(timeout=grace if (not graceful or os.name != "nt") else 2)
             except subprocess.TimeoutExpired:
-                try:
-                    p.kill()
-                except OSError:
-                    pass
+                _kill_process_tree(p)
                 try:
                     return p.wait(timeout=5)
                 except subprocess.TimeoutExpired:
