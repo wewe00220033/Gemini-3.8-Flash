@@ -413,6 +413,62 @@ def edit_telegram_message(token, chat_id, message_id, text, parse_mode="HTML", r
         return False
 
 
+def _clean_markup_styles(markup):
+    """إزالة خاصية style من كافة أزرار لوحة المفاتيح لتوافق أقدم إصدارات Telegram Bot API."""
+    if not isinstance(markup, dict):
+        return markup
+    kb = markup.get("inline_keyboard")
+    if not isinstance(kb, list):
+        return markup
+    new_kb = []
+    changed = False
+    for row in kb:
+        new_row = []
+        for btn in row:
+            if isinstance(btn, dict) and "style" in btn:
+                b2 = dict(btn)
+                b2.pop("style", None)
+                new_row.append(b2)
+                changed = True
+            else:
+                new_row.append(btn)
+        new_kb.append(new_row)
+    if changed:
+        m2 = dict(markup)
+        m2["inline_keyboard"] = new_kb
+        return m2
+    return markup
+
+
+def edit_telegram_reply_markup(token, chat_id, message_id, reply_markup=None):
+    """تعديل أزرار رسالة موجودة دون تغيير نصها عبر editMessageReplyMarkup."""
+    payload = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "reply_markup": reply_markup or {"inline_keyboard": []},
+    }
+    try:
+        r = _tg_post(token, "editMessageReplyMarkup", payload, timeout=15)
+        if getattr(r, "status_code", None) == 429:
+            delay = min(10.0, max(0.5, _extract_retry_after(r)))
+            time.sleep(delay)
+            r = _tg_post(token, "editMessageReplyMarkup", payload, timeout=15)
+        if getattr(r, "status_code", None) == 400:
+            err_txt = getattr(r, "text", "") or ""
+            if "message is not modified" in err_txt.lower():
+                return True
+            if reply_markup:
+                cleaned = _clean_markup_styles(reply_markup)
+                if cleaned != reply_markup:
+                    payload["reply_markup"] = cleaned
+                    r = _tg_post(token, "editMessageReplyMarkup", payload, timeout=15)
+        return bool(r and r.status_code == 200)
+    except Exception as e:
+        print(f"⚠️ edit_telegram_reply_markup error: {e}")
+        return False
+
+
+
 def make_sender(token, chat_id, reaction_msg_id=None):
     """Sender لخط الإنتاج (delivery.deliver) فوق دوال تليجرام الحقيقية."""
     def _send_doc_compat(fn, data, mime, caption, reply_to):
@@ -846,6 +902,7 @@ BOT_COMMANDS = [
     ("status", "حالة المفاتيح والرصيد المتبقي"),
     ("mode", "وضع الإرسال: خام / منظم / مزدوج"),
     ("roles", "تغيير دور وأسلوب التنسيق"),
+    ("md", "تصدير النتيجة الذهبية لملف .md"),
     ("cancel", "إلغاء إدخال جارٍ"),
     ("doctor", "فحص صحي وتشخيص المنظومة"),
 ]
@@ -898,7 +955,7 @@ def handle_callback(token, cq):
     mid = m.get("message_id")
     note = ""
     try:
-        note = _dispatch_callback(token, chat_id, mid, data) or ""
+        note = _dispatch_callback(token, chat_id, mid, data, cq=cq) or ""
     except Exception as e:
         print(f"⚠️ callback [{data}]: {type(e).__name__}: {e}")
         STATE["last_error"] = logkit.redact(f"callback {data}: {e}")
@@ -912,9 +969,69 @@ def _run_cmd(token, chat_id, text, reply_to=None):
     handle_text(token, chat_id, {"message_id": reply_to or 0}, text)
 
 
-def _dispatch_callback(token, chat_id, mid, data):
+def _dispatch_callback(token, chat_id, mid, data, cq=None):
     audit.set_actor("telegram")
     sec, act, arg = panel.parse(data)
+
+    # --- أزرار ملف .md التفاعلي (Contract 8) ---
+    if sec == "md":
+        import md_cache
+        token_str = arg
+        if act == "ask":
+            item = md_cache.get(token_str, chat_id=chat_id)
+            if not item:
+                return "⚠️ انتهت صلاحية الكاش (24 ساعة) أو تم تفريغه"
+            confirm_kb = {
+                "inline_keyboard": [
+                    [
+                        {"text": "✅ تأكيد ملف .md", "callback_data": f"md:ok:{token_str}", "style": "success"},
+                        {"text": "❌ إلغاء", "callback_data": f"md:no:{token_str}", "style": "danger"},
+                    ]
+                ]
+            }
+            edit_telegram_reply_markup(token, chat_id, mid, reply_markup=confirm_kb)
+            return "اضغط تأكيد لاستخراج الملف"
+
+        if act == "no":
+            orig_kb = {
+                "inline_keyboard": [
+                    [
+                        {"text": "📄 تحويل لملف .md", "callback_data": f"md:ask:{token_str}", "style": "primary"},
+                    ]
+                ]
+            }
+            edit_telegram_reply_markup(token, chat_id, mid, reply_markup=orig_kb)
+            return "تم الإلغاء ❌"
+
+        if act == "ok":
+            from_user = (cq or {}).get("from") or {}
+            user_id = from_user.get("id")
+            item = md_cache.get(token_str, chat_id=chat_id, user_id=user_id)
+            if not item:
+                raw_item = md_cache.get(token_str)
+                if raw_item and str(chat_id).startswith("-") and raw_item.get("user_id") and str(raw_item.get("user_id")) != str(user_id):
+                    return "⚠️ عذراً، لا يمكن لغير صاحب الطلب استخراج الملف في المجموعات"
+                return "⚠️ انتهت صلاحية الكاش (24 ساعة) أو تم تفريغه"
+
+            golden_text = item.get("text")
+            if not golden_text and item.get("entry_id"):
+                ent = archive.get_entry_by_id(item["entry_id"])
+                golden_text = ent.get("polished") if ent else None
+
+            if not golden_text:
+                return "⚠️ تعذر العثور على نص الملف"
+
+            _send_document(
+                token,
+                chat_id,
+                "golden_synthesized.md",
+                golden_text.encode("utf-8"),
+                "text/markdown",
+                caption="🏆 النسخة الذهبية المسبوكة",
+                reply_to_id=mid,
+            )
+            edit_telegram_reply_markup(token, chat_id, mid, reply_markup=None)
+            return "تم رفع الملف بنجاح ✅"
 
     # --- صمام الحصة (المرحلة 2) ---
     if sec == "q":
@@ -1922,6 +2039,56 @@ def handle_text(token, chat_id, msg, msg_text):
 
     elif cmd == "/glossary_export":
         _send_document(token, chat_id, "glossary.json", glossary_mod.get_glossary().export_bytes(), "application/json", "📖 القاموس المخصص", msg["message_id"])
+
+    elif cmd == "/md":
+        import md_cache
+        from_user = msg.get("from") or {}
+        user_id = from_user.get("id")
+        arg_val = args[0].strip() if args else ""
+        golden_text = None
+
+        if arg_val and md_cache.TOKEN_RE.match(arg_val):
+            item = md_cache.get(arg_val, chat_id=chat_id, user_id=user_id)
+            if item:
+                golden_text = item.get("text")
+                if not golden_text and item.get("entry_id"):
+                    ent = archive.get_entry_by_id(item["entry_id"])
+                    golden_text = ent.get("polished") if ent else None
+            else:
+                raw_item = md_cache.get(arg_val)
+                if raw_item and str(chat_id).startswith("-") and raw_item.get("user_id") and str(raw_item.get("user_id")) != str(user_id):
+                    send_telegram_message(token, chat_id, "⚠️ عذراً، لا يمكن لغير صاحب الطلب استخراج الملف في المجموعات.", reply_to_id=msg["message_id"])
+                    return
+
+        if not golden_text and arg_val:
+            ent = archive.get_entry_by_id(arg_val)
+            if ent and ent.get("polished"):
+                golden_text = ent.get("polished")
+
+        if not golden_text:
+            replied = msg.get("reply_to_message") or {}
+            replied_text = replied.get("text") or ""
+            if replied_text:
+                golden_text = _strip_banner(replied_text)
+
+        if not golden_text:
+            last_ent = archive.last()
+            if last_ent and last_ent.get("polished"):
+                golden_text = last_ent.get("polished")
+
+        if not golden_text or not golden_text.strip():
+            send_telegram_message(token, chat_id, "⚠️ تعذر العثور على نص ذهبي مسبوك لتحويله إلى .md. رُدّ على رسالة أو حدد معرف المدخل.", reply_to_id=msg["message_id"])
+            return
+
+        _send_document(
+            token,
+            chat_id,
+            "golden_synthesized.md",
+            golden_text.strip().encode("utf-8"),
+            "text/markdown",
+            caption="🏆 النسخة الذهبية المسبوكة",
+            reply_to_id=msg["message_id"],
+        )
 
     elif cmd == "/last":
         entry = archive.last()

@@ -121,18 +121,30 @@ def _parse_block_with_addenda(block):
         elif cur is not None:
             cur.append(ln)
 
+    role_m = re.search(r"<!--\s*role:([A-Za-z0-9_.\-]+)\s*-->", block)
+    is_golden = "<!-- synth_golden:1 -->" in block
+
     entry = {
         "meta": meta,
         "raw": "\n".join(raw).strip(),
         "polished": "\n".join(polished).strip() or None,
         "title": "\n".join(title).strip() or None,
+        "synth_golden": is_golden,
     }
+    if role_m:
+        entry["role"] = role_m.group(1)
+
     parsed_addenda = {}
     for tid, b in addenda.items():
         p_txt = "\n".join(b["polished"]).strip() or None
         t_txt = "\n".join(b["title"]).strip() or None
         if p_txt or t_txt:
-            parsed_addenda[tid] = {"polished": p_txt, "title": t_txt}
+            item_ad = {"polished": p_txt, "title": t_txt}
+            if is_golden:
+                item_ad["synth_golden"] = True
+            if role_m:
+                item_ad["role"] = role_m.group(1)
+            parsed_addenda[tid] = item_ad
     return entry, entry_id, parsed_addenda
 
 
@@ -144,6 +156,10 @@ def _merge_addenda_into_entry(entry, eid, all_addenda):
         entry["polished"] = ad["polished"]
     if not entry.get("title") and ad.get("title"):
         entry["title"] = ad["title"]
+    if ad.get("synth_golden"):
+        entry["synth_golden"] = True
+    if ad.get("role") and not entry.get("role"):
+        entry["role"] = ad["role"]
     return entry
 
 
@@ -233,15 +249,61 @@ def _append_section_to_entry(mark, body_text, field_key, entry_id=None):
         return True
 
 
-def append_polished(polished_text, entry_id=None):
+def append_polished(polished_text, entry_id=None, is_golden=False, role_id=None):
     """يلحق «### المنظم» بالمدخل المستهدف (أو الأخير) مع حفظ append-only ومنع التداخل تحت التزامن."""
     if not polished_text:
         return False
+    body = polished_text
+    meta_lines = []
+    if role_id:
+        meta_lines.append(f"<!-- role:{role_id} -->")
+    if is_golden:
+        meta_lines.append("<!-- synth_golden:1 -->")
+    if meta_lines:
+        body = "\n".join(meta_lines) + "\n" + body
     try:
-        return _append_section_to_entry(_POL_MARK, polished_text, "polished", entry_id=entry_id)
+        return _append_section_to_entry(_POL_MARK, body, "polished", entry_id=entry_id)
     except Exception as e:
         print(f"⚠️ الأرشفة: تعذّر إلحاق المنظم ({e})")
         return False
+
+
+def get_entry_by_id(entry_id):
+    """استرجاع مدخل كامل من ALL.md بواسطة entry_id مع دمج أي addenda ملحقة به."""
+    if not entry_id:
+        return None
+    path = all_path()
+    if not os.path.exists(path):
+        return None
+    with _lock:
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                data = f.read()
+        except Exception:
+            return None
+        marker = f"<!-- entry_id:{entry_id} -->"
+        pos = data.find(marker)
+        if pos == -1:
+            return None
+        head_pos = data.rfind(_ENTRY_MARK, 0, pos)
+        if head_pos == -1:
+            head_pos = 0
+        tail_data = data[head_pos:]
+        parts = _ENTRY_RE.split(tail_data)
+        if len(parts) < 2:
+            return None
+        target_ent, _tid, add_first = _parse_block_with_addenda(_ENTRY_MARK + parts[1])
+        all_ads = dict(add_first)
+        for p in parts[2:]:
+            _e, _eid, ads = _parse_block_with_addenda(_ENTRY_MARK + p)
+            for tid, b in ads.items():
+                bucket = all_ads.setdefault(tid, {})
+                for k, v in b.items():
+                    if v and not bucket.get(k):
+                        bucket[k] = v
+        merged = _merge_addenda_into_entry(dict(target_ent), entry_id, all_ads)
+        merged["entry_id"] = entry_id
+        return merged
 
 
 def append_title(title, entry_id=None):

@@ -84,13 +84,17 @@ class LiveMessageController:
     - يفرض فاصلاً زمنياً (1.5-2.0ث) بين طلبات editMessageText لمنع 429 Too Many Requests.
     - يقسم المخرجات النهائية الطويلة (> 4000 UTF-16) حتى 8 قطع كتل <pre> متوازنة.
     """
-    def __init__(self, sender, anchor, title=None, session_name=None, role_id=None, min_edit_interval=1.5):
+    def __init__(self, sender, anchor, title=None, session_name=None, role_id=None, min_edit_interval=1.5,
+                 chat_id=None, user_id=None, entry_id=None):
         self.sender = sender
         self.anchor = anchor
         self.title = title
         self.session_name = session_name
         self.role_id = role_id
         self.min_edit_interval = min_edit_interval
+        self.chat_id = chat_id
+        self.user_id = user_id
+        self.entry_id = entry_id
         self._writer_lock = threading.Lock()
         self.live_mid = None
         self.finalized = False
@@ -155,6 +159,31 @@ class LiveMessageController:
             raw_utf16 = _utf16_len(full_html)
             limit = 4000
 
+            # ربط كاش .md التفاعلي وزر التصدير الأزرق (المرحلة 4 - Contract 8)
+            # يظهر فقط للنتيجة المسبوكة الذهبية (> 4000 UTF-16) على القطعة الأخيرة
+            if is_golden and (parsed_utf16 > limit or raw_utf16 > limit) and reply_markup is None:
+                try:
+                    import md_cache
+                    token = md_cache.store(
+                        golden_text,
+                        chat_id=self.chat_id,
+                        user_id=self.user_id,
+                        entry_id=self.entry_id,
+                    )
+                    reply_markup = {
+                        "inline_keyboard": [
+                            [
+                                {
+                                    "text": "📄 تحويل لملف .md",
+                                    "callback_data": f"md:ask:{token}",
+                                    "style": "primary",
+                                }
+                            ]
+                        ]
+                    }
+                except Exception as e:
+                    logger.warning("⚠️ md_cache store failed: %s", e)
+
             import telegram_bot
             html_chunks_fn = getattr(telegram_bot, "_html_chunks", None)
 
@@ -199,22 +228,23 @@ class LiveMessageController:
 
             chunk_0 = raw_chunks[0]
             first_ok = False
+            first_markup = reply_markup if total_chunks == 1 else None
             if can_edit:
                 try:
-                    first_ok = self.sender.edit_text(self.live_mid, chunk_0, parse_mode="HTML")
+                    first_ok = self.sender.edit_text(self.live_mid, chunk_0, parse_mode="HTML", reply_markup=first_markup)
                 except Exception:
                     first_ok = False
                 if not first_ok:
                     plain_0 = _html_to_plain(chunk_0)
                     try:
-                        first_ok = self.sender.edit_text(self.live_mid, plain_0, parse_mode=None)
+                        first_ok = self.sender.edit_text(self.live_mid, plain_0, parse_mode=None, reply_markup=first_markup)
                     except Exception:
                         first_ok = False
                 if first_ok:
                     sent_mids.append(self.live_mid)
 
             if not first_ok:
-                mid_0 = self.sender.send_text(chunk_0, self.anchor, "HTML")
+                mid_0 = self.sender.send_text(chunk_0, self.anchor, "HTML", reply_markup=first_markup)
                 if mid_0:
                     sent_mids.append(mid_0)
                     if can_delete:
@@ -687,7 +717,8 @@ def _deliver_shelby_rescue(raw, model, role_id, gl, l2, reason, mode, footer_htm
 
 
 def _deliver_synthesizer(raw, polished, role_id, gl, l2, session_name, sender, anchor, local_polish_fn,
-                         t0_flow, gemini_elapsed, res_lock, result, _bg_finalize):
+                         t0_flow, gemini_elapsed, res_lock, result, _bg_finalize,
+                         chat_id=None, user_id=None, entry_id=None):
     """وضع السبك الثلاثي (Synthesizer): مسودة جيميني فورية ثم استبدالها بالنسخة الذهبية المسبوكة."""
     max_edit = Config.TELEGRAM_MAX_MSG - 50
     t_label = _local_timeout_label()
@@ -696,7 +727,8 @@ def _deliver_synthesizer(raw, polished, role_id, gl, l2, session_name, sender, a
         title=result["title"], shelby_status="waiting"
     )
     controller = LiveMessageController(
-        sender, anchor, title=result.get("title"), session_name=session_name, role_id=role_id
+        sender, anchor, title=result.get("title"), session_name=session_name, role_id=role_id,
+        chat_id=chat_id, user_id=user_id, entry_id=entry_id
     )
     draft_separated = len(init_html) > max_edit
     if draft_separated:
@@ -1243,7 +1275,7 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
                     if not _dwrite_done["v"]:
                         _dwrite_done["v"] = True
                         try:
-                            archive.append_polished(archive_text, entry_id=entry_id)
+                            archive.append_polished(archive_text, entry_id=entry_id, is_golden=is_golden, role_id=role_id)
                             if session_name:
                                 sessions.append_polished(
                                     session_text if session_text is not None else archive_text,
@@ -1278,7 +1310,7 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
                     pass
             defer_archive = bool(is_compare and cmp_mode == "synthesizer")
             if archive_entry and not defer_archive:
-                archive.append_polished(polished, entry_id=entry_id)
+                archive.append_polished(polished, entry_id=entry_id, is_golden=False, role_id=role_id)
                 if session_name:
                     sessions.append_polished(polished, session_id=session_id, entry_id=entry_id)
 
@@ -1287,6 +1319,9 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
                     result["compare_thread"] = _deliver_synthesizer(
                         raw, polished, role_id, gl, l2, session_name, sender, anchor, local_polish_fn,
                         t0_flow, gemini_elapsed, res_lock, result, _bg_finalize,
+                        chat_id=(job_meta or {}).get("chat_id"),
+                        user_id=(job_meta or {}).get("user_id") or (job_meta or {}).get("from_id"),
+                        entry_id=entry_id,
                     )
                 elif cmp_mode == "merged":
                     result["compare_thread"] = _deliver_merged(

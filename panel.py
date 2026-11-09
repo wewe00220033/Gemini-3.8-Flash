@@ -55,14 +55,17 @@ SET_CONFIG_ATTR = {
 # ======================================================================
 # أدوات عامة
 # ======================================================================
-def btn(text, data):
+def btn(text, data, style=None):
     """زر inline مع فرض الحدود (11 §1 و §6): data ≤ 64 بايت ASCII، النص ≤ 20 حرفاً."""
     if not isinstance(data, str) or not data or len(data.encode("utf-8")) > Config.CALLBACK_DATA_MAX or not data.isascii():
         raise ValueError(f"callback_data غير صالح: {data!r}")
     t = str(text)
     if len(t) > Config.PANEL_BUTTON_MAX_CHARS:
         t = t[:Config.PANEL_BUTTON_MAX_CHARS - 1] + "…"
-    return {"text": t, "callback_data": data}
+    res = {"text": t, "callback_data": data}
+    if style:
+        res["style"] = style
+    return res
 
 
 def kb(rows):
@@ -478,6 +481,7 @@ COMMAND_PARITY = {
     "c": "/context", "L:t": "/logs", "L:e": "/logs errors", "L:r": "/trace", "L:a": "/audit", "L:menu": "/panel",
     "b:n": "/backup", "b:s": "/backup_secrets", "b:S": "/backup_secrets confirm", "b:t": "/restore_test", "b:l": "/backups", "b:menu": "/panel",
     "S:l": "/set", "S:v": "/set", "S:s": "/set", "S:e": "/set", "m:menu": "/mode", "c:menu": "/context",
+    "md:ask": "/md", "md:ok": "/md", "md:no": "/md",
 }
 
 
