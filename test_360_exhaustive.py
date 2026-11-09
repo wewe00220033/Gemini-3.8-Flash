@@ -27,6 +27,7 @@ print("🔍 بدء الفحص الجنائي الشامل 360° لكافة مك�
 print("=" * 70)
 
 # إنشاء بيئة عمل نظيفة ومستقلة للفحص
+os.environ.setdefault("PYTEST_DISABLE_DOTENV", "1")
 TEST_DIR = tempfile.mkdtemp(prefix="drill_360_")
 os.environ["DATA_DIR"] = TEST_DIR
 os.environ["SET_MY_COMMANDS"] = "0"
@@ -48,6 +49,11 @@ Config.GLOSSARY_FILE = os.path.join(TEST_DIR, "glossary.json")
 Config.ROLES_FILE = os.path.join(TEST_DIR, "roles.json")
 Config.CURRENT_SESSION_FILE = os.path.join(Config.SESSIONS_DIR, "current_session.json")
 Config.SESSIONS_INDEX_FILE = os.path.join(Config.SESSIONS_DIR, "sessions_index.json")
+Config.KEY_GROUPS_FILE = os.path.join(Config.STATE_DIR, "key_groups.json")
+Config.WORKER_BEAT_FILE = os.path.join(Config.STATE_DIR, "worker.beat")
+Config.RESTART_REASON_FILE = os.path.join(Config.STATE_DIR, "restart_reason.json")
+Config.PERSIST_PROBE_FILE = os.path.join(TEST_DIR, ".persist_probe")
+Config.BACKUP_STATE_FILE = os.path.join(Config.STATE_DIR, "backup_state.json")
 
 os.makedirs(Config.LOGS_DIR, exist_ok=True)
 os.makedirs(Config.SESSIONS_DIR, exist_ok=True)

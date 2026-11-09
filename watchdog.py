@@ -116,6 +116,7 @@ class Watchdog:
         self.watch = tuple(watch)
         self._stop = threading.Event()
         self._thread = None
+        self._lock = threading.Lock()
         self.events = deque(maxlen=200)          # (mono, level, detail)
         self._l1_times = deque()                 # monotonic لكل L1 ضمن النافذة
         self.level = None                        # أعلى درجة نشطة: None | L3 | L3b
@@ -161,7 +162,8 @@ class Watchdog:
 
     # ------------------------------------------------------------------
     def _record(self, level, detail):
-        self.events.append((clock.monotonic(), level, detail))
+        with self._lock:
+            self.events.append((clock.monotonic(), level, detail))
         print(f"🩺 watchdog {level}: {detail}")
         # المرحلة 5 (12 §3.3): تقرير حادث تلقائي عند أي تصعيد (L1/L3/L3b/L4) — بتهدئة داخل incidents؛ فشله صامت
         if level != "recovered":
@@ -173,12 +175,14 @@ class Watchdog:
 
     def _prune_l1(self, now):
         window = Config.PROTECT_WINDOW_MINUTES * 60
-        while self._l1_times and now - self._l1_times[0] > window:
-            self._l1_times.popleft()
+        with self._lock:
+            while self._l1_times and now - self._l1_times[0] > window:
+                self._l1_times.popleft()
 
     def l1_in_window(self):
         self._prune_l1(clock.monotonic())
-        return len(self._l1_times)
+        with self._lock:
+            return len(self._l1_times)
 
     def check(self):
         """دورة فحص واحدة (قابلة للنداء المباشر في الاختبارات). ترجع الدرجة المتخذة أو None."""
@@ -216,7 +220,8 @@ class Watchdog:
             detail += f" | فشل إعادة التشغيل: {type(e).__name__}: {e}"
         self._last_restart_mono = now
         self.restarts += 1
-        self._l1_times.append(now)
+        with self._lock:
+            self._l1_times.append(now)
         self._record(L1_POLLER_RESTART, f"{detail} → poller جديد {'✅' if restarted else '❌'}")
         heartbeat.beat("poller", note="L1 restart grace")   # نبض وكيل حتى يبدأ الخيط الجديد
 
@@ -224,10 +229,10 @@ class Watchdog:
         l4 = self._l4_reason(now)
         if l4:
             if self._request_exit is not None and not self.l4_requested:
-                self.l4_requested = True
                 self._record(L4_PROCESS_EXIT, f"{l4} → طلب إعادة تشغيل العملية (SUPERVISED=1)")
                 try:
                     self._request_exit(l4)
+                    self.l4_requested = True
                 except Exception as e:
                     self._record(L4_PROCESS_EXIT, f"فشل request_exit: {type(e).__name__}: {e}")
                 return L4_PROCESS_EXIT
@@ -266,16 +271,16 @@ class Watchdog:
     def _l4_reason(self, now):
         """شرط L4 (03b §3): EXIT_AFTER_RESTARTS × L1 خلال EXIT_WINDOW_MINUTES، أو stall مستمر > L4_STALL_SECONDS رغم L1."""
         window = Config.EXIT_WINDOW_MINUTES * 60
-        n = sum(1 for t in self._l1_times if now - t <= window)
+        with self._lock:
+            n = sum(1 for t in self._l1_times if now - t <= window)
+            first = self._first_l1_of_current_streak_locked()
         if n >= Config.EXIT_AFTER_RESTARTS:
             return f"{n} × L1 خلال {Config.EXIT_WINDOW_MINUTES} د"
-        first = self._first_l1_of_current_streak()
         if first is not None and n >= 2 and now - first > Config.L4_STALL_SECONDS:
             return f"stall مستمر {int(now - first)}ث رغم {n} × L1"
         return None
 
-    def _first_l1_of_current_streak(self):
-        """أول L1 في سلسلة متصلة (فجوات ≤ ضعف العتبة) تنتهي بآخر L1 — تقدير لمدة الـ stall المستمر."""
+    def _first_l1_of_current_streak_locked(self):
         if not self._l1_times:
             return None
         gap = max(60.0, 2 * float(self._stall_after()))
@@ -288,7 +293,14 @@ class Watchdog:
                 break
         return first
 
+    def _first_l1_of_current_streak(self):
+        """أول L1 في سلسلة متصلة (فجوات ≤ ضعف العتبة) تنتهي بآخر L1 — تقدير لمدة الـ stall المستمر."""
+        with self._lock:
+            return self._first_l1_of_current_streak_locked()
+
     def snapshot(self):
+        with self._lock:
+            recent_events = list(self.events)[-5:]
         return {
             "level": self.level,
             "l4_requested": self.l4_requested,
@@ -296,5 +308,5 @@ class Watchdog:
             "restarts": self.restarts,
             "l1_in_window": self.l1_in_window(),
             "emergency_remaining_s": max(0, int(self.emergency_until - clock.monotonic())) if self.level == L3B_EMERGENCY else 0,
-            "recent": [{"level": lv, "detail": d, "age_s": int(clock.monotonic() - t)} for t, lv, d in list(self.events)[-5:]],
+            "recent": [{"level": lv, "detail": d, "age_s": int(clock.monotonic() - t)} for t, lv, d in recent_events],
         }

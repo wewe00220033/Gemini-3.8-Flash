@@ -464,7 +464,7 @@ def build_health():
         d_lines, d_worst = observability.doctor_report(check_telegram=False, now=now)
         doctor = {"worst": d_worst, "fails": [ln for ln in d_lines if ln.startswith("❌")][:5]}
     except Exception as e:
-        doctor = {"worst": "unknown", "error": f"{type(e).__name__}: {e}"}
+        doctor = {"worst": "unknown", "error": logkit.redact(f"{type(e).__name__}: {e}")}
     return {
         "ok": not stale,
         "doctor": doctor,
@@ -478,7 +478,7 @@ def build_health():
         "bot_configured": bot_configured,
         "bot_last_poll_age_s": int(now - last_poll) if last_poll else None,
         "bot_processed": bot_state.get("processed", 0),
-        "bot_last_error": bot_state.get("last_error"),
+        "bot_last_error": logkit.redact(bot_state.get("last_error")) if bot_state.get("last_error") else None,
         "keys_total": len(keys),
         "keys_available": keys_available,
         "uptime_s": int(now - WEB_STATE["started_at"]) if WEB_STATE["started_at"] else 0,
@@ -533,7 +533,7 @@ def serve(httpd):
     try:
         httpd.serve_forever()
     except Exception as e:
-        WEB_STATE["last_error"] = str(e)
+        WEB_STATE["last_error"] = logkit.redact(str(e))
         raise
     finally:
         WEB_STATE["alive"] = False

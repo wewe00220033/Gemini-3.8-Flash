@@ -108,6 +108,7 @@ class Config:
     # المنفذ: PORT (مضبوط يدوياً) ثم SERVER_PORT (تحقنه استضافات Pterodactyl مثل bot-hosting.net) ثم 8080
     WEB_HOST = os.environ.get("HOST", "0.0.0.0")
     WEB_PORT = int(os.environ.get("PORT") or os.environ.get("SERVER_PORT") or "8080")
+    WEB_ENABLED = os.environ.get("WEB_ENABLED", "0").lower() in ("1", "true", "yes")
 
     # توكن وصول اختياري لواجهة الويب (المنظومة شخصية — فاضي = مفتوح بالكامل).
     # لو ضبطته، الواجهة تطلبه مرة واحدة وتحفظه في المتصفح. localhost مفتوح دائماً.

@@ -15,6 +15,7 @@ import time
 from datetime import datetime
 
 from config import Config
+import logkit
 
 _lock = threading.Lock()
 _last_by_kind = {}          # kind -> wall ts آخر تقرير
@@ -213,7 +214,8 @@ def on_job_result(ok, error=None, queue=None, watchdog=None):
         _fail_streak["n"] += 1
         n = _fail_streak["n"]
     if n == Config.INCIDENT_FAIL_STREAK:
-        return write_report("fail_streak", f"{n} فويسات فشلت متتالية — آخر خطأ: {str(error or '')[:160]}", queue=queue, watchdog=watchdog)
+        err_clean = logkit.redact(str(error or ""))[:160]
+        return write_report("fail_streak", f"{n} فويسات فشلت متتالية — آخر خطأ: {err_clean}", queue=queue, watchdog=watchdog)
     return None
 
 

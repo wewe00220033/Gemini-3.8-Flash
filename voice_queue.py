@@ -27,6 +27,7 @@ from config import Config
 import clock
 import heartbeat
 import jobs
+import logkit
 
 
 class QueueFull(Exception):
@@ -270,12 +271,13 @@ class VoiceQueue:
                 if wait_s:
                     self._defer(job, wait_s, kind, e)
                 else:
-                    job.error = str(e)
+                    err_clean = logkit.redact(str(e))
+                    job.error = err_clean
                     with self._lock:
                         self._finish_locked(job, "failed")
                         self.stats["failed"] += 1
                     if self._journal:
-                        jobs.record(job.job_id, "failed", error=str(e)[:300], attempts=job.attempts)
+                        jobs.record(job.job_id, "failed", error=err_clean[:300], attempts=job.attempts)
                     self._safe(self._on_failed, job, e)
             finally:
                 with self._lock:
@@ -292,7 +294,7 @@ class VoiceQueue:
             self._pq.put(self._key(job))
             self.stats["deferred"] += 1
         if self._journal:
-            jobs.record(job.job_id, "deferred", wait_s=wait_s, kind=kind, reason=str(err)[:200])
+            jobs.record(job.job_id, "deferred", wait_s=wait_s, kind=kind, reason=logkit.redact(str(err))[:200])
         self._safe(self._on_deferred, job, wait_s, kind)
         if kind == "quota" and not job.asked_quota:
             job.asked_quota = True

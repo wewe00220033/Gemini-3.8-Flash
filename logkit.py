@@ -20,7 +20,8 @@ from config import Config
 
 _GEMINI_RE = re.compile(r"AIza[0-9A-Za-z_\-]{35}")
 _AQ_RE = re.compile(r"AQ\.[0-9A-Za-z_\-]{20,}")
-_TG_RE = re.compile(r"\b\d{8,10}:[A-Za-z0-9_\-]{35}\b")
+_TG_RE = re.compile(r"(?<!\d)\d{8,10}:[A-Za-z0-9_\-]{30,}(?!\w)")
+_BARE_BEARER_RE = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9_\-\.]{16,}\b")
 _BEARER_RE = re.compile(r"(?i)(x-goog-api-key|authorization|api[_-]?key|token)([\"']?\s*[:=]\s*[\"']?)([A-Za-z0-9_\-\.]{16,})")
 
 
@@ -31,6 +32,7 @@ def redact(text):
     t = _GEMINI_RE.sub("AIza…****", str(text))
     t = _AQ_RE.sub("AQ.****", t)
     t = _TG_RE.sub("****:****", t)
+    t = _BARE_BEARER_RE.sub("Bearer ****", t)
     wt = getattr(Config, "WEB_ACCESS_TOKEN", "") or ""
     if len(wt) >= 8:
         t = t.replace(wt, "****")
@@ -41,7 +43,7 @@ def redact(text):
             if ("/" in part or "\\" in part) and len(part) >= 4:
                 t = t.replace(part, "<LOCAL_PROVIDER_PATH>")
                 p_dir = os.path.dirname(part)
-                if p_dir and len(p_dir) >= 3:
+                if p_dir and len(p_dir.rstrip("/\\")) >= 6:
                     t = t.replace(p_dir, "<LOCAL_PROVIDER_DIR>")
                     t = t.replace(p_dir.replace("\\", "/"), "<LOCAL_PROVIDER_DIR>")
                     t = t.replace(p_dir.replace("/", "\\"), "<LOCAL_PROVIDER_DIR>")

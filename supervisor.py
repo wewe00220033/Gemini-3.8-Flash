@@ -24,6 +24,7 @@ import time
 from collections import deque
 
 EXIT_OK = 0
+EXIT_CONFIG = 2            # خطأ إعداد غير قابل للتعافي ذاتياً (مثل غياب التوكن مع تعطيل الويب)
 EXIT_RESTART = 3           # يطابق Config.EXIT_CODE_RESTART (مكرر عمداً: لا import من المشروع)
 
 
@@ -128,7 +129,12 @@ class Supervisor:
         env["WORKER_STOP_FILE"] = self.stop_file
         env.setdefault("PYTHONUNBUFFERED", "1")
         cmd = [self.python, self.script, "--worker", "--generation", str(self.generation)]
-        self.proc = subprocess.Popen(cmd, env=env, cwd=os.path.dirname(self.script) or None)
+        popen_kwargs = {"env": env, "cwd": os.path.dirname(self.script) or None}
+        if os.name == "nt":
+            popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        else:
+            popen_kwargs["start_new_session"] = True
+        self.proc = subprocess.Popen(cmd, **popen_kwargs)
         self._log(f"👷 supervisor: أطلقت العامل #{self.generation} (pid {self.proc.pid})")
         return self.proc
 
@@ -196,6 +202,9 @@ class Supervisor:
                     return "exit_ok", code
                 if code == EXIT_RESTART:
                     return "restart_requested", code
+                if code == EXIT_CONFIG:
+                    self.write_reason("config_error", code, "خطأ إعداد — راجع TELEGRAM_BOT_TOKEN / WEB_ENABLED")
+                    return "config_error", code
                 return "crash", code
             age = self.beat_age()
             if age is not None and age > self.beat_max:
@@ -216,6 +225,9 @@ class Supervisor:
             if reason == "exit_ok":
                 self._log("👋 supervisor: العامل خرج بكود 0 (إيقاف مقصود) — إيقاف المشرف")
                 return EXIT_OK
+            if reason == "config_error":
+                self._log(f"🛑 supervisor: العامل خرج بكود {code} (خطأ إعداد) — إيقاف المشرف فوراً بدون إعادة تشغيل (كود {EXIT_CONFIG})")
+                return EXIT_CONFIG
             # إعادة إطلاق مطلوبة
             if reason == "restart_requested":
                 self.consecutive_crashes = 0

@@ -16,6 +16,7 @@ import time
 from datetime import datetime
 
 from config import Config
+import logkit
 
 OK, WARN, FAIL = "ok", "warn", "fail"
 _ICON = {OK: "✅", WARN: "⚠️", FAIL: "❌"}
@@ -124,7 +125,7 @@ def _check(fn):
     try:
         return fn()
     except Exception as e:
-        return WARN, f"تعذر الفحص ({type(e).__name__}: {e})"
+        return WARN, logkit.redact(f"تعذر الفحص ({type(e).__name__}: {e})")
 
 
 def _dir_size(path):

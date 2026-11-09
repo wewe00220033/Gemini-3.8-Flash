@@ -393,7 +393,9 @@ class KeyManager:
     def _model_blocked_until(self, key_entry, model):
         """متى يفك الموديل على هذا المفتاح (0 = متاح). يراعي الحقول القديمة أيضاً."""
         until = 0
-        if key_entry.get("status") in ("exhausted", "invalid"):
+        if key_entry.get("status") == "invalid":
+            until = max(until, key_entry.get("exhausted_until", 0) or 0)
+        elif key_entry.get("status") == "exhausted" and (model in Config.MODELS or not key_entry.get("exhausted_models")):
             until = max(until, key_entry.get("exhausted_until", 0) or 0)
         until = max(until, (key_entry.get("exhausted_models") or {}).get(model, 0) or 0)
         return until

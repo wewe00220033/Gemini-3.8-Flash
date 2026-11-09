@@ -72,6 +72,17 @@ def assert_not_transcription_model():
             raise RuntimeError(f"موديل Lite ({m}) داخل سلسلة التفريغ — ممنوع بقرار المالك")
 
 
+def assert_not_forbidden_assist_model(model=None):
+    """حارس برمجي وقت التشغيل: منع موديلات التفريغ الصوتي أو النماذج المحظورة كـ gemini-3.6-flash للمساعد النصي."""
+    m = model or model_name()
+    if m in Config.MODELS:
+        raise RuntimeError(f"الموديل {m} موجود في Config.MODELS — ممنوع للمساعد النصي")
+    if m in ("gemini-3.6-flash", "gemini-3.8-flash"):
+        raise RuntimeError(f"الموديل {m} محظور للمساعد النصي — المسموح flash-lite فقط")
+    if getattr(Config, "_ALL_MODELS", None) and m in Config._ALL_MODELS:
+        raise RuntimeError(f"الموديل {m} من موديلات الصوت — ممنوع للمساعد النصي")
+
+
 def _payload(system_text, user_text, with_thinking=True):
     payload = {
         "system_instruction": {"parts": [{"text": system_text}]},
@@ -88,6 +99,7 @@ def generate(system_text, user_text, timeout=None):
     نداء نصي واحد عبر أفضل مفتاح متاح لموديل المساعد. يرجع (text, None) أو (None, reason).
     لا يلمس قواطع موديلات التفريغ (model_circuit) — موديل مستقل.
     """
+    assert_not_forbidden_assist_model()
     model = model_name()
     timeout = timeout or (Config.GEMINI_CONNECT_TIMEOUT, Config.TEXT_ASSIST_TIMEOUT)
     keys = key_manager.get_active_keys(model=model)
@@ -242,6 +254,7 @@ def note_shelby_noop():
 
 def polish_gemini(raw_text, role_id=None, glossary=None, context_summary=None):
     """تنظيم نصي مباشر عبر Gemini Flash-Lite (السحابي فقط) مع تطبيق القاموس."""
+    assert_not_forbidden_assist_model()
     if is_effective_empty(raw_text):
         return None, "نص فارغ"
     role_id = role_id or Config.DEFAULT_ROLE
@@ -296,6 +309,7 @@ def polish(raw_text, role_id=None, glossary=None, context_summary=None):
     context_summary (10 §2 L2): ملخص الجلسة التراكمي — يُضاف لنص النظام «للفهم فقط»؛ لا يُعاد كتابته ولا يُدمج في الناتج.
     يدعم المزود المحلي المستقل (LOCAL_POLISH_CMD) مع التحويل التلقائي لـ Gemini Flash-Lite.
     """
+    assert_not_forbidden_assist_model()
     if is_effective_empty(raw_text):
         return None, "نص فارغ"
     role_id = role_id or Config.DEFAULT_ROLE
@@ -346,6 +360,7 @@ def synthesize(raw_text, gemini_draft, shelby_draft, role_id=None, glossary=None
     يرجع (golden_text, None) عند النجاح، أو (None, reason) عند الفشل.
     القاموس يُطبَّق على الناتج النهائي.
     """
+    assert_not_forbidden_assist_model()
     if is_effective_empty(raw_text) or (is_effective_empty(gemini_draft) and is_effective_empty(shelby_draft)):
         return None, "نص فارغ"
     if is_effective_empty(gemini_draft):

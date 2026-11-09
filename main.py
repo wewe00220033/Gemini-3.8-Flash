@@ -270,7 +270,9 @@ def _startup_ping(bot_token, chat_id, web_error=None, web_token=None, web_open=F
     """
     try:
         ok, line, _details = preflight.run_preflight(
-            key_manager, model_circuit=model_circuit, web_port=Config.WEB_PORT, web_error=web_error,
+            key_manager, model_circuit=model_circuit,
+            web_port=Config.WEB_PORT if getattr(Config, "WEB_ENABLED", False) else None,
+            web_error=web_error,
         )
         print(f"🚀 preflight: {line}")
         st, txt = observability.persist_probe_check()        # 09 §6
@@ -423,24 +425,31 @@ def main():
     except Exception as e:
         print(f"⚠️ تجاوزات الإعدادات: {e}")
 
+    # التحقق من وجود واجهة فعالة واحدة على الأقل قبل بدء أي خدمة أو نبض
+    if not bot_token and not getattr(Config, "WEB_ENABLED", False):
+        print("❌ خطأ إعداد قاتل: TELEGRAM_BOT_TOKEN مفقود وخادم الويب معطّل (WEB_ENABLED=0) — توقف فوري بكود 2.")
+        sys.exit(2)
+
     # 1. خادم الويب — الربط بالمنفذ يتم هنا (في الخيط الرئيسي) كي يُكتشف فشل المنفذ فوراً لا بصمت (G27)
     web_t = None
     web_error = None
-    web_token_mode, web_token = web_service.ensure_web_token()          # 13 §1.1 S1 — قبل الربط
-    if web_token_mode == "generated":
-        print("=" * 64)
-        print("🔐 WEB_ACCESS_TOKEN غير مضبوط والويب يستمع على عنوان عام — تم توليد توكن تلقائياً:")
-        print(f"   {web_token}")
-        print("   ضعه في المتغير WEB_ACCESS_TOKEN ليثبت بين الإقلاعات (أو WEB_ALLOW_OPEN=1 لفتح الويب للعامة عمداً).")
-        print("=" * 64)
-    elif web_token_mode == "open":
-        print("⚠️ WEB_ALLOW_OPEN=1: واجهة الويب مفتوحة بلا توكن على عنوان عام — قرارك الصريح.")
-    try:
-        web_t = web_service.start_web_server_thread()
-        print(f"🌐 واجهة الويب جاهزة للاستخدام: http://{Config.WEB_HOST}:{Config.WEB_PORT}  (health: /health)")
-    except Exception as e:
-        web_error = f"{type(e).__name__}: {e}"
-        print(f"⚠️ تحذير: تعذر تشغيل خادم الويب على {Config.WEB_HOST}:{Config.WEB_PORT}: {web_error} — البوت يكمل بلا ويب.")
+    web_token_mode, web_token = None, None
+    if getattr(Config, "WEB_ENABLED", False):
+        web_token_mode, web_token = web_service.ensure_web_token()          # 13 §1.1 S1 — قبل الربط
+        if web_token_mode == "generated":
+            print("=" * 64)
+            print("🔐 WEB_ACCESS_TOKEN غير مضبوط والويب يستمع على عنوان عام — تم توليد توكن تلقائياً:")
+            print(f"   {web_token}")
+            print("   ضعه في المتغير WEB_ACCESS_TOKEN ليثبت بين الإقلاعات (أو WEB_ALLOW_OPEN=1 لفتح الويب للعامة عمداً).")
+            print("=" * 64)
+        elif web_token_mode == "open":
+            print("⚠️ WEB_ALLOW_OPEN=1: واجهة الويب مفتوحة بلا توكن على عنوان عام — قرارك الصريح.")
+        try:
+            web_t = web_service.start_web_server_thread()
+            print(f"🌐 واجهة الويب جاهزة للاستخدام: http://{Config.WEB_HOST}:{Config.WEB_PORT}  (health: /health)")
+        except Exception as e:
+            web_error = f"{type(e).__name__}: {e}"
+            print(f"⚠️ تحذير: تعذر تشغيل خادم الويب على {Config.WEB_HOST}:{Config.WEB_PORT}: {web_error} — البوت يكمل بلا ويب.")
 
     # 2. بوت تليجرام + watchdog مستقل (03b الطبقة 3) + معالجات SIGTERM (الطبقة 0.5)
     rt = Runtime(bot_token, chat_id)

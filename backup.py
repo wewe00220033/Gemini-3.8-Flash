@@ -13,6 +13,7 @@ import json
 import os
 import shutil
 import tempfile
+import threading
 import time
 import zipfile
 
@@ -20,11 +21,21 @@ from config import Config
 
 # الملفات التي تُعدّ أسراراً ولا تدخل في /backup مهما كان موقعها
 SECRET_BASENAMES = ("keys.json", "keys.txt", ".env")
+SECRET_PREFIXES = (".keys-", "keys.json.", "keys.txt.", ".env.")
+RESTORE_MAX_BYTES = 512 * 1024 * 1024   # 512MB سقف تراكمي دفاعي ضد هجمات zip-bomb
+
+_backup_lock = threading.Lock()
 
 
 def _is_secret(path):
     base = os.path.basename(path)
-    return base in SECRET_BASENAMES or base.startswith(".keys-")
+    if base == ".env.example":
+        return False
+    if base in SECRET_BASENAMES:
+        return True
+    if any(base.startswith(pfx) for pfx in SECRET_PREFIXES):
+        return True
+    return False
 
 
 def data_roots():
@@ -59,10 +70,14 @@ def build_zip(paths, exclude_secrets=True):
         return rel.replace(os.sep, "/")
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as z:
         for p in paths:
+            if os.path.islink(p):
+                continue
             if os.path.isdir(p):
                 for root, _dirs, files in os.walk(p):
                     for fn in sorted(files):
                         fp = os.path.join(root, fn)
+                        if os.path.islink(fp):
+                            continue
                         if exclude_secrets and _is_secret(fp):
                             continue
                         arc = _arc(fp)
@@ -390,7 +405,10 @@ def run_weekly(send_fn=None, now=None):
     """
     ينفّذ النسخة الأسبوعية: بناء → فحص الأسرار → حفظ محلي (+احتفاظ 4) → إرسال الأجزاء عبر send_fn(name, bytes, caption).
     يرجع dict نتيجة (بلا استثناءات) ويسجّل الحالة حتى لا تتكرر في نفس الأسبوع.
+    محمي بقفل تزامني لمنع تداخل عمليات النسخ المتوازية.
     """
+    if not _backup_lock.acquire(blocking=False):
+        return {"ok": False, "paths": [], "sent": 0, "removed": 0, "files": 0, "error": "عملية نسخ احتياطي أخرى جارية حالياً"}
     now = time.time() if now is None else now
     res = {"ok": False, "paths": [], "sent": 0, "removed": 0, "files": 0, "error": None}
     try:
@@ -424,6 +442,8 @@ def run_weekly(send_fn=None, now=None):
         except Exception:
             pass
         return res
+    finally:
+        _backup_lock.release()
     try:
         import audit
         audit.record("backup.weekly", actor="scheduler", files=res["files"], parts=len(res["paths"]), removed=res["removed"])
@@ -477,6 +497,11 @@ def restore_test(zip_path=None):
                 if _is_secret(n):
                     rep["secrets"].append(n)
                     continue
+                info = z.getinfo(n)
+                if rep["bytes"] + (info.file_size or 0) > RESTORE_MAX_BYTES:
+                    rep["error"] = f"تجاوز سقف الفك الأقصى ({RESTORE_MAX_BYTES // (1024*1024)}MB)"
+                    rep["unsafe"].append(n)
+                    break
                 z.extract(n, tmp)
                 fp = os.path.join(tmp, *norm.split("/"))
                 if os.path.isfile(fp):

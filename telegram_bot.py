@@ -565,12 +565,12 @@ def _download_with_retry(token, file_id, job_id=None):
         except Exception as e:
             last = e
             if job_id:
-                jobs.record(job_id, "download_fail", attempt=i + 1, error=f"{type(e).__name__}: {e}"[:200])
+                jobs.record(job_id, "download_fail", attempt=i + 1, error=logkit.redact(f"{type(e).__name__}: {e}")[:200])
             if i + 1 < Config.DOWNLOAD_RETRIES:
                 delay = Config.DOWNLOAD_BACKOFF[min(i, len(Config.DOWNLOAD_BACKOFF) - 1)]
                 print(f"⚠️ تحميل الفويس فشل ({type(e).__name__}) — محاولة {i + 2}/{Config.DOWNLOAD_RETRIES} بعد {delay}ث")
                 time.sleep(delay)
-    raise RuntimeError(f"📡 تليجرام: تعذر تحميل الفويس بعد {Config.DOWNLOAD_RETRIES} محاولات ({type(last).__name__}: {last})")
+    raise RuntimeError(logkit.redact(f"📡 تليجرام: تعذر تحميل الفويس بعد {Config.DOWNLOAD_RETRIES} محاولات ({type(last).__name__}: {last})"))
 
 
 def _runtime_token():
@@ -755,7 +755,7 @@ def _on_job_done(job, result):
 
 
 def _on_job_failed(job, err):
-    STATE["last_error"] = str(err)
+    STATE["last_error"] = logkit.redact(str(err))
     print(f"❌ خطأ تفريغ [{job.job_id}]: {err}")
     try:
         incidents.on_job_result(False, error=str(err), queue=QUEUE)        # ≥3 متتالية → تقرير حادث
@@ -895,7 +895,7 @@ def handle_callback(token, cq):
         note = _dispatch_callback(token, chat_id, mid, data) or ""
     except Exception as e:
         print(f"⚠️ callback [{data}]: {type(e).__name__}: {e}")
-        STATE["last_error"] = f"callback {data}: {e}"
+        STATE["last_error"] = logkit.redact(f"callback {data}: {e}")
         note = "⚠️ حصل خطأ — جرّب الأمر النصي المكافئ"
     _answer_cb(token, cq_id, note)
     return note
@@ -1156,7 +1156,7 @@ def _answer_question(token, chat_id, msg, question, in_chat=False):
             tail = " · 📝 أُلحق بالجلسة" if res.get("appended") else ""
             _send_answer(token, chat_id, msg["message_id"], f"💡 {src}{tail}", res["answer"], "ask")
         except Exception as e:
-            STATE["last_error"] = f"ask: {e}"
+            STATE["last_error"] = logkit.redact(f"ask: {e}")
             send_telegram_message(token, chat_id, f"⚠️ /ask: خطأ غير متوقع ({type(e).__name__}).", reply_to_id=msg["message_id"])
 
     if Config.PLAN_SYNC_FOR_TESTS:
@@ -1184,7 +1184,7 @@ def _summary_command(token, chat_id, msg, custom_instructions):
             tail = " · 📝 أُلحق بالجلسة" if res.get("appended") else ""
             _send_answer(token, chat_id, msg["message_id"], f"📊 ملخص وخطة {src}{tail}", res["answer"], "summary")
         except Exception as e:
-            STATE["last_error"] = f"summary: {e}"
+            STATE["last_error"] = logkit.redact(f"summary: {e}")
             send_telegram_message(token, chat_id, f"⚠️ /summary: خطأ غير متوقع ({type(e).__name__}).", reply_to_id=msg["message_id"])
 
     if Config.PLAN_SYNC_FOR_TESTS:
@@ -1248,7 +1248,7 @@ def _plan_command(token, chat_id, msg, args_text):
             appended = assistant.append_note(assistant.PLAN_MARK, (f"🎯 {request}\n\n" if request else "") + text)
             _send_answer(token, chat_id, msg["message_id"], "🧭 خطة Antigravity" + (" · 📝 أُلحقت بالجلسة" if appended else ""), text, "plan")
         except Exception as e:     # لا استثناء يهرب من الخيط
-            STATE["last_error"] = f"plan: {e}"
+            STATE["last_error"] = logkit.redact(f"plan: {e}")
             send_telegram_message(token, chat_id, f"⚠️ /plan: خطأ غير متوقع ({type(e).__name__}).", reply_to_id=msg["message_id"])
 
     if Config.PLAN_SYNC_FOR_TESTS:
@@ -2261,7 +2261,7 @@ def main(stop_event=None, pool=None, poll_params=None):
                     # L0: socket ميت/نصف مفتوح — netsession أغلق الـ Session بالفعل؛ نهبط لوضع الحذر بصمت
                     STATE["read_timeouts"] += 1
                     STATE["net_errors"] += 1
-                    STATE["last_error"] = f"ReadTimeout: {e}"
+                    STATE["last_error"] = logkit.redact(f"ReadTimeout: {e}")
                     netsession.cautious.enter()
                     heartbeat.beat("poller", note="L0 read timeout → cautious")
                     print(f"⏱️ getUpdates ReadTimeout — Session جديدة + وضع الحذر (poll {Config.TG_POLL_TIMEOUT_CAUTIOUS}ث لـ {Config.CAUTIOUS_MODE_MINUTES} د)")
@@ -2269,7 +2269,7 @@ def main(stop_event=None, pool=None, poll_params=None):
                     continue
                 except netsession.NETWORK_ERRORS as e:
                     STATE["net_errors"] += 1
-                    STATE["last_error"] = f"{type(e).__name__}: {e}"
+                    STATE["last_error"] = logkit.redact(f"{type(e).__name__}: {e}")
                     delay = backoff.next_delay()
                     heartbeat.beat("poller", note=f"net error → backoff {delay}s")
                     if backoff.degraded and not degraded_reported:
@@ -2336,7 +2336,7 @@ def main(stop_event=None, pool=None, poll_params=None):
                             enqueue_telegram_audio(bot_token, chat_id, msg, file_id, mime_type, label)
                         except Exception as e:
                             print(f"⚠️ فشل إدراج الفويس في الطابور: {e}")
-                            STATE["last_error"] = str(e)
+                            STATE["last_error"] = logkit.redact(str(e))
                         continue
 
                     if msg.get("document"):
@@ -2349,14 +2349,14 @@ def main(stop_event=None, pool=None, poll_params=None):
                             handle_text(bot_token, chat_id, msg, msg_text)
                         except Exception as e:
                             print(f"⚠️ خطأ في معالجة أمر نصي: {e}")
-                            STATE["last_error"] = str(e)
+                            STATE["last_error"] = logkit.redact(str(e))
                 if poll_t == 0:
                     # L3b short-poll: لا نغرق تليجرام — نفس قصير بين الطلبات
                     _wait(stop_event, Config.EMERGENCY_SHORT_POLL_INTERVAL)
 
             except Exception as e:
                 # لا نبتلع الخطأ بصمت — نطبعه حتى يظهر في كونسول الاستضافة (P12)
-                STATE["last_error"] = f"{type(e).__name__}: {e}"
+                STATE["last_error"] = logkit.redact(f"{type(e).__name__}: {e}")
                 print(f"⚠️ خطأ في حلقة البوت: {type(e).__name__}: {e} — إعادة المحاولة بعد 3 ثوانٍ...")
                 _wait(stop_event, 3)
         if STATE["stopped_reason"] is None:

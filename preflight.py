@@ -95,6 +95,8 @@ def run_preflight(key_manager, model_circuit=None, web_port=None, web_error=None
     # 3) الويب
     if web_error:
         details["web"] = {"ok": False, "text": f"web :{web_port} FAIL"}
+    elif web_port is None:
+        details["web"] = {"ok": True, "text": "web off"}
     else:
         details["web"] = {"ok": True, "text": f"web :{web_port}"}
 

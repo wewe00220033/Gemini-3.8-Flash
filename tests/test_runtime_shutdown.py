@@ -166,9 +166,12 @@ def test_idle_loop_restarts_dead_poller_only_on_period(env, monkeypatch):
 
 
 def test_main_applies_persisted_overrides_before_start_queue(env, monkeypatch):
-    """T-09 (B-09): apply_persisted_overrides() تُستدعى قبل start_queue(resume=True) وبدء الويب."""
+    """T-09 (B-09): apply_persisted_overrides() تُستدعى قبل start_queue(resume=True) وبدء الويب (حين تفعيله)."""
     main, tb = env
+
+    # 1) المسار الافتراضي: WEB_ENABLED = False -> الويب معطل
     order = []
+    monkeypatch.setattr(main.Config, "WEB_ENABLED", False)
     monkeypatch.setattr(main.panel, "apply_persisted_overrides", lambda: order.append("overrides") or 0)
     monkeypatch.setattr(main.web_service, "start_web_server_thread", lambda: order.append("web") or None)
     monkeypatch.setattr(tb, "start_queue", lambda resume=False: order.append(("queue", resume)))
@@ -179,6 +182,16 @@ def test_main_applies_persisted_overrides_before_start_queue(env, monkeypatch):
     monkeypatch.setattr(main.time, "sleep", lambda s: None)
     monkeypatch.setattr(main, "_idle_loop", lambda rt, wt, tok: None)
 
+    with pytest.raises(SystemExit) as ei:
+        main.main()
+    assert ei.value.code == 0
+    assert order[0] == "overrides" and ("queue", True) in order
+    assert "web" not in order
+    assert order.index("overrides") < order.index(("queue", True))
+
+    # 2) مسار WEB_ENABLED = True -> الويب يبدأ بعد overrides وقبل start_queue
+    order.clear()
+    monkeypatch.setattr(main.Config, "WEB_ENABLED", True)
     with pytest.raises(SystemExit) as ei:
         main.main()
     assert ei.value.code == 0
