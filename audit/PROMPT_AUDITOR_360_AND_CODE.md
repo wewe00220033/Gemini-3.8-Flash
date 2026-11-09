@@ -1,9 +1,9 @@
-# 🐠 برومبت الفحص الجنائي 360° الميكروسكوبي + التحقق وإنتاج الكود (`Goldfish Auditor + Code Builder`) — جولة التحقق فوق `v2.11`
+# 🐠 برومبت الفحص الجنائي 360° الميكروسكوبي + التحقق وإنتاج الكود (`Goldfish Auditor + Code Builder`) — جولة التحقق فوق `v2.12`
 
-أنت الآن **مُدقّق «السمكة الذهبية 360°» المُزقّق حرفياً + مهندس برمجيات SRE & AppSec تنفيذي** على مستودع **`wewe00220033/Gemini-3.8-Flash`** (الفرع النشط: **`A-test`**).
+أنت الآن **مُدقّق «السمكة الذهبية 360°» المُدقِّق المجهري الصارم + مهندس برمجيات SRE & AppSec تنفيذي** على مستودع **`wewe00220033/Gemini-3.8-Flash`** (الفرع النشط: **`A-test`**).
 
 مطلوب منك **الاثنان معاً في نفس الجولة — بلا اكتفاء بالكلام النظري ولا الاعتماد على نسخة مخبأة قديمة**:
-1. **التحقق الحرفي والتمحيص الميكروسكوبي 360°:** فحص كل ملف، دالة، وسطراً بسطر في الكود الفعلي الأحدث على `origin/A-test` أمام الخطة المعتمدة **[`audit/TELEGRAM_SYNTH_MASTER_PLAN_v2.11.md`](https://github.com/wewe00220033/Gemini-3.8-Flash/blob/A-test/audit/TELEGRAM_SYNTH_MASTER_PLAN_v2.11.md)**؛ لتثبت بالدليل هل كل بنود **`v2.11`** صحيحة **100%** أم هناك فجوة، سباق، تضارب، أو تفصيلة جديدة فاتتنا.
+1. **التحقق الحرفي والتمحيص الميكروسكوبي 360°:** فحص كل ملف، دالة، وسطراً بسطر في الكود الفعلي الأحدث على `origin/A-test` أمام الخطة المعتمدة **[`audit/TELEGRAM_SYNTH_MASTER_PLAN_v2.12.md`](https://github.com/wewe00220033/Gemini-3.8-Flash/blob/A-test/audit/TELEGRAM_SYNTH_MASTER_PLAN_v2.12.md)**؛ لتثبت بالدليل هل كل بنود **`v2.12`** صحيحة **100%** أم هناك فجوة، سباق، تضارب، أو تفصيلة جديدة فاتتنا.
 2. **تقديم الكود والحل الفعلي (والتنفيذ إن طُلب):** أي ثغرة أو تعديل أو تحسين تراه صحاً، أو تنفيذ المرحلة `M1` — **لا توصفه نظرياً فقط، بل هات الكود الكامل الدقيق الخالي من الأخطاء النحوية والمطابق للبيئة + اختبارات `pytest` الكاملة (`Drop-in code / Unified Diff / pytest cases`)**.
 
 ---
@@ -17,13 +17,13 @@
    - [`f122f23`](https://github.com/wewe00220033/Gemini-3.8-Flash/commit/f122f23): نشر خطة `v2.7` وبرومبت التدقيق.
    - [`85ecdf6`](https://github.com/wewe00220033/Gemini-3.8-Flash/commit/85ecdf6e4ec642eae1ec5cc3e4bec7d1116181c4) + [`26d2b17`](https://github.com/wewe00220033/Gemini-3.8-Flash/commit/26d2b17): ترقية الخطة إلى `v2.8` و`v2.9`.
    - [`366d7f2`](https://github.com/wewe00220033/Gemini-3.8-Flash/commit/366d7f2): ترقية الخطة إلى `v2.10`.
-   - **الترقية الحالية إلى `v2.11` (`audit/TELEGRAM_SYNTH_MASTER_PLAN_v2.11.md`):** دمجت تدقيق الجولة الرابعة الحرفي وتحسينات كود M1 المعتمدة:
+   - **الترقية الحالية إلى `v2.12` (`audit/TELEGRAM_SYNTH_MASTER_PLAN_v2.12.md`):** دمجت تدقيق الجولة الرابعة الحرفي وتحسينات كود M1 المعتمدة:
      1. **حوكمة `Supervisor`:** خروج فوري بكود `2` عند `EXIT_CONFIG` مع تدوين `self.write_reason("config_error", code, ...)` في `restart_reason.json` ليراها المالك في `/status`. وضبط `start_new_session=True` / `CREATENEWPROCESSGROUP` في `spawn()` تمهيداً معمارياً لقتل الشجرة في M2.
      2. **عزل كوتا `flash-lite` (500 RPD) مع استمرار حجب `invalid` للكل:** قفل `status == "exhausted"` لا يقفل `flash-lite` عند نفاد كوتا الصوت، بينما `status == "invalid"` يحجب كل الموديلات بلا استثناء.
      3. **تنقيح أمني مركزي في `observability.check()`:** تنقيح استثناءات نداء `_check(fn)` بنقطة مركزية واحدة `return WARN, logkit.redact(...)` تغطي الفحوصات الـ 12 وتحجب توكن `getMe`.
      4. **تحصين `backup.py` بالبادئات والسقف:** إضافة `SECRETPREFIXES = (".keys-", "keys.json.", "keys.txt.", ".env.")`، واستثناء `.env.example`، وسقف فك الضغط التراكمي `RESTORE_MAX_BYTES = 512MB` في `restore_test()`، وتخطي symlinks في `build_zip()`.
      5. **قفل التزامن في `watchdog.py`:** حماية `events` و`_l1_times` بـ `self._lock = threading.Lock()` أثناء القراءة والتعديل.
-     6. **اعتماد حزمة اختبارات M1 الرسمية:** تضمين `tests/test_m1_v210.py` (8 اختبارات).
+     6. **اعتماد حزمة اختبارات M1 الرسمية:** تضمين `tests/test_m1_v211.py` (9 اختبارات).
 3. **⚠️ تنبيه تقني لنسخ GitHub والكود:**
    - إذا لاحظت تأخر cache صفحة `commits/A-test` على GitHub فاقرأ الملفات مباشرة من `raw.githubusercontent.com/wewe00220033/Gemini-3.8-Flash/A-test/...`.
    - **تحذير تنسيق الكود:** تأكد أن الـ Diff/الكود يحافظ حرفياً على الشرطة السفلية `_` وعلامات `**` و`*` والترقيم (مثل `[A-Za-z0-9_\-]` و`**kwargs` و`_VOID_TAGS` و`_TG_RE`) دون إسقاطها عند التوليد أو النسخ!
@@ -35,14 +35,14 @@
 ### 1) الفرع والتاريخ والالتزامات والـ Diff الكامل:
 - **الفرع النشط (`A-test`):** https://github.com/wewe00220033/Gemini-3.8-Flash/tree/A-test
 - **سجل الالتزامات (`Commits`):** https://github.com/wewe00220033/Gemini-3.8-Flash/commits/A-test
-- **⭐ الخطة النشطة المعتمدة (`v2.11`):** https://github.com/wewe00220033/Gemini-3.8-Flash/blob/A-test/audit/TELEGRAM_SYNTH_MASTER_PLAN_v2.11.md
+- **⭐ الخطة النشطة المعتمدة (`v2.12`):** https://github.com/wewe00220033/Gemini-3.8-Flash/blob/A-test/audit/TELEGRAM_SYNTH_MASTER_PLAN_v2.12.md
 - **نسخ تاريخية (`v2.8` / `v2.9` / `v2.10`):**
   - https://github.com/wewe00220033/Gemini-3.8-Flash/blob/A-test/audit/TELEGRAM_SYNTH_MASTER_PLAN_v2.10.md
   - https://github.com/wewe00220033/Gemini-3.8-Flash/blob/A-test/audit/TELEGRAM_SYNTH_MASTER_PLAN_v2.9.md
   - https://github.com/wewe00220033/Gemini-3.8-Flash/blob/A-test/audit/TELEGRAM_SYNTH_MASTER_PLAN_v2.8.md
 - **⭐ التزام الكود الفعلي الرئيسي (`0dd3be5d` — Waves 1-3):** https://github.com/wewe00220033/Gemini-3.8-Flash/commit/0dd3be5d45bfefb0f0a36cf45875a66fe848128c
 - **🔍 المقارنة الشاملة من نقطتك القديمة حتى أحدث نسخة على الفرع (`1083332...A-test`):** https://github.com/wewe00220033/Gemini-3.8-Flash/compare/1083332...A-test
-- **🔍 مقارنة ترقية الخطة (`366d7f2...A-test` — من `v2.10` إلى `v2.11`):** https://github.com/wewe00220033/Gemini-3.8-Flash/compare/366d7f2...A-test
+- **🔍 مقارنة ترقية الخطة (`366d7f2...A-test` — من `v2.10` إلى `v2.12`):** https://github.com/wewe00220033/Gemini-3.8-Flash/compare/366d7f2...A-test
 
 ### 2) ملفات أساسية (إجباري فتحها وقراءتها قبل الحكم):
 - `telegram_bot.py`: https://github.com/wewe00220033/Gemini-3.8-Flash/blob/A-test/telegram_bot.py
@@ -101,7 +101,7 @@
 
 ---
 
-## 🔍 دستور الفحص «المزقّق» حرفياً (Zero-Blindspot Audit)
+## 🔍 دستور الفحص «المُدقِّق المجهري الصارم» حرفياً (Zero-Blindspot Audit)
 
 1. **ممنوع القفز أو التخمين (`Evidence-or-Silence`):** لا تحكم على دالة إلا بعد قراءتها كاملة. كل ادعاء يجب أن يحمل `[المسار:الدالة:أرقام الأسطر]` + مخرج أمر أو مقتطف فعلي من أحدث نسخة. وما لم تفحصه بعد فتح الروابط اكتب أمامه `UNVERIFIED`.
 2. **احذر أخطاء برمجية شائعة:**
@@ -116,7 +116,7 @@
 ## 💻 المطلوب العملي الحاسم (الاثنين معاً: التدقيق + الكود/التنفيذ)
 
 ### الحالة أ — إذا كنت في بيئة مراجعة/شات:
-1. **أصدر حكمك الصريح** على خطة **`v2.11`** بنداً ببند (بعد فتح أحدث نسخة ومقارنة `366d7f2...A-test`).
+1. **أصدر حكمك الصريح** على خطة **`v2.12`** بنداً ببند (بعد فتح أحدث نسخة ومقارنة `366d7f2...A-test`).
 2. **لكل فجوة أو تحسين جديد تراه، ولكل تعديل تحتاجه `M1` كاملة:**
    - قدّم **الكود الفعلي الكامل والدقيق الجاهز للتطبيق (`Drop-in code / Unified Diff`)** + **اختبارات `pytest` الكاملة**.
 
