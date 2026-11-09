@@ -180,3 +180,4 @@ flowchart TD
 4. [`python test_360_exhaustive.py`](../test_360_exhaustive.py) = نجاح زوايا الانحدار **`8/8`**، مع الفصل الصريح في التقرير بين نجاح الانحدار وبين فحص الطبيب المتوقع غياب مفاتيحه في بيئة الاختبار.
 5. [`python tools/pack_deploy.py --list`](../tools/pack_deploy.py) = خلو تام من الأسرار و`.local/`.
 6. **دليل عدم مس بيانات الإنتاج:** فحص أن ملفات `keys.json`, `settings.json`, `glossary.json`, و`state/` الحية لم تُمس، وتقديم خطة تراجع واضحة.
+
