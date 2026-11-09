@@ -42,6 +42,7 @@ _state = {
     "local_ok": 0,
     "local_fail": 0,
     "local_last_error": None,
+    "local_noop": 0,
     "synth_calls": 0,
     "synth_ok": 0,
     "synth_fail": 0,
@@ -194,6 +195,20 @@ def _call_local_provider(system_text, raw_text):
         return None, logkit.redact(f"أمر المزود المحلي غير موجود (FileNotFoundError: {exec_name})")
     except Exception as e:
         return None, f"خطأ استدعاء المزود المحلي ({type(e).__name__})"
+
+
+def is_shelby_noop(raw_text, local_text):
+    """هل أعاد المزود المحلي النص كما هو دون تنظيم فعلي؟ (BUG-05)
+    مقارنة توكينية حتمية O(N) — خالية من الإنذارات الكاذبة على تعديلات الترقيم أو صياغة طويلة."""
+    if not raw_text or not local_text:
+        return False
+    return str(raw_text).strip().split() == str(local_text).strip().split()
+
+
+def note_shelby_noop():
+    """يسجّل حدوث استجابة No-Op من المزود المحلي (thread-safe)."""
+    with _lock:
+        _state["local_noop"] = _state.get("local_noop", 0) + 1
 
 
 def polish_gemini(raw_text, role_id=None, glossary=None, context_summary=None):

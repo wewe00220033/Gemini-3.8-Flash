@@ -71,7 +71,10 @@ def trace_text(job_id):
         elif ev == "transcribed":
             det = f"{_short(r.get('model'))} [{r.get('key')}] {r.get('elapsed')}ث"
         elif ev == "sent":
-            det = f"{'مكرر من ' + str(r.get('dedup_of')) if r.get('dedup_of') else ''} {r.get('mode') or ''} {'+منظم' if r.get('polished') else ''}".strip()
+            if r.get("synth_golden"):
+                det = f"🏆 سبك ذهبي ({r.get('synth_elapsed', '?')}ث)".strip()
+            else:
+                det = f"{'مكرر من ' + str(r.get('dedup_of')) if r.get('dedup_of') else ''} {r.get('mode') or ''} {'+منظم' if r.get('polished') else ''}".strip()
         elif ev == "failed":
             det = str(r.get("error", ""))[:160]
         elif ev == "deferred":

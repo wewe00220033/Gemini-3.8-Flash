@@ -142,6 +142,8 @@ def synthesizer_interim_message_html(gemini_text, role_id=None, session_name=Non
     elif shelby_status == "error":
         err_msg = html.escape(str(error_detail or "خطأ غير معروف"))
         blocks.append(f"⚠️ <i>تم اعتماد مسودة جيميني (تعذر شلبي: {err_msg})</i>")
+    elif shelby_status == "noop":
+        blocks.append("ℹ️ <i>تم اعتماد مسودة جيميني (أعاد شلبي النص دون تنظيم فعلي)</i>")
 
     return "\n".join(blocks)
 
@@ -239,7 +241,8 @@ def _voice_title(raw, title_fn):
 
 
 def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn=None, glossary=None,
-            session_name=None, footer_html="", archive_entry=True, title_fn=None, local_polish_fn=None):
+            session_name=None, footer_html="", archive_entry=True, title_fn=None, local_polish_fn=None,
+            job_id=None):
     """
     ينفّذ خط الإنتاج كاملاً. يرجع قاموساً: {raw, polished, raw_msg_id, polished_msg_id, mode, archived, polish_error,
     role, session, title, session_written, title_suggestion}.
@@ -252,9 +255,11 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
     raw, gl = prepare_texts(raw_text, glossary)
     if session_name is None:
         session_name = _safe_session_name()
+    res_lock = threading.Lock()
     result = {"raw": raw, "polished": None, "raw_msg_id": None, "polished_msg_id": None, "mode": mode,
               "archived": False, "polish_error": None, "role": role_id, "session": session_name, "title": None,
-              "session_written": False, "title_suggestion": None, "summary_updated": False}
+              "session_written": False, "title_suggestion": None, "summary_updated": False,
+              "_lock": res_lock, "_synth_recorded": False}
 
     # 2) أرشفة قبل أي إرسال (outbox) — archive_entry=False للمكرر (dedup): سبق أرشفته
     if archive_entry:
@@ -356,6 +361,40 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
             polished, reason = None, f"{type(e).__name__}: {e}"
         gemini_elapsed = time.time() - t0_gemini
         anchor = result["raw_msg_id"] or reply_to_id
+        _dwrite_lock = threading.Lock()
+        _dwrite_done = {"v": False}
+
+        def _bg_finalize(approved_text, archive_text, session_text=None, is_golden=False, synth_elapsed=None, record_job=False):
+            if approved_text is not None:
+                with res_lock:
+                    result["polished"] = approved_text
+                    if job_id and (is_golden or record_job):
+                        import jobs
+                        extra_fields = {}
+                        if is_golden:
+                            extra_fields["synth_golden"] = True
+                            if synth_elapsed is not None:
+                                extra_fields["synth_elapsed"] = round(float(synth_elapsed), 2)
+                        jobs.record(
+                            job_id,
+                            "sent",
+                            polished=True,
+                            polished_text=str(approved_text)[:2000],
+                            **extra_fields,
+                        )
+                        if is_golden:
+                            result["_synth_recorded"] = True
+            if archive_entry and archive_text:
+                with _dwrite_lock:
+                    if not _dwrite_done["v"]:
+                        _dwrite_done["v"] = True
+                        try:
+                            archive.append_polished(archive_text)
+                            if session_name:
+                                sessions.append_polished(session_text if session_text is not None else archive_text)
+                        except Exception as e:
+                            print(f"⚠️ Archive/session polished update: {e}")
+
         if not polished and is_compare:
             # 🛡️ صمام الأمان الفولاذي: إذا تعذر جيميني السحابي (503 / 429 / مهلة)،
             # لا نستسلم ولا نوقف شلبي أبداً! نستدعي شلبي المحلي فوراً كمنقذ وبديل في نفس الرسالة.
@@ -372,44 +411,41 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
                     s_kwargs = {"context_summary": l2} if _accepts_context_summary(s_fn) else {}
                     s_text, s_err = s_fn(raw, role_id, gl, **s_kwargs)
                     if s_text:
-                        result["polished"] = s_text
                         if getattr(sender, "set_reaction", None):
                             try:
                                 sender.set_reaction(Config.REACTION_DONE)
                             except Exception:
                                 pass
-                        if archive_entry:
-                            archive.append_polished(s_text)
-                            if session_name:
-                                sessions.append_polished(s_text)
+                        _bg_finalize(s_text, s_text, session_text=s_text, is_golden=False, record_job=True)
                         s_html = polished_message_html(
                             s_text, role_id, session_name,
                             provider_tag="🦙 <b>[شلبي]</b>", title=result["title"]
                         )
-                        edited = False
-                        if mid is not None and len(s_html) <= Config.TELEGRAM_MAX_MSG - 50 and getattr(sender, "edit_text", None):
-                            try:
-                                res = sender.edit_text(mid, s_html, "HTML")
-                                edited = (res is not False)
-                            except Exception:
-                                edited = False
-                        if not edited:
-                            _send_long(sender, s_html, s_text, mid or anchor, filename_prefix="shelby_polished",
-                                       caption="🦙 نسخة شلبي المنظمة (بديل لتعذر جيميني السحابي)",
-                                       head_html=_entry_head_html(result["title"], session_name))
+                        _replace_or_send(
+                            sender, mid, anchor, s_html, s_text,
+                            filename_prefix="shelby_polished",
+                            caption="🦙 نسخة شلبي المنظمة (بديل لتعذر جيميني السحابي)",
+                            head_html=_entry_head_html(result["title"], session_name),
+                        )
                     else:
-                        err_html = f"⚠️ تعذر التنظيم عبر جيميني وشلبي ({html.escape(str(s_err or reason or ''))}) — الخام فوق."
-                        if mid is not None and getattr(sender, "edit_text", None):
-                            try:
-                                res = sender.edit_text(mid, err_html, "HTML")
-                                if res is False:
-                                    sender.send_text(err_html, anchor, "HTML")
-                            except Exception:
-                                sender.send_text(err_html, anchor, "HTML")
-                        else:
-                            sender.send_text(err_html, anchor, "HTML")
+                        err_txt = logkit.redact(str(s_err or reason or ""))
+                        err_html = f"⚠️ <i>تعذر التنظيم عبر جيميني وشلبي ({html.escape(err_txt)}) — الخام فوق.</i>"
+                        _replace_or_send(
+                            sender, mid, anchor, err_html, err_html,
+                            filename_prefix="polish_error",
+                            caption="⚠️ تعذر التنظيم",
+                            head_html=_entry_head_html(result["title"], session_name),
+                        )
                 except Exception as e:
-                    print(f"⚠️ Shelby rescue error: {e}")
+                    err_txt = logkit.redact(f"{type(e).__name__}: {e}")
+                    print(f"⚠️ Shelby rescue error: {err_txt}")
+                    err_html = f"⚠️ <i>تعذر التنظيم عبر جيميني وشلبي ({html.escape(err_txt)}) — الخام فوق.</i>"
+                    _replace_or_send(
+                        sender, mid, anchor, err_html, err_html,
+                        filename_prefix="polish_error",
+                        caption="⚠️ تعذر التنظيم",
+                        head_html=_entry_head_html(result["title"], session_name),
+                    )
 
             t = threading.Thread(target=_bg_shelby_rescue, daemon=True)
             t.start()
@@ -422,21 +458,46 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
                     sender.set_reaction(Config.REACTION_DONE)
                 except Exception:
                     pass
-            if archive_entry:
+            defer_archive = bool(is_compare and cmp_mode == "synthesizer")
+            if archive_entry and not defer_archive:
                 archive.append_polished(polished)
                 if session_name:
                     sessions.append_polished(polished)
 
             if is_compare:
                 if cmp_mode == "synthesizer":
+                    max_edit = Config.TELEGRAM_MAX_MSG - 50
                     init_html = synthesizer_interim_message_html(
                         polished, role_id=role_id, session_name=session_name,
                         title=result["title"], shelby_status="waiting"
                     )
-                    mid = _send_long(sender, init_html, polished, anchor, filename_prefix="polished",
-                                     caption="📝 النسخة المنظمة (طويلة → ملف)",
-                                     head_html=_entry_head_html(result["title"], session_name))
-                    result["polished_msg_id"] = mid
+                    draft_separated = len(init_html) > max_edit
+                    if draft_separated:
+                        clean_draft_html = polished_message_html(
+                            polished, role_id, session_name, title=result["title"]
+                        )
+                        has_doc = getattr(sender, "send_document", None) is not None
+                        draft_mid = _send_long(
+                            sender, clean_draft_html, polished, anchor,
+                            filename_prefix="gemini_draft",
+                            caption="📝 مسودة جيميني المنظمة (طويلة → ملف)",
+                            head_html=_entry_head_html(result["title"], session_name),
+                            force_document=(len(clean_draft_html) > max_edit and has_doc),
+                        )
+                        mid = sender.send_text(
+                            "⏳ <i>جاري توليد النسخة الذهبية المسبوكة مع شلبي (مهلة 180ث)...</i>",
+                            draft_mid or anchor,
+                            "HTML",
+                        )
+                        result["polished_msg_id"] = draft_mid or mid
+                    else:
+                        mid = _send_long(
+                            sender, init_html, polished, anchor,
+                            filename_prefix="polished",
+                            caption="📝 النسخة المنظمة (طويلة → ملف)",
+                            head_html=_entry_head_html(result["title"], session_name),
+                        )
+                        result["polished_msg_id"] = mid
 
                     def _bg_synthesizer():
                         try:
@@ -450,8 +511,27 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
                             shelby_elapsed = time.time() - t0_shelby
 
                             if s_text:
-                                t0_synth = time.time()
                                 import text_assist
+                                if text_assist.is_shelby_noop(raw, s_text):
+                                    text_assist.note_shelby_noop()
+                                    print("⚠️ Shelby returned raw text unchanged (No-Op) — تخطي نداء السبك الثالث لتوفير الكوتة.")
+                                    _bg_finalize(polished, polished, session_text=polished, is_golden=False)
+                                    if draft_separated:
+                                        noop_html = "ℹ️ <i>تم اعتماد مسودة جيميني أعلاه (أعاد المزود المحلي النص دون تنظيم فعلي)</i>"
+                                    else:
+                                        noop_html = synthesizer_interim_message_html(
+                                            polished, role_id=role_id, session_name=session_name,
+                                            title=result["title"], shelby_status="noop"
+                                        )
+                                    _replace_or_send(
+                                        sender, mid, anchor, noop_html, polished,
+                                        filename_prefix="polished",
+                                        caption="📝 النسخة المنظمة (اعتماد جيميني)",
+                                        head_html=_entry_head_html(result["title"], session_name),
+                                    )
+                                    return
+
+                                t0_synth = time.time()
                                 synth_kwargs = {"context_summary": l2} if _accepts_context_summary(text_assist.synthesize) else {}
                                 golden_text, synth_err = text_assist.synthesize(
                                     raw, polished, s_text, role_id=role_id, glossary=gl, **synth_kwargs
@@ -459,15 +539,13 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
                                 synth_elapsed = time.time() - t0_synth
 
                                 if golden_text:
-                                    result["polished"] = golden_text
-                                    if archive_entry:
-                                        try:
-                                            archive.append_polished(f"[نسخة ذهبية مسبوكة]\n{golden_text}")
-                                            if session_name:
-                                                sessions.append_polished(golden_text)
-                                        except Exception as e:
-                                            print(f"⚠️ Synth archive update: {e}")
-
+                                    _bg_finalize(
+                                        golden_text,
+                                        f"[نسخة ذهبية مسبوكة]\n{golden_text}",
+                                        session_text=golden_text,
+                                        is_golden=True,
+                                        synth_elapsed=synth_elapsed,
+                                    )
                                     wall_total = time.time() - t0_flow
                                     telemetry = {
                                         "gemini": gemini_elapsed,
@@ -479,58 +557,61 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
                                         golden_text, role_id=role_id, session_name=session_name,
                                         title=result["title"], telemetry=telemetry
                                     )
-                                    edited = False
-                                    if mid is not None and len(full_html) <= Config.TELEGRAM_MAX_MSG - 50 and getattr(sender, "edit_text", None):
-                                        try:
-                                            res = sender.edit_text(mid, full_html, "HTML")
-                                            edited = (res is not False)
-                                        except Exception as e:
-                                            print(f"⚠️ Edit text exception: {e}")
-                                            edited = False
-                                    if not edited:
-                                        _send_long(
-                                            sender, full_html, golden_text, mid or anchor,
-                                            filename_prefix="golden_synthesized",
-                                            caption="🏆 النسخة الذهبية المسبوكة",
-                                            head_html=_entry_head_html(result["title"], session_name)
-                                        )
+                                    _replace_or_send(
+                                        sender, mid, anchor, full_html, golden_text,
+                                        filename_prefix="golden_synthesized",
+                                        caption="🏆 النسخة الذهبية المسبوكة",
+                                        head_html=_entry_head_html(result["title"], session_name),
+                                    )
                                 else:
+                                    _bg_finalize(polished, polished, session_text=polished, is_golden=False)
                                     fallback_html = merged_compare_message_html(
                                         polished, shelby_text=s_text, role_id=role_id, session_name=session_name
                                     )
-                                    edited = False
-                                    if mid is not None and len(fallback_html) <= Config.TELEGRAM_MAX_MSG - 50 and getattr(sender, "edit_text", None):
-                                        try:
-                                            res = sender.edit_text(mid, fallback_html, "HTML")
-                                            edited = (res is not False)
-                                        except Exception as e:
-                                            print(f"⚠️ Fallback edit exception: {e}")
-                                            edited = False
-                                    if not edited:
-                                        _send_long(
-                                            sender, fallback_html, f"{polished}\n\n{s_text}", mid or anchor,
-                                            filename_prefix="fallback_compare",
-                                            caption="📝 المقارنة المدمجة (بديل لفشل السبك)",
-                                            head_html=_entry_head_html(result["title"], session_name)
-                                        )
+                                    _replace_or_send(
+                                        sender, mid, anchor, fallback_html, f"{polished}\n\n{s_text}",
+                                        filename_prefix="fallback_compare",
+                                        caption="📝 المقارنة المدمجة (بديل لفشل السبك)",
+                                        head_html=_entry_head_html(result["title"], session_name),
+                                    )
                             else:
+                                _bg_finalize(polished, polished, session_text=polished, is_golden=False)
                                 is_to = "مهلة" in str(s_err or "") or "timeout" in str(s_err or "").lower()
                                 status = "timeout" if is_to else "error"
-                                to_html = synthesizer_interim_message_html(
-                                    polished, role_id=role_id, session_name=session_name,
-                                    title=result["title"], shelby_status=status, error_detail=s_err
+                                if draft_separated:
+                                    if status == "timeout":
+                                        to_html = "⚠️ <i>تم اعتماد مسودة جيميني أعلاه (تجاوز شلبي المهلة المحددة 180ث)</i>"
+                                    else:
+                                        err_msg = html.escape(logkit.redact(str(s_err or "خطأ غير معروف")))
+                                        to_html = f"⚠️ <i>تم اعتماد مسودة جيميني أعلاه (تعذر شلبي: {err_msg})</i>"
+                                else:
+                                    to_html = synthesizer_interim_message_html(
+                                        polished, role_id=role_id, session_name=session_name,
+                                        title=result["title"], shelby_status=status, error_detail=s_err
+                                    )
+                                _replace_or_send(
+                                    sender, mid, anchor, to_html, polished,
+                                    filename_prefix="polished",
+                                    caption="📝 النسخة المنظمة (اعتماد جيميني بعد تعذر شلبي)",
+                                    head_html=_entry_head_html(result["title"], session_name),
                                 )
-                                edited = False
-                                if mid is not None and len(to_html) <= Config.TELEGRAM_MAX_MSG - 50 and getattr(sender, "edit_text", None):
-                                    try:
-                                        res = sender.edit_text(mid, to_html, "HTML")
-                                        edited = (res is not False)
-                                    except Exception:
-                                        edited = False
-                                if not edited and mid is None:
-                                    sender.send_text(to_html, anchor, "HTML")
                         except Exception as e:
-                            print(f"⚠️ Synthesizer bg error: {e}")
+                            err_txt = logkit.redact(f"{type(e).__name__}: {e}")
+                            print(f"⚠️ Synthesizer bg error: {err_txt}")
+                            _bg_finalize(polished, polished, session_text=polished, is_golden=False)
+                            if draft_separated:
+                                err_html = f"⚠️ <i>تم اعتماد مسودة جيميني أعلاه (خطأ أثناء السبك: {html.escape(err_txt)})</i>"
+                            else:
+                                err_html = synthesizer_interim_message_html(
+                                    polished, role_id=role_id, session_name=session_name,
+                                    title=result["title"], shelby_status="error", error_detail=err_txt
+                                )
+                            _replace_or_send(
+                                sender, mid, anchor, err_html, polished,
+                                filename_prefix="polished",
+                                caption="📝 النسخة المنظمة (اعتماد جيميني بعد خطأ السبك)",
+                                head_html=_entry_head_html(result["title"], session_name),
+                            )
 
                     t = threading.Thread(target=_bg_synthesizer, daemon=True)
                     t.start()
@@ -553,16 +634,37 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
                             s_text, s_err = s_fn(raw, role_id, gl, **s_kwargs)
                             if s_text:
                                 full_html = merged_compare_message_html(polished, shelby_text=s_text, role_id=role_id, session_name=session_name)
-                                if len(full_html) <= Config.TELEGRAM_MAX_MSG - 50 and getattr(sender, "edit_text", None):
-                                    sender.edit_text(mid, full_html, "HTML")
-                                else:
+                                edited = False
+                                if mid is not None and len(full_html) <= Config.TELEGRAM_MAX_MSG - 50 and getattr(sender, "edit_text", None):
+                                    try:
+                                        res = sender.edit_text(mid, full_html, "HTML")
+                                        edited = (res is not False)
+                                    except Exception as e:
+                                        print(f"⚠️ Dual polish edit exception: {e}")
+                                        edited = False
+                                if not edited:
                                     s_single = polished_message_html(s_text, role_id, session_name, provider_tag="🦙 <b>[شلبي]</b>", title=result["title"])
-                                    _send_long(sender, s_single, s_text, mid or anchor, filename_prefix="shelby_polished", caption="🦙 نسخة شلبي المنظمة")
-                            elif s_err and getattr(sender, "edit_text", None):
+                                    has_doc = getattr(sender, "send_document", None) is not None
+                                    _send_long(
+                                        sender, s_single, s_text, mid or anchor,
+                                        filename_prefix="shelby_polished",
+                                        caption="🦙 نسخة شلبي المنظمة",
+                                        head_html=_entry_head_html(result["title"], session_name),
+                                        force_document=(len(s_single) > Config.TELEGRAM_MAX_MSG - 50 and has_doc),
+                                    )
+                            elif s_err:
                                 err_html = merged_compare_message_html(polished, shelby_text=None, role_id=role_id, session_name=session_name, shelby_error=s_err)
-                                sender.edit_text(mid, err_html, "HTML")
+                                edited = False
+                                if mid is not None and len(err_html) <= Config.TELEGRAM_MAX_MSG - 50 and getattr(sender, "edit_text", None):
+                                    try:
+                                        res = sender.edit_text(mid, err_html, "HTML")
+                                        edited = (res is not False)
+                                    except Exception:
+                                        edited = False
+                                if not edited:
+                                    sender.send_text(f"⚠️ <i>تعذر تشغيل شلبي محلياً ({html.escape(logkit.redact(str(s_err)))})</i>", mid or anchor, "HTML")
                         except Exception as e:
-                            print(f"⚠️ Dual polish bg error: {e}")
+                            print(f"⚠️ Dual polish bg error: {logkit.redact(f'{type(e).__name__}: {e}')}")
 
                     t = threading.Thread(target=_bg_shelby, daemon=True)
                     t.start()
@@ -585,11 +687,18 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
                             s_text, s_err = s_fn(raw, role_id, gl, **s_kwargs)
                             if s_text:
                                 s_html = polished_message_html(s_text, role_id, session_name, provider_tag="🦙 <b>[شلبي]</b>", title=result["title"])
-                                _send_long(sender, s_html, s_text, mid or anchor, filename_prefix="shelby_polished", caption="🦙 نسخة شلبي المنظمة")
+                                has_doc = getattr(sender, "send_document", None) is not None
+                                _send_long(
+                                    sender, s_html, s_text, mid or anchor,
+                                    filename_prefix="shelby_polished",
+                                    caption="🦙 نسخة شلبي المنظمة",
+                                    head_html=_entry_head_html(result["title"], session_name),
+                                    force_document=(len(s_html) > Config.TELEGRAM_MAX_MSG - 50 and has_doc),
+                                )
                             elif s_err:
-                                sender.send_text(f"⚠️ تعذر تشغيل شلبي محلياً ({html.escape(str(s_err))})", mid or anchor, "HTML")
+                                sender.send_text(f"⚠️ تعذر تشغيل شلبي محلياً ({html.escape(logkit.redact(str(s_err)))})", mid or anchor, "HTML")
                         except Exception as e:
-                            print(f"⚠️ Dual polish split bg error: {e}")
+                            print(f"⚠️ Dual polish split bg error: {logkit.redact(f'{type(e).__name__}: {e}')}")
 
                     t = threading.Thread(target=_bg_shelby_split, daemon=True)
                     t.start()
@@ -635,10 +744,52 @@ def _accepts_context_summary(fn):
         return False
 
 
-def _send_long(sender, html_text, plain_text, reply_to_id, filename_prefix, caption, head_html=""):
-    """نص > POLISH_FILE_THRESHOLD → ملف .md + معاينة (تحمل الترويسة 🏷️/📂 إن وُجدت — 08 §3)؛ وإلا رسالة HTML عادية.
+def _replace_or_send(sender, mid, anchor, full_html, plain_text, filename_prefix, caption,
+                     head_html="", close_notice="✅ <i>اكتملت المعالجة — تم إرسال النتيجة في ملف أدناه.</i>",
+                     max_edit_len=None):
+    """
+    محرك التسليم الموحد (P0-01):
+    - ضمن حد التعديل (3950): يعدّل الرسالة في مكانها؛ وإن فشل التعديل أو غاب mid يُرسل مباشرة عبر _send_long.
+    - فوق حد التعديل: يغلق رسالة الانتظار بإشعار قصير ومتوازن HTML (<i>...</i>) ثم يرسل النتيجة كملف .md (أو نص).
+    """
+    if max_edit_len is None:
+        max_edit_len = Config.TELEGRAM_MAX_MSG - 50
+    can_edit = mid is not None and getattr(sender, "edit_text", None) is not None
+    has_doc = getattr(sender, "send_document", None) is not None
+    oversized = len(full_html) > max_edit_len
+
+    if can_edit and not oversized:
+        try:
+            res = sender.edit_text(mid, full_html, "HTML")
+            if res is not False:
+                return mid
+        except Exception as e:
+            print(f"⚠️ Edit text exception ({filename_prefix}): {e}")
+
+    if can_edit and oversized:
+        notice = close_notice if has_doc else "✅ <i>اكتملت المعالجة — تم إرسال النتيجة أدناه.</i>"
+        try:
+            sender.edit_text(mid, notice, "HTML")
+        except Exception as e:
+            print(f"⚠️ Close notice edit exception ({filename_prefix}): {e}")
+
+    return _send_long(
+        sender,
+        full_html,
+        plain_text,
+        mid or anchor,
+        filename_prefix=filename_prefix,
+        caption=caption,
+        head_html=head_html,
+        force_document=(oversized and has_doc),
+    )
+
+
+def _send_long(sender, html_text, plain_text, reply_to_id, filename_prefix, caption, head_html="", force_document=False):
+    """نص > POLISH_FILE_THRESHOLD (أو force_document=True) → ملف .md + معاينة (تحمل الترويسة 🏷️/📂 إن وُجدت — 08 §3)؛ وإلا رسالة HTML عادية.
     يرجع message_id (أو None)."""
-    if len(plain_text) > Config.POLISH_FILE_THRESHOLD and sender.send_document is not None:
+    has_doc = getattr(sender, "send_document", None) is not None
+    if (force_document or len(plain_text) > Config.POLISH_FILE_THRESHOLD) and has_doc:
         preview = plain_text[:500] + ("…" if len(plain_text) > 500 else "")
         head = (head_html + "\n") if head_html else ""
         mid = sender.send_text(f"{head}<pre>{html.escape(preview)}</pre>\n{caption}", reply_to_id, "HTML")

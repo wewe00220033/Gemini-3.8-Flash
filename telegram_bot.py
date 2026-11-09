@@ -557,7 +557,8 @@ def process_job(job):
         print(f"📛 اعتُمد اسم الجلسة صامتاً: «{accepted}»")
     # المرحلة 3: قاموس → أرشفة (قبل الإرسال) → الخام → المنظم (07)
     res = delivery.deliver(text, model, key_name, info, make_sender(token, chat_id, reaction_msg_id=reply_to), reply_to_id=reply_to,
-                           footer_html=_footer(model, key_name, info) + _context_footer(info))
+                           footer_html=_footer(model, key_name, info) + _context_footer(info),
+                           job_id=job.job_id)
     text = res["raw"]
     if res.get("title_suggestion"):
         send_telegram_message(token, chat_id,
@@ -566,10 +567,20 @@ def process_job(job):
                               reply_to_id=res.get("raw_msg_id") or reply_to)
     ok = bool(res["raw_msg_id"] or res["polished_msg_id"])
     if ok:
-        jobs.record(job.job_id, "sent", model=model, key=str(key_name), elapsed=info.get("elapsed"), text=text[:2000],
-                    polished=bool(res["polished"]), mode=res["mode"],
-                    polished_text=(res["polished"] or "")[:2000] or None,   # للمكرر: لا نداء flash-lite ثانٍ
-                    **_session_fields())
+        _rlock = res.get("_lock")
+        if _rlock:
+            with _rlock:
+                _pol = res["polished"]
+                jobs.record(job.job_id, "sent", model=model, key=str(key_name), elapsed=info.get("elapsed"), text=text[:2000],
+                            polished=bool(_pol), mode=res["mode"],
+                            polished_text=(_pol or "")[:2000] or None,   # للمكرر: لا نداء flash-lite ثانٍ
+                            **_session_fields())
+        else:
+            _pol = res["polished"]
+            jobs.record(job.job_id, "sent", model=model, key=str(key_name), elapsed=info.get("elapsed"), text=text[:2000],
+                        polished=bool(_pol), mode=res["mode"],
+                        polished_text=(_pol or "")[:2000] or None,
+                        **_session_fields())
     else:
         jobs.record(job.job_id, "failed", error="send failed (archived — /last)", model=model)
     if res["polish_error"]:
@@ -1361,7 +1372,8 @@ def _pipeline_text():
     st = text_assist.stats()
     local_info = ""
     if getattr(Config, "LOCAL_POLISH_CMD", ""):
-        local_info = f" | مزود محلي نشط (نجح {st.get('local_ok', 0)}/{st.get('local_calls', 0)})"
+        noop_s = f" · تخطي No-Op {st['local_noop']}" if st.get("local_noop") else ""
+        local_info = f" | مزود محلي نشط (نجح {st.get('local_ok', 0)}/{st.get('local_calls', 0)}{noop_s})"
     return (f"🏭 خط الإنتاج: دور {settings.role()} ({r.get('name', '?')}) | إرسال {settings.delivery_mode()} | بانر {settings.header_target()} | "
             f"أرشيف {archive.count_entries()} تفريغ | قاموس {len(gl.entries(False))} مدخل" + (f" ({pend} معلَّق — /glossary)" if pend else "") + local_info)
 

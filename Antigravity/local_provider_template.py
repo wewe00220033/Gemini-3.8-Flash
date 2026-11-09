@@ -7,9 +7,9 @@ local_provider_template.py — قالب استرشادي لمزود التنظي
 1. انسخ هذا الملف وضعه في أي مسار خارجي على جهازك بعيداً عن مستودع المشروع تماماً (مثلاً: D:/private/my_polish.py).
 2. ضع بداخله كعكات التصفح (Cookies)، الجلسات (Sessions)، أو بيانات الاعتماد الخاصة بمزودك الخارجي.
 3. عدّل ملف .env داخل المشروع ليشير لأمر تشغيل هذا الملف:
-   POLISH_PROVIDER=auto
-   LOCAL_PROVIDER_CMD=python D:/private/my_polish.py
-   LOCAL_PROVIDER_TIMEOUT=15
+   LOCAL_POLISH_CMD=python D:/private/my_polish.py
+   LOCAL_POLISH_TIMEOUT=180.0
+   COMPARE_MODE=synthesizer
 4. البوت سيرسل النص الخام ونصوص التوجيه عبر stdin، والسكربت يعيد النص المنظم فقط عبر stdout بترميز UTF-8.
 """
 

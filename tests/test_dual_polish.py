@@ -13,12 +13,17 @@
 5. دالة edit_telegram_message وصمودها أمام أخطاء التنسيق.
 """
 
-from config import Config
+import os
+import pytest
+
+import config
 import settings
 import panel
 import text_assist
 import delivery
 import telegram_bot
+
+pytestmark = pytest.mark.usefixtures("fresh_env")
 
 
 class FakeSender:
@@ -79,7 +84,7 @@ def test_panel_compare_mode():
         assert not ok and "القيمة غير صالحة" in err
 
         old_val, new_val = panel.apply_setting("compare_mode", "split")
-        assert new_val == "split" and Config.COMPARE_MODE == "split"
+        assert new_val == "split" and config.Config.COMPARE_MODE == "split"
         panel.apply_setting("compare_mode", "synthesizer")
         assert panel.current_setting("compare_mode") == "synthesizer"
 
@@ -110,7 +115,7 @@ def test_text_assist_helpers(monkeypatch):
 def test_deliver_merged_mode(monkeypatch):
     old = settings.compare_mode()
     settings.set_compare_mode("merged")
-    monkeypatch.setattr(Config, "LOCAL_POLISH_CMD", "dummy_local")
+    monkeypatch.setattr(config.Config, "LOCAL_POLISH_CMD", "dummy_local")
     try:
         fs = FakeSender()
         res = delivery.deliver(
@@ -155,7 +160,7 @@ def test_deliver_merged_mode(monkeypatch):
 def test_deliver_split_mode(monkeypatch):
     old = settings.compare_mode()
     settings.set_compare_mode("split")
-    monkeypatch.setattr(Config, "LOCAL_POLISH_CMD", "dummy_local")
+    monkeypatch.setattr(config.Config, "LOCAL_POLISH_CMD", "dummy_local")
     try:
         fs = FakeSender()
         res = delivery.deliver(
@@ -188,7 +193,7 @@ def test_deliver_split_mode(monkeypatch):
 def test_deliver_off_mode(monkeypatch):
     old = settings.compare_mode()
     settings.set_compare_mode("off")
-    monkeypatch.setattr(Config, "LOCAL_POLISH_CMD", "dummy_local")
+    monkeypatch.setattr(config.Config, "LOCAL_POLISH_CMD", "dummy_local")
     try:
         fs = FakeSender()
         res = delivery.deliver(
@@ -215,7 +220,7 @@ def test_deliver_off_mode(monkeypatch):
 def test_deliver_merged_oversized_fallback(monkeypatch):
     old = settings.compare_mode()
     settings.set_compare_mode("merged")
-    monkeypatch.setattr(Config, "LOCAL_POLISH_CMD", "dummy_local")
+    monkeypatch.setattr(config.Config, "LOCAL_POLISH_CMD", "dummy_local")
     try:
         fs = FakeSender()
         giant_shelby = "نص شلبي ضخم جداً " * 300  # يتجاوز 4000 حرف
@@ -273,7 +278,7 @@ def test_compare_uses_gemini_not_local_for_main_message(monkeypatch):
     real_ta = importlib.reload(text_assist)
     monkeypatch.setattr(real_ta, "_call_local_provider", lambda s, r: ("*** LOCAL/SHELBY OUTPUT ***", None))
     monkeypatch.setattr(real_ta, "generate", lambda s, u, timeout=None: ("*** PURE GEMINI OUTPUT ***", None))
-    monkeypatch.setattr(Config, "LOCAL_POLISH_CMD", "dummy_local")
+    monkeypatch.setattr(config.Config, "LOCAL_POLISH_CMD", "dummy_local")
     monkeypatch.setattr(delivery.Config, "LOCAL_POLISH_CMD", "dummy_local")
     monkeypatch.setattr(real_ta.Config, "LOCAL_POLISH_CMD", "dummy_local")
     old = settings.compare_mode()
@@ -321,7 +326,7 @@ def test_settings_and_panel_synthesizer_mode():
         assert ok and val == "synthesizer"
 
         old_cfg, new_cfg = panel.apply_setting("compare_mode", "synthesizer")
-        assert new_cfg == "synthesizer" and Config.COMPARE_MODE == "synthesizer"
+        assert new_cfg == "synthesizer" and config.Config.COMPARE_MODE == "synthesizer"
         assert panel.current_setting("compare_mode") == "synthesizer"
 
         text, kb = panel.setting_view("compare_mode")
@@ -352,7 +357,7 @@ def test_text_assist_synthesize_success(monkeypatch):
 
 
 def test_deliver_synthesizer_happy_path(monkeypatch):
-    monkeypatch.setattr(Config, "LOCAL_POLISH_CMD", "dummy_local")
+    monkeypatch.setattr(config.Config, "LOCAL_POLISH_CMD", "dummy_local")
     monkeypatch.setattr(delivery.Config, "LOCAL_POLISH_CMD", "dummy_local")
     old_mode = settings.compare_mode()
     settings.set_compare_mode("synthesizer")
@@ -395,7 +400,7 @@ def test_deliver_synthesizer_happy_path(monkeypatch):
 
 
 def test_deliver_synthesizer_timeout_fallback(monkeypatch):
-    monkeypatch.setattr(Config, "LOCAL_POLISH_CMD", "dummy_local")
+    monkeypatch.setattr(config.Config, "LOCAL_POLISH_CMD", "dummy_local")
     monkeypatch.setattr(delivery.Config, "LOCAL_POLISH_CMD", "dummy_local")
     old_mode = settings.compare_mode()
     settings.set_compare_mode("synthesizer")
@@ -425,7 +430,7 @@ def test_deliver_synthesizer_timeout_fallback(monkeypatch):
 
 
 def test_deliver_synthesizer_synthesis_failure_fallback(monkeypatch):
-    monkeypatch.setattr(Config, "LOCAL_POLISH_CMD", "dummy_local")
+    monkeypatch.setattr(config.Config, "LOCAL_POLISH_CMD", "dummy_local")
     monkeypatch.setattr(delivery.Config, "LOCAL_POLISH_CMD", "dummy_local")
     old_mode = settings.compare_mode()
     settings.set_compare_mode("synthesizer")
@@ -459,7 +464,7 @@ def test_deliver_synthesizer_synthesis_failure_fallback(monkeypatch):
 
 
 def test_deliver_synthesizer_oversized_fallback(monkeypatch):
-    monkeypatch.setattr(Config, "LOCAL_POLISH_CMD", "dummy_local")
+    monkeypatch.setattr(config.Config, "LOCAL_POLISH_CMD", "dummy_local")
     monkeypatch.setattr(delivery.Config, "LOCAL_POLISH_CMD", "dummy_local")
     old_mode = settings.compare_mode()
     settings.set_compare_mode("synthesizer")
@@ -484,15 +489,19 @@ def test_deliver_synthesizer_oversized_fallback(monkeypatch):
         assert t is not None
         t.join(timeout=3)
 
-        # ناتج ضخم يتجاوز حد تليجرام -> لم يعدل بل أرسل كرسالة/مستند مستقل
-        assert len(fs.edited_texts) == 0
-        assert len(fs.sent_texts) >= 3 or len(fs.docs) >= 1
+        # ناتج ضخم يتجاوز حد التعديل -> إغلاق رسالة الانتظار بإشعار قصير ثم إرسال الناتج كملف .md كامل
+        assert len(fs.edited_texts) == 1
+        assert "اكتملت المعالجة" in fs.edited_texts[0][1]
+        assert "جاري توليد" not in fs.edited_texts[0][1]
+        assert len(fs.docs) == 1
+        assert fs.docs[0][0] == "golden_synthesized.md"
+        assert fs.docs[0][1] == huge_golden.encode("utf-8")
     finally:
         settings.set_compare_mode(old_mode)
 
 
 def test_deliver_synthesizer_gemini_503_shelby_rescues(monkeypatch):
-    monkeypatch.setattr(Config, "LOCAL_POLISH_CMD", "dummy_local")
+    monkeypatch.setattr(config.Config, "LOCAL_POLISH_CMD", "dummy_local")
     monkeypatch.setattr(delivery.Config, "LOCAL_POLISH_CMD", "dummy_local")
     old_mode = settings.compare_mode()
     settings.set_compare_mode("synthesizer")
@@ -531,7 +540,7 @@ def test_deliver_synthesizer_gemini_503_shelby_rescues(monkeypatch):
 
 
 def test_deliver_synthesizer_updates_result_polished(monkeypatch):
-    monkeypatch.setattr(Config, "LOCAL_POLISH_CMD", "dummy_local")
+    monkeypatch.setattr(config.Config, "LOCAL_POLISH_CMD", "dummy_local")
     monkeypatch.setattr(delivery.Config, "LOCAL_POLISH_CMD", "dummy_local")
     old_mode = settings.compare_mode()
     settings.set_compare_mode("synthesizer")
@@ -559,7 +568,7 @@ def test_deliver_synthesizer_updates_result_polished(monkeypatch):
 
 def test_deliver_synthesizer_mid_none_graceful_fallback(monkeypatch):
     """فحص عدم حدوث انهيار لو فشل إرسال أول رسالة وكان mid=None."""
-    monkeypatch.setattr(Config, "LOCAL_POLISH_CMD", "dummy_local")
+    monkeypatch.setattr(config.Config, "LOCAL_POLISH_CMD", "dummy_local")
     monkeypatch.setattr(delivery.Config, "LOCAL_POLISH_CMD", "dummy_local")
     old_mode = settings.compare_mode()
     settings.set_compare_mode("synthesizer")
@@ -588,6 +597,23 @@ def test_deliver_synthesizer_mid_none_graceful_fallback(monkeypatch):
         assert res["polished"] == "النسخة الذهبية مع mid=None"
     finally:
         settings.set_compare_mode(old_mode)
+
+
+def test_suite_does_not_touch_root_settings_json(tmp_path):
+    """BUG-06: عزل fresh_env يمنع الاختبارات من الكتابة في ملف settings.json بالجذر."""
+    root_settings = os.path.join(config.Config.SCRIPT_DIR, "settings.json")
+    existed_before = os.path.exists(root_settings)
+    before_bytes = open(root_settings, "rb").read() if existed_before else None
+
+    settings.set_compare_mode("split")
+    panel.apply_setting("compare_mode", "off")
+
+    assert os.path.dirname(os.path.abspath(settings.Config.SETTINGS_FILE)) == os.path.abspath(str(tmp_path))
+    assert os.path.exists(tmp_path / "settings.json")
+    if existed_before:
+        assert open(root_settings, "rb").read() == before_bytes
+    else:
+        assert not os.path.exists(root_settings)
 
 
 
