@@ -341,3 +341,93 @@ def test_unknown_post_drains_body_before_404(web):
         pytest.fail("expected 404")
     except urllib.error.HTTPError as e:
         assert e.code == 404 and json.loads(e.read())["error"] == "not found"
+
+
+def test_trusted_proxy_and_forwarded_headers_deny_local_bypass(fresh_env, monkeypatch):
+    """T-13 (B-01): ترويسات proxy أو TRUST_PROXY=1 تمنع تجاوز المصادقة من 127.0.0.1."""
+    import importlib
+    import web_service
+    importlib.reload(web_service)
+    monkeypatch.setattr(web_service.Config, "WEB_ACCESS_TOKEN", "s3cret")
+    httpd, base = _start(web_service)
+    try:
+        monkeypatch.setattr(web_service.Config, "TRUST_PROXY", False)
+        assert _get(base + "/api/status")[0] == 200
+        for hdr in ("X-Forwarded-For", "X-Real-IP", "Forwarded"):
+            st, body = _get(base + "/api/status", headers={hdr: "8.8.8.8"})
+            assert st == 401 and json.loads(body).get("need_token"), (hdr, st)
+
+        monkeypatch.setattr(web_service.Config, "TRUST_PROXY", True)
+        assert _get(base + "/api/status")[0] == 401
+        assert _get(base + "/api/status", headers={"X-Access-Token": "s3cret"})[0] == 200
+    finally:
+        httpd.shutdown()
+
+    monkeypatch.setattr(web_service.Config, "WEB_ACCESS_TOKEN", "")
+    monkeypatch.setattr(web_service.Config, "WEB_HOST", "127.0.0.1")
+    monkeypatch.setattr(web_service.Config, "WEB_ALLOW_OPEN", False)
+    monkeypatch.setattr(web_service.Config, "TRUST_PROXY", True)
+    mode, tok = web_service.ensure_web_token()
+    assert mode == "generated" and len(tok) == 32
+
+
+def test_body_validation_rate_limit_and_redact_on_add_key(web, monkeypatch):
+    """T-14 (B-01): رفض Content-Length السالب/غير الرقمي، حد الحجم والمعدل على /api/add_key، وحجب الأسرار."""
+    import http.client
+    from urllib.parse import urlparse
+    import web_service
+
+    parsed = urlparse(web)
+    def raw_post(path, body, content_length_hdr):
+        conn = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=5)
+        try:
+            conn.putrequest("POST", path, skip_accept_encoding=True)
+            conn.putheader("Content-Type", "application/json")
+            if content_length_hdr is not None:
+                conn.putheader("Content-Length", content_length_hdr)
+            conn.endheaders()
+            if body:
+                conn.send(body)
+            resp = conn.getresponse()
+            return resp.status, json.loads(resp.read().decode("utf-8"))
+        finally:
+            conn.close()
+
+    st, res = raw_post("/api/transcribe", b"", "-1")
+    assert st == 400 and not res["ok"]
+    st, res = raw_post("/api/transcribe", b"", "not-a-number")
+    assert st == 400 and not res["ok"]
+    st, res = raw_post("/api/add_key", b"", "-5")
+    assert st == 400 and not res["ok"]
+
+    # تجاوز حد /api/add_key
+    monkeypatch.setattr(web_service.Config, "WEB_ADD_KEY_MAX_BYTES", 32)
+    st, res = _post_json(web + "/api/add_key", {"key": VALID_AIZA, "name": "TooLong" * 5})
+    assert st == 413 and not res["ok"]
+    monkeypatch.setattr(web_service.Config, "WEB_ADD_KEY_MAX_BYTES", 64 * 1024)
+
+    # حجب الأسرار من رسائل الخطأ (400 و 500)
+    def raise_secret_key(*a, **kw):
+        raise ValueError(f"boom with {VALID_AIZA}")
+    monkeypatch.setattr(web_service.key_manager, "add_key", raise_secret_key)
+    st, res = _post_json(web + "/api/add_key", {"key": VALID_AIZA, "name": "K"})
+    assert st == 400 and VALID_AIZA not in res["error"] and "AIza…****" in res["error"]
+
+    monkeypatch.setattr(web_service, "transcribe_audio_bytes_ex", raise_secret_key)
+    req = urllib.request.Request(web + "/api/transcribe", data=b"WAVE",
+                                 headers={"Content-Type": "audio/wav"})
+    with pytest.raises(urllib.error.HTTPError) as ei:
+        urllib.request.urlopen(req, timeout=5)
+    assert ei.value.code == 500
+    err_body = json.loads(ei.value.read().decode("utf-8"))
+    assert VALID_AIZA not in err_body["error"] and "AIza…****" in err_body["error"]
+
+    # rate limit مستقل لـ /api/add_key
+    web_service.reset_rate_limit()
+    monkeypatch.setattr(web_service.Config, "WEB_ADD_KEY_RATE_LIMIT_PER_MIN", 2)
+    assert _post_json(web + "/api/add_key", {"key": "bad1"})[0] == 400
+    assert _post_json(web + "/api/add_key", {"key": "bad2"})[0] == 400
+    st, res = _post_json(web + "/api/add_key", {"key": "bad3"})
+    assert st == 429 and "حد إضافة المفاتيح" in res["error"]
+    # /api/transcribe يبقى غير متأثر بـ bucket المفاتيح
+    assert not web_service.rate_limited("127.0.0.1", limit=1)

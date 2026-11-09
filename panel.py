@@ -17,6 +17,7 @@ panel.py — لوحة التحكم التفاعلية (11 §1–2، §6): بنا
     b:n | b:s | b:S | b:t               النسخ: الآن / الأسرار→تأكيد / متأكد / اختبار استعادة
     S:l | S:v:<key> | S:s:<key>=<val> | S:e:<key>   الإعدادات: قائمة/عرض/اختيار/إدخال رقم(FSM)
 """
+import math
 import time
 
 from config import Config
@@ -35,7 +36,7 @@ SET_WHITELIST = {
     "backup_weekly_day":        ("choice", ("mon", "tue", "wed", "thu", "fri", "sat", "sun"), "يوم النسخة الأسبوعية"),
     "notify_on_start":          ("bool", None, "إشعار عند الإقلاع"),
     "progress_after_seconds":   ("int", (0, 120), "رسالة «جارٍ» بعد (ث)"),
-    "local_polish_timeout":     ("int", (1, 300), "مهلة المنظم المحلي (ث)"),
+    "local_polish_timeout":     ("float", (1.0, 300.0), "مهلة المنظم المحلي (ث)"),
 }
 # ممنوعة نهائياً (11 §4)
 SET_FORBIDDEN = ("keys", "token", "telegram_bot_token", "web_access_token", "data_dir", "models", "transcribe_workers",
@@ -342,7 +343,7 @@ def setting_view(key):
             rows.append(row)
     elif typ == "bool":
         rows.append([btn(("◉ " if val else "○ ") + "تشغيل", f"S:s:{key}=1"), btn(("◉ " if not val else "○ ") + "إيقاف", f"S:s:{key}=0")])
-    elif typ == "int":
+    elif typ in ("int", "float"):
         text += f"المدى: {rng[0]}–{rng[1]}. اضغط «✏️ قيمة جديدة» ثم اكتب الرقم."
         rows.append([btn("✏️ قيمة جديدة", f"S:e:{key}")])
     elif typ == "role":
@@ -407,6 +408,14 @@ def validate_setting(key, raw):
         except ValueError:
             return False, "القيمة يجب أن تكون رقماً صحيحاً."
         if not (rng[0] <= n <= rng[1]):
+            return False, f"خارج المدى: {rng[0]}–{rng[1]}"
+        return True, n
+    if typ == "float":
+        try:
+            n = float(v)
+        except ValueError:
+            return False, "القيمة يجب أن تكون رقماً صالحاً."
+        if not math.isfinite(n) or not (rng[0] <= n <= rng[1]):
             return False, f"خارج المدى: {rng[0]}–{rng[1]}"
         return True, n
     if typ == "role":

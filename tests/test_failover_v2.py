@@ -315,7 +315,9 @@ def test_autodetect_merges_keys_exhausting_together(km, monkeypatch):
     assert km.group_label(a) and km.group_label(a).startswith("auto-")
     assert km.groups_summary()
     on_disk = json.load(open(kmod.Config.KEY_GROUPS_FILE, encoding="utf-8"))
-    assert set(on_disk["groups"]) == {VALID_A, VALID_B}
+    raw_blob = json.dumps(on_disk)
+    assert VALID_A not in raw_blob and VALID_B not in raw_blob
+    assert set(on_disk["groups"]) == {km._key_hash(VALID_A), km._key_hash(VALID_B)}
     km2 = kmod.KeyManager()                                    # "إعادة تشغيل" تحمّل المجموعات
     a2, b2, c2 = km2.data["keys"]
     assert km2.group_of(a2) == km2.group_of(b2) != km2.group_of(c2)

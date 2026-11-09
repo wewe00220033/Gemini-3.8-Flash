@@ -15,6 +15,7 @@
 import time
 import threading
 import re
+import difflib
 import os
 import subprocess
 import shlex
@@ -100,7 +101,7 @@ def generate(system_text, user_text, timeout=None):
         for attempt in range(2):
             with _lock:
                 _state["calls"] += 1
-            t0 = time.time()
+            t0 = time.monotonic()
             try:
                 resp = requests.post(url, json=_payload(system_text, user_text, with_thinking),
                                      headers={"x-goog-api-key": key_str, "Content-Type": "application/json"},
@@ -109,7 +110,7 @@ def generate(system_text, user_text, timeout=None):
                 last_reason = f"شبكة: {type(e).__name__}"
                 break
             att = transcriber.classify_response(resp)
-            elapsed = time.time() - t0
+            elapsed = time.monotonic() - t0
             if att.outcome == transcriber.SUCCESS:
                 with _lock:
                     _state["ok"] += 1
@@ -158,23 +159,27 @@ def _call_local_provider(system_text, raw_text):
         return None, "لا يوجد مزود محلي مهيأ"
     timeout = getattr(Config, "LOCAL_POLISH_TIMEOUT", 60.0) or 60.0
     payload = f"{system_text}\n\n===USER_INPUT===\n{raw_text}"
-    t0 = time.time()
+    lock_wait = float(timeout)
+    acquired = _shelby_cli_lock.acquire(timeout=lock_wait)
+    if not acquired:
+        return None, f"المزود المحلي مشغول بمهمة أخرى (تجاوز انتظار القفل {timeout}ث)"
+    cmd_args = cmd
+    t0 = time.monotonic()
     try:
         if isinstance(cmd, str):
             cmd_args = cmd if os.name == "nt" else shlex.split(cmd)
         else:
             cmd_args = cmd
-        with _shelby_cli_lock:
-            res = subprocess.run(
-                cmd_args,
-                input=payload,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=timeout,
-            )
-        elapsed = time.time() - t0
+        res = subprocess.run(
+            cmd_args,
+            input=payload,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+        )
+        elapsed = time.monotonic() - t0
         if res.returncode == 0 and res.stdout.strip():
             logger.info("✨ [local] polish في %.1f ث", elapsed)
             return res.stdout.strip(), None
@@ -195,14 +200,38 @@ def _call_local_provider(system_text, raw_text):
         return None, logkit.redact(f"أمر المزود المحلي غير موجود (FileNotFoundError: {exec_name})")
     except Exception as e:
         return None, f"خطأ استدعاء المزود المحلي ({type(e).__name__})"
+    finally:
+        _shelby_cli_lock.release()
 
 
-def is_shelby_noop(raw_text, local_text):
-    """هل أعاد المزود المحلي النص كما هو دون تنظيم فعلي؟ (BUG-05)
-    مقارنة توكينية حتمية O(N) — خالية من الإنذارات الكاذبة على تعديلات الترقيم أو صياغة طويلة."""
+_AR_DIACRITICS_RE = re.compile(r"[\u064B-\u065F\u0670\u0640]")
+_NOOP_PUNCT_RE = re.compile(r"[\.\,\،\؛\:\!\؟\?\-\–\—\"\'\(\)\[\]\{\}«»…]+")
+
+
+def _normalize_for_noop(text):
+    s = str(text or "").strip().lower()
+    s = _AR_DIACRITICS_RE.sub("", s)
+    s = s.replace("أ", "ا").replace("إ", "ا").replace("آ", "ا")
+    s = s.replace("ى", "ي").replace("ة", "ه")
+    s = _NOOP_PUNCT_RE.sub(" ", s)
+    return " ".join(s.split())
+
+
+def is_shelby_noop(raw_text, local_text, role_id=None):
+    """هل أعاد المزود المحلي النص كما هو دون تنظيم فعلي؟ (BUG-05 / B-10)"""
     if not raw_text or not local_text:
         return False
-    return str(raw_text).strip().split() == str(local_text).strip().split()
+    if role_id == "smart_verbatim":
+        return False
+    if str(raw_text).strip().split() == str(local_text).strip().split():
+        return True
+    norm_raw = _normalize_for_noop(raw_text)
+    norm_local = _normalize_for_noop(local_text)
+    if not norm_raw or not norm_local:
+        return False
+    if len(norm_raw) >= 80 and len(norm_raw.split()) >= 12:
+        return difflib.SequenceMatcher(None, norm_raw, norm_local).ratio() >= 0.98
+    return False
 
 
 def note_shelby_noop():
@@ -241,11 +270,14 @@ def polish_local(raw_text, role_id=None, glossary=None, context_summary=None):
                         + str(context_summary)[:Config.SESSION_SUMMARY_MAX_CHARS])
     text, reason = _call_local_provider(system_text, raw_text)
     if text:
+        if is_shelby_noop(raw_text, text, role_id=role_id):
+            with _lock:
+                _state["local_calls"] = _state.get("local_calls", 0) + 1
+                _state["local_noop"] = _state.get("local_noop", 0) + 1
+            return None, "أعاد شلبي النص دون تنظيم فعلي"
         with _lock:
             _state["local_calls"] = _state.get("local_calls", 0) + 1
             _state["local_ok"] = _state.get("local_ok", 0) + 1
-            _state["calls"] += 1
-            _state["ok"] += 1
         if glossary is not None:
             text, _n = glossary.apply(text, target="polished")
         return text.strip(), None
@@ -278,11 +310,16 @@ def polish(raw_text, role_id=None, glossary=None, context_summary=None):
     if getattr(Config, "LOCAL_POLISH_CMD", ""):
         text, reason = _call_local_provider(system_text, raw_text)
         if text:
-            with _lock:
-                _state["local_calls"] = _state.get("local_calls", 0) + 1
-                _state["local_ok"] = _state.get("local_ok", 0) + 1
-                _state["calls"] += 1
-                _state["ok"] += 1
+            if is_shelby_noop(raw_text, text, role_id=role_id):
+                with _lock:
+                    _state["local_calls"] = _state.get("local_calls", 0) + 1
+                    _state["local_noop"] = _state.get("local_noop", 0) + 1
+                logger.warning("⚠️ المزود المحلي أعاد النص دون تنظيم فعلي (No-Op) — تحويل تلقائي إلى Gemini...")
+                text = None
+            else:
+                with _lock:
+                    _state["local_calls"] = _state.get("local_calls", 0) + 1
+                    _state["local_ok"] = _state.get("local_ok", 0) + 1
         else:
             reason = logkit.redact(reason)
             with _lock:

@@ -38,6 +38,9 @@ _current_path = None
 _ENTRY_MARK = "## 🎙️ "
 _ENTRY_RE = re.compile(r"^## 🎙️ ", re.M)
 _RAW_MARK, _POL_MARK, _TITLE_MARK = "### الخام", "### المنظم", "### العنوان"
+_ENTRY_ID_RE = re.compile(r"^<!--\s*entry_id:([A-Za-z0-9_.\-]+)\s*-->$")
+_ADDENDUM_START_RE = re.compile(r"^<!--\s*addendum_for:([A-Za-z0-9_.\-]+)\s*-->$")
+_ADDENDUM_END = "<!-- /addendum -->"
 _BAD_NAME_CHARS = re.compile(r'[/\\:*?"<>|\x00-\x1f]')
 _TECH_TERM_RE = re.compile(r"\b[A-Za-z][A-Za-z0-9+#.\-]{1,30}\b")
 
@@ -423,8 +426,15 @@ def merge(id_a, id_b, name=None, when=None):
 # ======================================================================
 # الكتابة المزدوجة (المدخلات)
 # ======================================================================
-def _format_entry_block(meta, raw, polished=None, title=None):
+def _is_comment_line(ln):
+    s = ln.strip()
+    return s.startswith("<!--") and s.endswith("-->")
+
+
+def _format_entry_block(meta, raw, polished=None, title=None, entry_id=None):
     block = _ENTRY_MARK + meta + "\n"
+    if entry_id:
+        block += f"<!-- entry_id:{entry_id} -->\n"
     if title:
         block += _TITLE_MARK + "\n" + title.strip() + "\n"
     block += _RAW_MARK + "\n" + (raw or "").strip() + "\n"
@@ -433,7 +443,7 @@ def _format_entry_block(meta, raw, polished=None, title=None):
     return block + "\n"
 
 
-def append_entry(raw_text, model=None, elapsed=None, key_name=None, when=None, extra=None, session_id=None):
+def append_entry(raw_text, model=None, elapsed=None, key_name=None, when=None, extra=None, session_id=None, entry_id=None):
     """يكتب مدخلاً في ملف الجلسة النشطة (بنفس صيغة ALL.md). يرجع True لو كُتب، False لو لا جلسة/فشل."""
     with _lock:
         sid = session_id or current_id()
@@ -449,7 +459,7 @@ def append_entry(raw_text, model=None, elapsed=None, key_name=None, when=None, e
             if extra:
                 meta.append(str(extra))
             _write_file_header(s)
-            _append_file(session_file(s["id"]), _format_entry_block(" · ".join(meta), raw_text))
+            _append_file(session_file(s["id"]), _format_entry_block(" · ".join(meta), raw_text, entry_id=entry_id))
             s["count"] = int(s.get("count") or 0) + 1
             s["last_ts"] = _now_str(when)
             _write_index()
@@ -459,23 +469,78 @@ def append_entry(raw_text, model=None, elapsed=None, key_name=None, when=None, e
             return False
 
 
-def append_polished(polished_text, session_id=None):
-    """يلحق «### المنظم» بآخر مدخل في ملف الجلسة (بلا تكرار)."""
-    if not polished_text:
+def _find_entry_state_in_session(path, entry_id):
+    if not os.path.exists(path):
+        return False, False, False
+    marker = f"<!-- entry_id:{entry_id} -->"
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        data = f.read()
+    pos = data.rfind(marker)
+    if pos == -1:
+        return False, False, False
+    head_pos = data.rfind(_ENTRY_MARK, 0, pos)
+    if head_pos == -1:
+        return False, False, False
+    parts = _ENTRY_RE.split(data[head_pos:])
+    target_ent, _tid, add_first = _parse_block_with_addenda(_ENTRY_MARK + parts[1])
+    merged_add = dict(add_first.get(entry_id, {}))
+    for p in parts[2:]:
+        _e, _eid, ads = _parse_block_with_addenda(_ENTRY_MARK + p)
+        if entry_id in ads:
+            for k in ("polished", "title"):
+                if not merged_add.get(k) and ads[entry_id].get(k):
+                    merged_add[k] = ads[entry_id][k]
+    has_pol = bool(target_ent.get("polished") or merged_add.get("polished"))
+    has_tit = bool(target_ent.get("title") or merged_add.get("title"))
+    return True, has_pol, has_tit
+
+
+def _append_section_to_session(mark, body_text, field_key, session_id=None, entry_id=None):
+    clean_body = (body_text or "").strip()
+    if not clean_body:
         return False
     with _lock:
         sid = session_id or current_id()
         if not sid:
             return False
-        try:
-            block = _read_last_block(session_file(sid))
-            if block is None or _POL_MARK in block:
-                return False
-            _append_file(session_file(sid), _POL_MARK + "\n" + polished_text.strip() + "\n\n")
-            return True
-        except Exception as e:  # pragma: no cover
-            print(f"⚠️ ملف الجلسة: تعذّر إلحاق المنظم ({e})")
+        path = session_file(sid)
+        block = _read_last_block(path)
+        if block is None:
             return False
+        ent, last_eid, addenda = _parse_block_with_addenda(block)
+        if entry_id is None or last_eid == entry_id:
+            merged = dict(ent)
+            if last_eid and last_eid in addenda:
+                for k in ("polished", "title"):
+                    if not merged.get(k) and addenda[last_eid].get(k):
+                        merged[k] = addenda[last_eid][k]
+            if merged.get(field_key):
+                return False
+            foreign = any(tid != last_eid for tid in addenda)
+            if foreign and entry_id:
+                _append_file(path, f"<!-- addendum_for:{entry_id} -->\n{mark}\n{clean_body}\n{_ADDENDUM_END}\n\n")
+            else:
+                _append_file(path, mark + "\n" + clean_body + "\n\n")
+            return True
+
+        found, has_pol, has_tit = _find_entry_state_in_session(path, entry_id)
+        if not found:
+            return False
+        if (field_key == "polished" and has_pol) or (field_key == "title" and has_tit):
+            return False
+        _append_file(path, f"<!-- addendum_for:{entry_id} -->\n{mark}\n{clean_body}\n{_ADDENDUM_END}\n\n")
+        return True
+
+
+def append_polished(polished_text, session_id=None, entry_id=None):
+    """يلحق «### المنظم» بالمدخل المستهدف (أو الأخير) في ملف الجلسة (بلا تكرار)."""
+    if not polished_text:
+        return False
+    try:
+        return _append_section_to_session(_POL_MARK, polished_text, "polished", session_id=session_id, entry_id=entry_id)
+    except Exception as e:  # pragma: no cover
+        print(f"⚠️ ملف الجلسة: تعذّر إلحاق المنظم ({e})")
+        return False
 
 
 def append_raw_text(text, session_id=None):
@@ -492,43 +557,76 @@ def append_raw_text(text, session_id=None):
         return True
 
 
-def append_title(title, session_id=None):
-    """يلحق «### العنوان» بآخر مدخل (append-only؛ العنوان يصل بعد الخام)."""
+def append_title(title, session_id=None, entry_id=None):
+    """يلحق «### العنوان» بالمدخل المستهدف (أو الأخير) (append-only؛ العنوان يصل بعد الخام)."""
     title = (title or "").strip()
     if not title:
         return False
-    with _lock:
-        sid = session_id or current_id()
-        if not sid:
-            return False
-        try:
-            block = _read_last_block(session_file(sid))
-            if block is None or _TITLE_MARK in block:
-                return False
-            _append_file(session_file(sid), _TITLE_MARK + "\n" + title + "\n\n")
-            return True
-        except Exception:  # pragma: no cover
-            return False
+    try:
+        return _append_section_to_session(_TITLE_MARK, title, "title", session_id=session_id, entry_id=entry_id)
+    except Exception:  # pragma: no cover
+        return False
 
 
 def _read_last_block(path, tail_bytes=65536):
     if not os.path.exists(path):
         return None
     size = os.path.getsize(path)
-    with open(path, "rb") as f:
-        f.seek(max(0, size - tail_bytes))
-        data = f.read().decode("utf-8", errors="ignore")
-    parts = _ENTRY_RE.split(data)
-    if len(parts) < 2:
+    if size == 0:
         return None
-    return _ENTRY_MARK + parts[-1]
+    cur_tail = max(1024, int(tail_bytes))
+    with open(path, "rb") as f:
+        while True:
+            seek_pos = max(0, size - cur_tail)
+            f.seek(seek_pos)
+            data = f.read().decode("utf-8", errors="ignore")
+            parts = _ENTRY_RE.split(data)
+            if len(parts) >= 2:
+                return _ENTRY_MARK + parts[-1]
+            if seek_pos == 0:
+                return None
+            cur_tail = min(size, cur_tail * 2)
 
 
-def _parse_block(block):
+def _parse_block_with_addenda(block):
     lines = block.strip("\n").split("\n")
     meta = lines[0][len(_ENTRY_MARK):].strip()
     raw, pol, title, cur = [], [], [], None
+    entry_id = None
+    addenda = {}
+    add_target = None
+    add_cur = None
     for ln in lines[1:]:
+        stripped = ln.strip()
+        m_add = _ADDENDUM_START_RE.match(stripped)
+        if m_add:
+            add_target = m_add.group(1)
+            add_cur = None
+            cur = None
+            continue
+        if stripped == _ADDENDUM_END:
+            add_target = None
+            add_cur = None
+            cur = None
+            continue
+        if add_target is not None:
+            bucket = addenda.setdefault(add_target, {"polished": [], "title": []})
+            if ln.startswith(_POL_MARK):
+                add_cur = bucket["polished"]
+            elif ln.startswith(_TITLE_MARK):
+                add_cur = bucket["title"]
+            elif ln.startswith(("⏹️ ", "▶️ ", "✏️ ", "📛 ", "📦 ", "🎭 ", "🧾 ")) or ln.startswith("### "):
+                add_cur = None
+            elif add_cur is not None and not _is_comment_line(ln):
+                add_cur.append(ln)
+            continue
+
+        m_id = _ENTRY_ID_RE.match(stripped)
+        if m_id and entry_id is None:
+            entry_id = m_id.group(1)
+            continue
+        if _is_comment_line(ln):
+            continue
         if ln.startswith(_RAW_MARK):
             cur = raw
         elif ln.startswith(_POL_MARK):
@@ -539,8 +637,25 @@ def _parse_block(block):
             cur = None
         elif cur is not None:
             cur.append(ln)
-    return {"meta": meta, "raw": "\n".join(raw).strip(), "polished": "\n".join(pol).strip() or None,
-            "title": "\n".join(title).strip() or None}
+    entry = {"meta": meta, "raw": "\n".join(raw).strip(), "polished": "\n".join(pol).strip() or None,
+             "title": "\n".join(title).strip() or None}
+    parsed_addenda = {}
+    for tid, b in addenda.items():
+        p_txt = "\n".join(b["polished"]).strip() or None
+        t_txt = "\n".join(b["title"]).strip() or None
+        if p_txt or t_txt:
+            parsed_addenda[tid] = {"polished": p_txt, "title": t_txt}
+    return entry, entry_id, parsed_addenda
+
+
+def _parse_block(block):
+    entry, eid, addenda = _parse_block_with_addenda(block)
+    if eid and eid in addenda:
+        if not entry.get("polished") and addenda[eid].get("polished"):
+            entry["polished"] = addenda[eid]["polished"]
+        if not entry.get("title") and addenda[eid].get("title"):
+            entry["title"] = addenda[eid]["title"]
+    return entry
 
 
 def _entries_of(session_id):
@@ -550,7 +665,25 @@ def _entries_of(session_id):
     with open(path, "r", encoding="utf-8") as f:
         data = f.read()
     parts = _ENTRY_RE.split(data)
-    return [_parse_block(_ENTRY_MARK + p) for p in parts[1:]]
+    parsed = []
+    all_addenda = {}
+    for p in parts[1:]:
+        ent, eid, add_map = _parse_block_with_addenda(_ENTRY_MARK + p)
+        parsed.append((ent, eid))
+        for tid, fields in add_map.items():
+            bucket = all_addenda.setdefault(tid, {})
+            for k, v in fields.items():
+                if v and not bucket.get(k):
+                    bucket[k] = v
+    out = []
+    for ent, eid in parsed:
+        if eid and eid in all_addenda:
+            if not ent.get("polished") and all_addenda[eid].get("polished"):
+                ent["polished"] = all_addenda[eid]["polished"]
+            if not ent.get("title") and all_addenda[eid].get("title"):
+                ent["title"] = all_addenda[eid]["title"]
+        out.append(ent)
+    return out
 
 
 def entries(session_id):

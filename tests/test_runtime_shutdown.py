@@ -163,3 +163,64 @@ def test_idle_loop_restarts_dead_poller_only_on_period(env, monkeypatch):
     threading.Timer(0.8, rt.global_stop.set).start()
     main._idle_loop(rt, None, "TOK", tick=0.05)
     assert 1 <= len(calls) <= 3                                      # لا كل 50 مللي ثانية
+
+
+def test_main_applies_persisted_overrides_before_start_queue(env, monkeypatch):
+    """T-09 (B-09): apply_persisted_overrides() تُستدعى قبل start_queue(resume=True) وبدء الويب."""
+    main, tb = env
+    order = []
+    monkeypatch.setattr(main.panel, "apply_persisted_overrides", lambda: order.append("overrides") or 0)
+    monkeypatch.setattr(main.web_service, "start_web_server_thread", lambda: order.append("web") or None)
+    monkeypatch.setattr(tb, "start_queue", lambda resume=False: order.append(("queue", resume)))
+    monkeypatch.setattr(tb, "register_commands", lambda tok: None)
+    monkeypatch.setattr(main.Runtime, "start_poller", lambda self: None)
+    monkeypatch.setattr(main.Runtime, "start_watchdog", lambda self: None)
+    monkeypatch.setattr(main, "_startup_ping", lambda *a, **k: None)
+    monkeypatch.setattr(main.time, "sleep", lambda s: None)
+    monkeypatch.setattr(main, "_idle_loop", lambda rt, wt, tok: None)
+
+    with pytest.raises(SystemExit) as ei:
+        main.main()
+    assert ei.value.code == 0
+    assert order[0] == "overrides" and ("queue", True) in order
+    assert order.index("overrides") < order.index("web") < order.index(("queue", True))
+
+
+def test_shutdown_respects_bg_grace_and_reports_unfinished_bg(env, monkeypatch):
+    """T-10 (B-09): shutdown() يمنح خيوط السبك حتى SHUTDOWN_BG_GRACE ويعيد left + bg_left."""
+    import delivery
+    main, tb = env
+    monkeypatch.setattr(main.Config, "SHUTDOWN_GRACE", 5)
+    monkeypatch.setattr(main.Config, "SHUTDOWN_BG_GRACE", 4.0)
+    rt = main.Runtime("TOK", "777")
+
+    ev_done = threading.Event()
+    t = threading.Thread(target=lambda: ev_done.wait(2.0), daemon=True)
+    t.start()
+    with delivery._bg_threads_lock:
+        delivery._bg_threads.add(t)
+    threading.Timer(0.25, ev_done.set).start()
+    try:
+        assert rt.shutdown("test-ok") == 0
+    finally:
+        ev_done.set()
+        t.join(1)
+        with delivery._bg_threads_lock:
+            delivery._bg_threads.discard(t)
+
+    # خيط سبك عالق بعد انقضاء المهلة → يرجع العدد المتبقي > 0
+    monkeypatch.setattr(main.Config, "SHUTDOWN_GRACE", 0.2)
+    monkeypatch.setattr(main.Config, "SHUTDOWN_BG_GRACE", 0.2)
+    rt2 = main.Runtime("TOK", "777")
+    ev_stuck = threading.Event()
+    t2 = threading.Thread(target=lambda: ev_stuck.wait(5.0), daemon=True)
+    t2.start()
+    with delivery._bg_threads_lock:
+        delivery._bg_threads.add(t2)
+    try:
+        assert rt2.shutdown("test-stuck") >= 1
+    finally:
+        ev_stuck.set()
+        t2.join(1)
+        with delivery._bg_threads_lock:
+            delivery._bg_threads.discard(t2)

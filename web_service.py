@@ -23,6 +23,7 @@ import heartbeat
 import audit
 import sessions
 import observability
+import logkit
 from http.cookies import SimpleCookie
 
 
@@ -73,19 +74,20 @@ _rl_lock = threading.Lock()
 _rl_hits = {}      # ip -> [timestamps]
 
 
-def rate_limited(ip, now=None, limit=None):
+def rate_limited(ip, now=None, limit=None, bucket=None):
     """True لو تجاوز الـ IP الحد خلال آخر 60 ث. يسجّل الضربة الحالية."""
     now = now or time.time()
     limit = limit if limit is not None else int(Config.WEB_RATE_LIMIT_PER_MIN)
     if limit <= 0:
         return False
+    key = f"{bucket}:{ip}" if bucket else ip
     with _rl_lock:
-        hits = [t for t in _rl_hits.get(ip, []) if now - t < 60]
+        hits = [t for t in _rl_hits.get(key, []) if now - t < 60]
         if len(hits) >= limit:
-            _rl_hits[ip] = hits
+            _rl_hits[key] = hits
             return True
         hits.append(now)
-        _rl_hits[ip] = hits
+        _rl_hits[key] = hits
         if len(_rl_hits) > 1000:       # لا تضخم
             for k in [k for k, v in _rl_hits.items() if not v or now - v[-1] > 60]:
                 _rl_hits.pop(k, None)
@@ -98,6 +100,15 @@ def reset_rate_limit():
 
 
 class WebRequestHandler(BaseHTTPRequestHandler):
+    timeout = 30.0
+
+    def setup(self):
+        try:
+            self.timeout = float(getattr(Config, "WEB_SOCKET_TIMEOUT", 30.0) or 30.0)
+        except (TypeError, ValueError):
+            self.timeout = 30.0
+        super().setup()
+
     # ------------------------------------------------------------------
     # أدوات مساعدة
     # ------------------------------------------------------------------
@@ -120,10 +131,14 @@ class WebRequestHandler(BaseHTTPRequestHandler):
     def _authorized(self):
         """
         مصادقة اختيارية: لو WEB_ACCESS_TOKEN فاضي → مفتوح بالكامل (منظومة شخصية).
-        لو مضبوط → يُقبل من localhost دائماً، أو بالتوكن في Header `X-Access-Token` أو `?token=`.
+        لو مضبوط → يُقبل من localhost فقط عند TRUST_PROXY=0 وبلا ترويسات proxy،
+        أو بالتوكن في Header `X-Access-Token` أو Cookie أو `?token=`.
         """
         token = Config.WEB_ACCESS_TOKEN
-        if not token or self._is_local():
+        if not token:
+            return True
+        has_fwd = any(self.headers.get(h) for h in ("X-Forwarded-For", "X-Real-IP", "Forwarded"))
+        if not Config.TRUST_PROXY and not has_fwd and self._is_local():
             return True
         supplied = self.headers.get("X-Access-Token", "")
         if not supplied:
@@ -167,12 +182,40 @@ class WebRequestHandler(BaseHTTPRequestHandler):
             n = int(self.headers.get("Content-Length", 0) or 0)
         except ValueError:
             n = 0
+        if n <= 0:
+            return
         remaining = min(n, limit)
         while remaining > 0:
             chunk = self.rfile.read(min(remaining, 65536))
             if not chunk:
                 break
             remaining -= len(chunk)
+
+    def _read_body_bounded(self, max_bytes, oversized_msg=None):
+        """
+        يقرأ جسم الطلب بحد أقصى max_bytes مع التحقق الصارم من Content-Length.
+        يرفض missing / غير رقمي / <= 0 بـ 400، و > max_bytes بـ 413 دون استهلاك الذاكرة أو القراءة غير المحدودة (-1).
+        يرجع (body, None) عند النجاح أو (None, (status, error_msg)) عند الرفض.
+        """
+        raw_cl = self.headers.get("Content-Length")
+        if raw_cl is None:
+            return None, (400, "ترويسة Content-Length مطلوبة")
+        try:
+            content_length = int(str(raw_cl).strip())
+        except (TypeError, ValueError):
+            return None, (400, "قيمة Content-Length غير صالحة")
+        if content_length <= 0:
+            return None, (400, "حجم الطلب يجب أن يكون أكبر من صفر")
+        if content_length > max_bytes:
+            self.close_connection = True
+            # على Windows: استهلاك الأجسام المرفوضة الصغيرة (<=256KB) قبل الرد يمنع RST (10054) قبل قراءة 413
+            if content_length <= 262144:
+                self._drain_body(limit=262144)
+            return None, (413, oversized_msg or f"حجم الطلب أكبر من الحد المسموح ({max_bytes} بايت)")
+        body = self.rfile.read(content_length)
+        if len(body) < content_length:
+            return None, (400, "جسم الطلب ناقص قبل اكتمال الإرسال")
+        return body, None
 
     @staticmethod
     def parse_multipart(body, content_type):
@@ -294,14 +337,13 @@ class WebRequestHandler(BaseHTTPRequestHandler):
                 self._drain_body()
                 return self._send_json(429, {"ok": False, "error": f"حد الطلبات: {Config.WEB_RATE_LIMIT_PER_MIN}/دقيقة — جرّب بعد قليل"})
             try:
-                content_length = int(self.headers.get("Content-Length", 0))
                 max_bytes = Config.MAX_UPLOAD_MB * 1024 * 1024
-                if content_length > max_bytes:
-                    return self._send_json(413, {
-                        "ok": False,
-                        "error": f"الملف أكبر من الحد المسموح ({Config.MAX_UPLOAD_MB}MB)",
-                    })
-                body = self.rfile.read(content_length)
+                body, err = self._read_body_bounded(
+                    max_bytes,
+                    oversized_msg=f"الملف أكبر من الحد المسموح ({Config.MAX_UPLOAD_MB}MB)",
+                )
+                if err is not None:
+                    return self._send_json(err[0], {"ok": False, "error": err[1]})
 
                 audio_bytes, mime_type = self.parse_multipart(body, self.headers.get("Content-Type", ""))
                 if audio_bytes is None:
@@ -310,18 +352,27 @@ class WebRequestHandler(BaseHTTPRequestHandler):
 
                 text, model, key_name, info = _transcribe(audio_bytes, mime_type)
                 # 13 §3: {raw, polished, session} + الحقول القديمة (text = الخام) للتوافق مع الواجهة
+                raw_perr = info.get("polish_error")
                 self._send_json(200, {"ok": True, "text": text, "raw": text, "polished": info.get("polished"),
                                       "role": info.get("role"), "session": info.get("session"),
-                                      "polish_error": info.get("polish_error"), "archived": info.get("archived"),
+                                      "polish_error": logkit.redact(raw_perr) if raw_perr else None,
+                                      "archived": info.get("archived"),
                                       "model": model, "key_name": key_name,
                                       "elapsed": info.get("elapsed"), "skipped": info.get("skipped", [])})
             except Exception as e:
-                self._send_json(500, {"ok": False, "error": str(e)})
+                self._send_json(500, {"ok": False, "error": logkit.redact(str(e))})
 
         elif path == "/api/add_key":
+            add_limit = int(getattr(Config, "WEB_ADD_KEY_RATE_LIMIT_PER_MIN", 20))
+            if rate_limited(self._client_ip(), limit=add_limit, bucket="add_key"):
+                self._drain_body(limit=int(getattr(Config, "WEB_ADD_KEY_MAX_BYTES", 64 * 1024)))
+                return self._send_json(429, {"ok": False, "error": f"حد إضافة المفاتيح: {add_limit}/دقيقة — جرّب بعد قليل"})
             try:
-                content_length = int(self.headers.get("Content-Length", 0))
-                payload = json.loads(self.rfile.read(content_length).decode("utf-8"))
+                max_key_bytes = int(getattr(Config, "WEB_ADD_KEY_MAX_BYTES", 64 * 1024))
+                body, err = self._read_body_bounded(max_key_bytes)
+                if err is not None:
+                    return self._send_json(err[0], {"ok": False, "error": err[1]})
+                payload = json.loads(body.decode("utf-8"))
                 raw_key = (payload.get("key") or "").strip()
                 name = (payload.get("name") or "").strip() or None
 
@@ -336,7 +387,7 @@ class WebRequestHandler(BaseHTTPRequestHandler):
                 entry, is_new = key_manager.add_key(key, name)
                 self._send_json(200, {"ok": True, "key": entry, "is_new": is_new})
             except Exception as e:
-                self._send_json(400, {"ok": False, "error": str(e)})
+                self._send_json(400, {"ok": False, "error": logkit.redact(str(e))})
 
     def log_message(self, format, *args):
         # كتم سجلات الـ HTTP لعدم التشويش على الكونسول إلا في الأخطاء
@@ -446,7 +497,7 @@ def ensure_web_token():
     """
     يُستدعى قبل ربط المنفذ. يرجع (mode, token|None) حيث mode ∈ {"env", "generated", "open", "local"}:
     - توكن في البيئة → "env".
-    - فارغ و WEB_HOST محلي (127.0.0.1/localhost) → "local" (لا حاجة).
+    - فارغ و WEB_HOST محلي (127.0.0.1/localhost) و TRUST_PROXY=0 → "local" (لا حاجة).
     - فارغ و WEB_ALLOW_OPEN=1 → "open" (قرار صريح من المالك).
     - غير ذلك → توليد secrets.token_hex(16) وضبطه في Config (الذاكرة فقط) → "generated".
     التوكن المولَّد لا يُطبع هنا؛ main يطبعه مرة واحدة في بانر ويرسله للمالك على تليجرام.
@@ -454,7 +505,7 @@ def ensure_web_token():
     WEB_TOKEN_STATE.update(generated=False, open=False)
     if Config.WEB_ACCESS_TOKEN:
         return "env", Config.WEB_ACCESS_TOKEN
-    if str(Config.WEB_HOST).strip() in ("127.0.0.1", "localhost", "::1"):
+    if str(Config.WEB_HOST).strip() in ("127.0.0.1", "localhost", "::1") and not Config.TRUST_PROXY:
         return "local", None
     if Config.WEB_ALLOW_OPEN:
         WEB_TOKEN_STATE["open"] = True

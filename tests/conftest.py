@@ -12,6 +12,8 @@ import importlib
 import tempfile
 import pytest
 
+os.environ.setdefault("PYTEST_DISABLE_DOTENV", "1")
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
@@ -76,12 +78,16 @@ ENV_KEYS = [
     "TELEGRAM_BOT_USERNAME", "TELEGRAM_CHAT_ID", "RECORDINGS_DIR",
     "PORT", "SERVER_PORT", "HOST", "WEB_ACCESS_TOKEN", "DATA_DIR", "MAX_UPLOAD_MB",
     "LOCAL_POLISH_CMD", "LOCAL_POLISH_TIMEOUT",
+    "COMPARE_MODE", "DELIVERY_MODE", "TRUST_PROXY", "WEB_ALLOW_OPEN",
+    "WEB_POLISH", "LOG_TO_FILE", "DEFAULT_ROLE", "SMART_TITLE_BEFORE_RAW",
+    "FEATURE_PLAN",
 ]
 
 
 @pytest.fixture
 def fresh_env(monkeypatch, tmp_path):
     """بيئة نظيفة + مسار keys.json مؤقت. يعيد تحميل config و key_manager."""
+    monkeypatch.setenv("PYTEST_DISABLE_DOTENV", "1")
     for k in ENV_KEYS:
         monkeypatch.delenv(k, raising=False)
     import config
@@ -121,7 +127,21 @@ def fresh_env(monkeypatch, tmp_path):
     model_state.model_circuit.detach_store()
     model_state.model_circuit.reset()
     model_state.model_circuit._history.clear()
-    return key_manager
+    try:
+        yield key_manager
+    finally:
+        _apply_tmp_paths(None, config.Config, _BOOT_TMP)
+        for mod_name in _CONFIG_MODULES:
+            mod = sys.modules.get(mod_name)
+            if mod is not None and hasattr(mod, "Config"):
+                setattr(mod, "Config", _boot_config.Config)
+        for mod_name in ("settings", "prompts", "sessions"):
+            mod = sys.modules.get(mod_name)
+            if mod is not None:
+                mod.reset_cache()
+        gl_after = sys.modules.get("glossary")
+        if gl_after is not None:
+            gl_after._singleton = None
 
 
 @pytest.fixture(autouse=True)

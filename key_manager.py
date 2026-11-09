@@ -16,6 +16,7 @@ import os
 import re
 import json
 import time
+import hashlib
 import tempfile
 import threading
 from datetime import datetime, timedelta, timezone
@@ -48,8 +49,9 @@ class KeyManager:
             },
             "recordings_dir": Config.DEFAULT_RECORDINGS_DIR
         }
-        # مجموعات مكتشفة تلقائياً: key_str -> group  (تُحفظ في state/key_groups.json)
+        # مجموعات مكتشفة تلقائياً: key_str -> group و sha256:<hex> -> group (تُحفظ في state/key_groups.json بالبصمة فقط)
         self._auto_groups = {}
+        self._auto_group_hashes = {}
         # آخر نفاد يومي لكل موديل: model -> [(ts, key_str), ...] لنافذة الاكتشاف
         self._daily_exhaust_log = {}
         self._invalid_notified = set()
@@ -62,12 +64,22 @@ class KeyManager:
         if os.path.exists(Config.KEYS_JSON_FILE):
             try:
                 with open(Config.KEYS_JSON_FILE, "r", encoding="utf-8") as f:
-                    self.data = json.load(f)
+                    loaded = json.load(f)
+                if not isinstance(loaded, dict):
+                    raise ValueError(f"keys.json يجب أن يكون dict لا {type(loaded).__name__}")
+                self.data = loaded
                 if self._merge_env_keys():
                     self.save()
                 return
             except Exception as e:
                 print(f"⚠️ خطأ أثناء قراءة keys.json: {e}")
+                if store is not None:
+                    try:
+                        bad_copy = store.quarantine_corrupt(Config.KEYS_JSON_FILE)
+                        if bad_copy:
+                            print(f"🧷 تم عزل keys.json التالف إلى: {os.path.basename(bad_copy)}")
+                    except Exception as qe:
+                        print(f"⚠️ تعذر عزل keys.json التالف: {qe}")
 
         # 2. الهجرة التلقائية من keys.txt أو متغيرات البيئة إن لم يوجد keys.json
         self._bootstrap_from_legacy()
@@ -224,6 +236,10 @@ class KeyManager:
     # ==================================================================
     # مجموعات المشاريع (project_group) — مواصفة 04 §2.4
     # ==================================================================
+    @staticmethod
+    def _key_hash(key_str):
+        return "sha256:" + hashlib.sha256((key_str or "").encode("utf-8")).hexdigest()
+
     def group_of(self, key_entry):
         """
         مجموعة المفتاح: (1) project_group الصريح؛ (2) وسم project؛ (3) مجموعة مكتشفة تلقائياً؛
@@ -238,7 +254,7 @@ class KeyManager:
         if tag:
             return tag
         key_str = key_entry.get("key") or ""
-        auto = self._auto_groups.get(key_str)
+        auto = self._auto_groups.get(key_str) or self._auto_group_hashes.get(self._key_hash(key_str))
         if auto:
             return auto
         return "key:" + key_str
@@ -283,7 +299,9 @@ class KeyManager:
             group = (group or "").strip()
             if group in ("", "-", "none", "بدون"):
                 k.pop("project_group", None)
-                self._auto_groups.pop(k.get("key", ""), None)
+                k_str = k.get("key", "")
+                self._auto_groups.pop(k_str, None)
+                self._auto_group_hashes.pop(self._key_hash(k_str), None)
                 self._save_auto_groups()
             else:
                 k["project_group"] = group[:40]
@@ -298,16 +316,37 @@ class KeyManager:
         data = store.load_json_tolerant(path, default={})
         groups = data.get("groups") if isinstance(data, dict) else None
         if isinstance(groups, dict):
-            self._auto_groups = {str(k): str(v) for k, v in groups.items() if v}
+            hash_to_key = {self._key_hash(k.get("key") or ""): k.get("key") or ""
+                           for k in self.data.get("keys", []) if k.get("key")}
+            legacy_raw = False
+            for k, v in groups.items():
+                if not v:
+                    continue
+                ks, vs = str(k), str(v)
+                if ks.startswith("sha256:"):
+                    self._auto_group_hashes[ks] = vs
+                    real_key = hash_to_key.get(ks)
+                    if real_key:
+                        self._auto_groups[real_key] = vs
+                else:
+                    legacy_raw = True
+                    self._auto_groups[ks] = vs
+                    self._auto_group_hashes[self._key_hash(ks)] = vs
+            if legacy_raw:
+                self._save_auto_groups()
 
     def _save_auto_groups(self):
-        """يُستدعى تحت القفل. يكتب state/key_groups.json ذرياً (المفاتيح مقنّعة لا تُكتب كاملة)."""
+        """يُستدعى تحت القفل. يكتب state/key_groups.json ذرياً (ببصمة sha256 — لا تُكتب المفاتيح الخام أبداً)."""
         path = getattr(Config, "KEY_GROUPS_FILE", None)
         if not path or store is None:
             return
+        groups_out = dict(self._auto_group_hashes)
+        for k_str, grp in self._auto_groups.items():
+            if k_str and grp:
+                groups_out[self._key_hash(k_str)] = grp
         try:
             store.atomic_write_json(path, {
-                "groups": dict(self._auto_groups),
+                "groups": groups_out,
                 "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             })
         except Exception as e:  # pragma: no cover
@@ -337,9 +376,13 @@ class KeyManager:
             group = g_other if not g_other.startswith("key:") else f"auto-{other.get('id', '?')}"
             # ندمج كل أعضاء مجموعة المفتاح الحالي في مجموعة الآخر
             for member in self.siblings(key_entry):
-                self._auto_groups[member.get("key") or ""] = group
-            if g_other.startswith("key:"):
+                mk = member.get("key") or ""
+                if mk:
+                    self._auto_groups[mk] = group
+                    self._auto_group_hashes[self._key_hash(mk)] = group
+            if g_other.startswith("key:") and other_str:
                 self._auto_groups[other_str] = group
+                self._auto_group_hashes[self._key_hash(other_str)] = group
             merged = group
             print(f"🔗 اكتشاف تلقائي: [{key_entry.get('name')}] و[{other.get('name')}] نفدا يومياً معاً على {model} → مجموعة {group}")
         log.append((now, key_str))

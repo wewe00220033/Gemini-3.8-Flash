@@ -454,9 +454,11 @@ def test_process_job_simple_mode_footer(bot, S, monkeypatch):
 
 
 def test_polish_reads_replied_document(bot, monkeypatch):
+    import delivery
     tb, sent = bot
     monkeypatch.setattr(tb, "_download_file", lambda t, f: "نص من الملف الطويل".encode("utf-8"))
     tb.handle_text("T", "1", {"message_id": 3, "reply_to_message": {"document": {"file_id": "d1"}}}, "/polish")
+    assert delivery.wait_background_threads(timeout=3.0) == 0
     assert any("[منظم-اختبار] نص من الملف الطويل" in t for t in _texts(sent))
 
 

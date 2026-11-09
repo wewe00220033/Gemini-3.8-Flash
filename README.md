@@ -76,7 +76,7 @@
    - 🎛️ **`/panel`** (أو `/settings` أو «لوحة»): شجرة Inline Keyboards بكل ما تفعله الأوامر النصية — الحالة / المفاتيح / وضع الإرسال والترويسة / الدور / الجلسات / القاموس / السياق / السجلات / النسخ / الطبيب / الإعدادات. **كل زر = أمر نصي موجود** (جدول `panel.COMMAND_PARITY` واختبار Buttons = Commands)؛ لا منطق جديد خلف الأزرار. التنقل يعدّل **نفس الرسالة** (`editMessageText`) بلا رسائل جديدة؛ القوائم الأطول من `PANEL_PAGE_SIZE=5` مرقّمة (◀️ ▶️ 🏠).
    - 🔒 **قيود تليجرام مفروضة بالكود:** `callback_data` ASCII مضغوط ≤ 64 بايت (`k:v:2`, `g:d:g_004`…) — `panel.btn()` يرفض التجاوز، واختبار يمسح كل الشاشات؛ نص الزر ≤ 20 حرفاً؛ `answerCallbackQuery` لكل callback **دائماً حتى عند الخطأ** (لا «ساعة رملية» معلّقة)؛ الحذف (مفتاح/دور/كلمة) و`backup_secrets` بتأكيد مزدوج داخل نفس الرسالة؛ `allowed_updates=["message","callback_query"]`.
    - ⌨️ **FSM خفيفة لإدخال النص** (`fsm.py`، حالة واحدة في الذاكرة): إضافة مفتاح، كلمة قاموس (لفظ ثم معنى)، إعادة تسمية جلسة/مفتاح، دور جديد، قيمة إعداد. **`/cancel`** أو زر ❌ يلغي فوراً؛ `FSM_TTL_SECONDS=300` ثم تُمسح بإشعار واحد؛ **الفويس أثناء الانتظار يُفرَّغ عادياً ولا يكسر الحالة**؛ أي أمر آخر `/…` يلغيها بصمت.
-   - ⚙️ **`/set <key> <value>`** (11 §4) بقائمة بيضاء فقط: `delivery_mode, role, context_mode, transcript_header_target, log_retention_days, panel_page_size, retry_budget_seconds, model_503_key_hops, backup_weekly_day, notify_on_start, progress_after_seconds` — فحص النوع والمدى، رفض أي مفتاح خارجها (خصوصاً keys/token/DATA_DIR/models/workers)، رد `✅ key: قديم → جديد`، حفظ في `settings.json` (طبقة فوق افتراضيات `Config`) ويُعاد تطبيقه عند الإقلاع. `/set` بلا وسائط يعرض القيم الحالية.
+   - ⚙️ **`/set <key> <value>`** (11 §4) بقائمة بيضاء فقط: `delivery_mode, compare_mode, role, context_mode, transcript_header_target, log_retention_days, panel_page_size, retry_budget_seconds, model_503_key_hops, backup_weekly_day, notify_on_start, progress_after_seconds, local_polish_timeout` — فحص النوع والمدى، رفض أي مفتاح خارجها (خصوصاً keys/token/DATA_DIR/models/workers)، رد `✅ key: قديم → جديد`، حفظ في `settings.json` (طبقة فوق افتراضيات `Config`) ويُعاد تطبيقه عند الإقلاع. `/set` بلا وسائط يعرض القيم الحالية.
    - 📋 **`setMyCommands` عند الإقلاع** (11 §5): 12 أمراً في زر Menu مرتبة للأولوية اليومية والجلسات (`new_session end panel ask chat plan sessions status mode roles cancel doctor`)؛ باقي أوامر الصيانة (`help logs backup glossary`) متاحة نصياً وعبر `/panel`؛ فشل النداء لا يوقف البوت؛ `SET_MY_COMMANDS=0` يعطّله.
    - 🧾 **كل تغيير من اللوحة يمر عبر الأمر النصي نفسه** → نفس سطر `logs/audit.log` بالفاعل `telegram`.
 7f. **المساعد التفاعلي وتكافؤ الويب (المرحلة 7 — 12 §1–§2 · 13 §1/§3):**
@@ -193,7 +193,7 @@ python main.py
 ## 🧪 الاختبارات والتطوير
 ```bash
 pip install -r requirements-dev.txt
-python -m pytest        # 572 اختباراً (بلا شبكة: FakeTelegram + FakeClock + stub للمساعد النصي والتسمية)
+python -m pytest        # 596 اختباراً (بلا شبكة: FakeTelegram + FakeClock + stub للمساعد النصي والتسمية)
 python -m pyflakes *.py
 ```
 CI يعمل تلقائياً على كل PR و Push (Python 3.10 و 3.12 بنجاح 100%). الاختبارات تعمل على Linux و Windows.

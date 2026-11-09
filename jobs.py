@@ -25,6 +25,12 @@ import store
 TERMINAL = ("sent", "failed", "skipped")
 _lock = threading.RLock()
 _seq = 0   # ترتيب الكتابة داخل العملية — ts قد يتساوى بين سطرين متتاليين
+_state_cache = {"sig": None, "jobs": None}
+
+
+def _invalidate_cache():
+    _state_cache["sig"] = None
+    _state_cache["jobs"] = None
 
 
 def _path():
@@ -48,6 +54,7 @@ def record(job_id, event, **fields):
             row["seq"] = _seq
             _ensure_dir()
             store.append_json_line(_path(), row)
+            _invalidate_cache()
         return True
     except Exception as e:
         print(f"⚠️ jobs: تعذر تسجيل {event} لـ {job_id}: {type(e).__name__}: {e}")
@@ -56,12 +63,21 @@ def record(job_id, event, **fields):
 
 def load_state():
     """{job_id: {..آخر الحقول المتراكمة.., "state": آخر حدث, "first_ts", "last_ts", "events": [..]}}"""
-    jobs = {}
-    if not os.path.exists(_path()):
-        return jobs
-    bad = []
+    path = _path()
     with _lock:
-        rows = store.read_json_lines(_path(), on_bad_line=lambda ln, text, err: bad.append(ln))
+        if not os.path.exists(path):
+            _invalidate_cache()
+            return {}
+        try:
+            st = os.stat(path)
+            sig = (os.path.abspath(path), st.st_mtime_ns, st.st_size)
+        except OSError:
+            sig = None
+        if sig and _state_cache.get("sig") == sig and _state_cache.get("jobs") is not None:
+            return {k: dict(v, events=list(v["events"])) for k, v in _state_cache["jobs"].items()}
+        bad = []
+        rows = store.read_json_lines(path, on_bad_line=lambda ln, text, err: bad.append(ln))
+    jobs = {}
     order = 0
     for row in rows:
         jid = row.get("job_id")
@@ -78,7 +94,17 @@ def load_state():
         j["events"].append(ev)
     if bad:
         print(f"⚠️ jobs: {len(bad)} سطر تالف في jobs.ndjson تم تجاهله")
-    return jobs
+    if sig:
+        with _lock:
+            try:
+                st2 = os.stat(path)
+                sig2 = (os.path.abspath(path), st2.st_mtime_ns, st2.st_size)
+            except OSError:
+                sig2 = None
+            if sig2 == sig:
+                _state_cache["sig"] = sig
+                _state_cache["jobs"] = jobs
+    return {k: dict(v, events=list(v["events"])) for k, v in jobs.items()}
 
 
 def events_of(job_id):
@@ -163,4 +189,5 @@ def compact_if_needed(keep=None):
             row.update({"ts": j.get("last_ts"), "event": j.get("state"), "compacted": True})
             lines.append(json.dumps(row, ensure_ascii=False))
         store.atomic_write_text(_path(), "\n".join(lines) + "\n")
+        _invalidate_cache()
         return True

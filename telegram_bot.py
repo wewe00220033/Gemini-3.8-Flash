@@ -111,15 +111,36 @@ AUDIO_EXTS = (".ogg", ".oga", ".opus", ".mp3", ".m4a", ".mp4", ".wav", ".aac", "
 # ======================================================================
 # إرسال آمن (P28)
 # ======================================================================
+def _utf16_len(s):
+    """طول النص بوحدات UTF-16 code units (المقياس الرسمي لحد تليجرام 4096)."""
+    return len(s.encode("utf-16-le")) // 2 if s else 0
+
+
+def _utf16_prefix_idx(s, budget):
+    """أكبر فهرس حرفي i بحيث _utf16_len(s[:i]) <= budget (لا يقطع داخل surrogate pair)."""
+    if not s or budget <= 0:
+        return 0
+    if _utf16_len(s) <= budget:
+        return len(s)
+    units = 0
+    for i, ch in enumerate(s):
+        u = 2 if ord(ch) > 0xFFFF else 1
+        if units + u > budget:
+            return i
+        units += u
+    return len(s)
+
+
 def _chunk_text(text, limit):
-    """يقسم النص لقطع ≤ limit مع تفضيل القطع عند أسطر/مسافات."""
+    """يقسم النص لقطع ≤ limit (بـ UTF-16 code units) مع تفضيل القطع عند أسطر/مسافات."""
     chunks = []
-    while len(text) > limit:
-        cut = text.rfind("\n", 0, limit)
-        if cut < limit // 2:
-            cut = text.rfind(" ", 0, limit)
-        if cut < limit // 2:
-            cut = limit
+    while _utf16_len(text) > limit:
+        max_idx = max(1, _utf16_prefix_idx(text, limit))
+        cut = text.rfind("\n", 0, max_idx)
+        if cut < max_idx // 2:
+            cut = text.rfind(" ", 0, max_idx)
+        if cut < max_idx // 2:
+            cut = max_idx
         chunks.append(text[:cut])
         text = text[cut:].lstrip()
     if text:
@@ -132,36 +153,52 @@ _TAG_RE = re.compile(r"</?([a-zA-Z][a-zA-Z0-9]*)(?:\s+[^<>]*)?>")
 _VOID_TAGS = {"br", "hr", "img", "code"}
 
 
+def _pick_pua_sentinel(text):
+    """يختار محرفاً خاصاً (PUA) غير موجود في النص لمنع اصطدام الـ placeholder بأي محتوى (كـ \\x00)."""
+    for code in range(0xE000, 0xF900):
+        ch = chr(code)
+        if ch not in text:
+            return ch
+    sentinel = "\uffff"
+    while sentinel in text:
+        sentinel += "\uffff"
+    return sentinel
+
+
 def _html_chunks(text, limit):
     """
-    يقسم HTML جاهزاً لقطع ≤ limit **دون قطع أي وسم في منتصفه** ويوازن الوسوم المفتوحة.
-
-    المشكلة التي يحلها: `_chunk_text` يقطع عند حد الطول، فقد يقع الحد بين '<' و'>' فيتفتّت
-    الوسم، أو تبقى '<pre>' مفتوحة في قطعة و'</pre>' في أخرى — فيردّ تليجرام 400 ويضيع
-    التنسيق (كتلة النسخ بلمسة واحدة). هنا:
-      1. نُخزّن كل وسم مؤقتاً فلا يمكن أن يقع القطع داخله.
-      2. نُغلق الوسوم المفتوحة في نهاية كل قطعة ونعيد فتحها في بداية التالية.
-      3. المحتوى النصي يبقى حرفياً كما هو (لا lstrip) حفاظاً على أمانة النص عند النسخ.
+    يقسم HTML جاهزاً لقطع ≤ limit بوحدات UTF-16 **دون قطع أي وسم أو placeholder في منتصفه** ويوازن الوسوم المفتوحة.
     """
-    if len(text) <= limit:
+    if _utf16_len(text) <= limit:
         return [text]
 
+    sentinel = _pick_pua_sentinel(text)
+    marker_re = re.compile(re.escape(sentinel) + r"(\d+)" + re.escape(sentinel))
     tags = []
 
     def _stash(m):
         tags.append(m.group(0))
-        return "\x00%d\x00" % (len(tags) - 1)
+        return f"{sentinel}{len(tags) - 1}{sentinel}"
 
     safe = _TAG_RE.sub(_stash, text)
 
     def _split(budget):
         raw, rest = [], safe
-        while len(rest) > budget:
-            cut = rest.rfind("\n", 0, budget)
-            if cut < budget // 2:
-                cut = rest.rfind(" ", 0, budget)
-            if cut < budget // 2:
-                cut = budget
+        while _utf16_len(rest) > budget:
+            max_idx = max(1, _utf16_prefix_idx(rest, budget))
+            cut = rest.rfind("\n", 0, max_idx)
+            if cut < max_idx // 2:
+                cut = rest.rfind(" ", 0, max_idx)
+            if cut < max_idx // 2:
+                cut = max_idx
+            # حماية placeholder من القطع في منتصفه
+            for m in marker_re.finditer(rest):
+                if m.start() < cut < m.end():
+                    cut = m.start() if m.start() > 0 else m.end()
+                    break
+                if m.start() >= cut:
+                    break
+            cut = max(1, cut)
             raw.append(rest[:cut])
             rest = rest[cut:]
         if rest:
@@ -171,7 +208,7 @@ def _html_chunks(text, limit):
     def _build(raw_chunks):
         out, carry = [], []
         for raw in raw_chunks:
-            body = re.sub(r"\x00(\d+)\x00", lambda m: tags[int(m.group(1))], raw)
+            body = marker_re.sub(lambda m: tags[int(m.group(1))], raw)
             stack = list(carry)
             for m in _TAG_RE.finditer(body):
                 closing, name = m.group(0).startswith("</"), m.group(1).lower()
@@ -190,9 +227,9 @@ def _html_chunks(text, limit):
 
     budget = limit
     result = _build(_split(budget))
-    # إعادة الفتح/الإغلاق تضيف طولاً — نقلّص الميزانية بقدر التجاوز وأعد المحاولة
+    # إعادة الفتح/الإغلاق تضيف طولاً — نقلّص الميزانية بقدر التجاوز بوحدات UTF-16 وأعد المحاولة
     for _ in range(5):
-        over = max((len(c) for c in result), default=0)
+        over = max((_utf16_len(c) for c in result), default=0)
         if over <= limit:
             break
         budget -= (over - limit) + 8
@@ -209,14 +246,16 @@ def _tg_post(token, method, payload, timeout=None):
 def send_telegram_message(token, chat_id, text, reply_to_id=None, parse_mode=None):
     """
     يرسل نصاً بأمان:
-    - يقسمه إلى رسائل ≤ TELEGRAM_MAX_MSG حرف.
-    - لو parse_mode فشل (400) يعيد الإرسال كنص خام حتى لا يضيع الرد أبداً.
+    - يقسمه إلى رسائل ≤ TELEGRAM_MAX_MSG (UTF-16) مع توازن وسوم HTML عبر `_html_chunks`.
+    - يحترم HTTP 429 (`retry_after`) بإعادة محاولة واحدة قبل التراجع للنص العادي.
+    - لو parse_mode فشل بأخطاء التنسيق يعيد الإرسال كنص خام حتى لا يضيع الرد أبداً.
     يرجع True لو وصلت كل القطع.
     """
     ok_all = True
     # الحد يُحسب على النص بعد التنسيق، لذا نقسم بهامش
     limit = Config.TELEGRAM_MAX_MSG - 50 if parse_mode else Config.TELEGRAM_MAX_MSG
-    for i, chunk in enumerate(_chunk_text(text, limit)):
+    chunks = _html_chunks(text, limit) if parse_mode == "HTML" else _chunk_text(text, limit)
+    for i, chunk in enumerate(chunks):
         payload = {"chat_id": chat_id, "text": chunk}
         if parse_mode:
             payload["parse_mode"] = parse_mode
@@ -224,14 +263,18 @@ def send_telegram_message(token, chat_id, text, reply_to_id=None, parse_mode=Non
             payload["reply_to_message_id"] = reply_to_id
         try:
             resp = _tg_post(token, "sendMessage", payload)
-            if resp.status_code != 200 and parse_mode:
-                # fallback: نص خام بدون تنسيق
+            if getattr(resp, "status_code", None) == 429:
+                delay = min(10.0, max(0.5, _extract_retry_after(resp)))
+                time.sleep(delay)
+                resp = _tg_post(token, "sendMessage", payload)
+            if getattr(resp, "status_code", None) not in (200, 429) and parse_mode:
+                # fallback: نص خام بدون تنسيق عند فشل الكيانات فقط
                 payload.pop("parse_mode", None)
                 payload["text"] = html.unescape(chunk) if parse_mode == "HTML" else chunk
                 resp = _tg_post(token, "sendMessage", payload)
-            if resp.status_code != 200:
+            if getattr(resp, "status_code", None) != 200:
                 ok_all = False
-                print(f"⚠️ تليجرام رفض الرسالة ({resp.status_code}): {resp.text[:120]}")
+                print(f"⚠️ تليجرام رفض الرسالة ({getattr(resp, 'status_code', '?')}): {getattr(resp, 'text', '')[:120]}")
         except Exception as e:
             ok_all = False
             print(f"⚠️ فشل إرسال رسالة لتليجرام: {e}")
@@ -288,17 +331,21 @@ def send_html_get_id(token, chat_id, text, reply_to_id=None):
             payload["reply_to_message_id"] = reply_to_id
         try:
             resp = _tg_post(token, "sendMessage", payload)
-            if resp.status_code != 200:
+            if getattr(resp, "status_code", None) == 429:
+                delay = min(10.0, max(0.5, _extract_retry_after(resp)))
+                time.sleep(delay)
+                resp = _tg_post(token, "sendMessage", payload)
+            if getattr(resp, "status_code", None) not in (200, 429):
                 payload.pop("parse_mode", None)
                 payload["text"] = html.unescape(chunk)
                 resp = _tg_post(token, "sendMessage", payload)
-            if resp.status_code == 200 and first_id is None:
+            if getattr(resp, "status_code", None) == 200 and first_id is None:
                 try:
                     first_id = resp.json().get("result", {}).get("message_id")
                 except Exception:
                     first_id = None
-            elif resp.status_code != 200:
-                print(f"⚠️ تليجرام رفض الرسالة ({resp.status_code}): {resp.text[:120]}")
+            elif getattr(resp, "status_code", None) != 200:
+                print(f"⚠️ تليجرام رفض الرسالة ({getattr(resp, 'status_code', '?')}): {getattr(resp, 'text', '')[:120]}")
         except Exception as e:
             print(f"⚠️ فشل إرسال رسالة لتليجرام: {e}")
     return first_id
@@ -362,9 +409,15 @@ def edit_telegram_message(token, chat_id, message_id, text, parse_mode="HTML"):
 
 def make_sender(token, chat_id, reaction_msg_id=None):
     """Sender لخط الإنتاج (delivery.deliver) فوق دوال تليجرام الحقيقية."""
+    def _send_doc_compat(fn, data, mime, caption, reply_to):
+        try:
+            return _send_document(token, chat_id, fn, data, mime, caption, reply_to, notify_on_error=False)
+        except TypeError:
+            return _send_document(token, chat_id, fn, data, mime, caption, reply_to)
+
     return delivery.Sender(
         send_text=lambda text, reply_to, parse_mode=None: send_html_get_id(token, chat_id, text, reply_to),
-        send_document=lambda fn, data, mime, caption, reply_to: _send_document(token, chat_id, fn, data, mime, caption, reply_to),
+        send_document=_send_doc_compat,
         send_action=lambda action="typing": send_chat_action(token, chat_id, action),
         set_reaction=(lambda emoji: set_reaction(token, chat_id, reaction_msg_id, emoji)) if reaction_msg_id else None,
         edit_text=lambda message_id, text, parse_mode="HTML": edit_telegram_message(token, chat_id, message_id, text, parse_mode),
@@ -525,6 +578,81 @@ def _runtime_token():
     return token
 
 
+def _make_delivery_tracker(job_id, base_meta):
+    """ينسّق تسجيل حالة التسليم في jobs.ndjson بين worker process_job وخيط السبك/الإنقاذ الخلفي دون تكرار."""
+    state_lock = threading.Lock()
+    state_box = {"draft_recorded": False, "settled": False, "res": None}
+
+    def _on_polished(approved_text, is_golden=False, synth_elapsed=None):
+        with state_lock:
+            res = state_box.get("res") or {}
+            if is_golden or res.get("_synth_recorded"):
+                state_box["settled"] = True
+                return
+            if state_box["draft_recorded"] and not state_box["settled"]:
+                state_box["settled"] = True
+                fields = dict(base_meta)
+                if res.get("mode"):
+                    fields["mode"] = res["mode"]
+                if res.get("raw") is not None:
+                    fields["text"] = str(res["raw"])[:16000]
+                jobs.record(
+                    job_id,
+                    "sent",
+                    polished=True,
+                    polished_text=str(approved_text)[:16000],
+                    **fields,
+                )
+
+    def _finalize(res):
+        ok = bool(res.get("raw_msg_id") or res.get("polished_msg_id"))
+        _rlock = res.get("_lock")
+
+        def _commit():
+            with state_lock:
+                state_box["res"] = res
+                if res.get("_synth_recorded") or state_box["settled"]:
+                    return
+                if res.get("_rescue_pending") and not res.get("raw_msg_id"):
+                    return
+                if ok:
+                    ct = res.get("compare_thread")
+                    is_draft = bool(ct is not None and ct.is_alive())
+                    _pol = res.get("polished")
+                    fields = dict(base_meta)
+                    fields["mode"] = res.get("mode")
+                    if res.get("raw") is not None:
+                        fields["text"] = str(res["raw"])[:16000]
+                    jobs.record(
+                        job_id,
+                        "sent",
+                        polished=bool(_pol),
+                        polished_text=(_pol or "")[:16000] or None,
+                        draft=(True if is_draft else None),
+                        **fields,
+                    )
+                    state_box["draft_recorded"] = is_draft
+                    if not is_draft:
+                        state_box["settled"] = True
+                else:
+                    jobs.record(
+                        job_id,
+                        "failed",
+                        error="send failed (archived — /last)",
+                        model=base_meta.get("model"),
+                        dedup_of=base_meta.get("dedup_of"),
+                    )
+                    state_box["settled"] = True
+
+        if _rlock:
+            with _rlock:
+                _commit()
+        else:
+            _commit()
+
+    return _on_polished, _finalize
+
+
 def process_job(job):
     """
     معالج الطابور (يعمل في خيط transcribe-N). يرفع DeferredError ليؤجل الطابور بدل الفشل.
@@ -539,8 +667,8 @@ def process_job(job):
         # مرحلة 3: الويب يمر بالقاموس (هدف الخام) ويُؤرشف في ALL.md مثل تليجرام — بلا تنظيم (توفير حصة flash-lite)
         text, archived, polished, meta = delivery.prepare_for_web(text, model=model, key_name=key_name, info=info)
         jobs.record(job.job_id, "sent", model=model, key=str(key_name), elapsed=info.get("elapsed"),
-                    text=text[:2000], archived=archived, polished=bool(polished),
-                    polished_text=(polished or "")[:2000] or None, source="web", **_session_fields())
+                    text=text[:16000], archived=archived, polished=bool(polished),
+                    polished_text=(polished or "")[:16000] or None, source="web", **_session_fields())
         STATE["processed"] += 1
         return {"text": text, "model": model, "key_name": key_name, "info": info, "archived": archived,
                 "polished": polished, "role": meta["role"], "session": meta["session"], "polish_error": meta["polish_error"]}
@@ -555,23 +683,20 @@ def process_job(job):
         c_info = {"elapsed": cached.get("elapsed")}
         cached_polished = cached.get("polished_text")
         polish_fn = (lambda raw, role, gl: (cached_polished, None)) if cached_polished else None
+        dedup_meta = {
+            "dedup_of": cached.get("job_id"),
+            "text": cached["text"][:16000],
+            "model": cached.get("model"),
+            "key": cached.get("key"),
+            "mode": settings.delivery_mode(),
+            **_session_fields(),
+        }
+        on_pol_cb, finalize_dedup = _make_delivery_tracker(job.job_id, dedup_meta)
         res = delivery.deliver(cached["text"], c_model, c_key, c_info, make_sender(token, chat_id, reaction_msg_id=reply_to), reply_to_id=reply_to,
                                polish_fn=polish_fn, footer_html=_footer(c_model, c_key, c_info) + " · ♻️ مكرر",
-                               archive_entry=False, job_id=job.job_id)
-        _rlock = res.get("_lock")
-
-        def _record_dedup():
-            _pol = res["polished"]
-            jobs.record(job.job_id, "sent", dedup_of=cached.get("job_id"), text=cached["text"][:2000],
-                        model=cached.get("model"), key=cached.get("key"), mode=res["mode"],
-                        polished=bool(_pol), polished_text=(_pol or "")[:2000] or None,
-                        **_session_fields())
-
-        if _rlock:
-            with _rlock:
-                _record_dedup()
-        else:
-            _record_dedup()
+                               archive_entry=False, job_id=job.job_id, on_polished=on_pol_cb,
+                               disable_compare=bool(cached_polished), job_meta=dedup_meta)
+        finalize_dedup(res)
         if QUEUE:
             QUEUE.stats["deduped"] += 1
         return {"text": cached["text"], "dedup": True, "polished": res["polished"]}
@@ -596,33 +721,25 @@ def process_job(job):
     if accepted:
         print(f"📛 اعتُمد اسم الجلسة صامتاً: «{accepted}»")
     # المرحلة 3: قاموس → أرشفة (قبل الإرسال) → الخام → المنظم (07)
+    base_meta = {
+        "model": model,
+        "key": str(key_name),
+        "elapsed": info.get("elapsed"),
+        "text": (text or "")[:16000],
+        "mode": settings.delivery_mode(),
+        **_session_fields(),
+    }
+    on_pol_cb, finalize_job = _make_delivery_tracker(job.job_id, base_meta)
     res = delivery.deliver(text, model, key_name, info, make_sender(token, chat_id, reaction_msg_id=reply_to), reply_to_id=reply_to,
                            footer_html=_footer(model, key_name, info) + _context_footer(info),
-                           job_id=job.job_id)
+                           job_id=job.job_id, on_polished=on_pol_cb, job_meta=base_meta)
     text = res["raw"]
     if res.get("title_suggestion"):
         send_telegram_message(token, chat_id,
                               f"📛 اسم مقترح للجلسة: «{res['title_suggestion']}»\n"
                               f"✅ يُعتمد تلقائياً مع الفويس القادم · ✏️ /rename_session <اسم> لتغييره · 🎲 /suggest_titles لبدائل · ❌ /reject_title لرفضه",
                               reply_to_id=res.get("raw_msg_id") or reply_to)
-    ok = bool(res["raw_msg_id"] or res["polished_msg_id"])
-    if ok:
-        _rlock = res.get("_lock")
-        if _rlock:
-            with _rlock:
-                _pol = res["polished"]
-                jobs.record(job.job_id, "sent", model=model, key=str(key_name), elapsed=info.get("elapsed"), text=text[:2000],
-                            polished=bool(_pol), mode=res["mode"],
-                            polished_text=(_pol or "")[:2000] or None,   # للمكرر: لا نداء flash-lite ثانٍ
-                            **_session_fields())
-        else:
-            _pol = res["polished"]
-            jobs.record(job.job_id, "sent", model=model, key=str(key_name), elapsed=info.get("elapsed"), text=text[:2000],
-                        polished=bool(_pol), mode=res["mode"],
-                        polished_text=(_pol or "")[:2000] or None,
-                        **_session_fields())
-    else:
-        jobs.record(job.job_id, "failed", error="send failed (archived — /last)", model=model)
+    finalize_job(res)
     if res["polish_error"]:
         print(f"⚠️ التنظيم: {res['polish_error']}")
     STATE["processed"] += 1
@@ -988,7 +1105,10 @@ def _dispatch_callback(token, chat_id, mid, data):
             return "✅"
         if act == "e":
             typ, rng, desc = panel.SET_WHITELIST.get(arg, (None, None, arg))
-            _fsm_prompt(token, chat_id, "await_set_value", {"key": arg}, f"⚙️ اكتب القيمة الجديدة لـ {desc} ({arg})" + (f" — المدى {rng[0]}–{rng[1]}:" if typ == "int" else ":"))
+            _fsm_prompt(
+                token, chat_id, "await_set_value", {"key": arg},
+                f"⚙️ اكتب القيمة الجديدة لـ {desc} ({arg})" + (f" — المدى {rng[0]}–{rng[1]}:" if typ in ("int", "float") else ":"),
+            )
             return ""
 
     return "زر غير معروف"
@@ -1404,7 +1524,7 @@ def _sessions_text():
 
 
 def _pipeline_text():
-    """سطر خط الإنتاج في /status (المرحلة 3): الدور، وضع الإرسال، البانر، حجم الأرشيف، القاموس، والمزود المحلي."""
+    """سطر خط الإنتاج في /status (المرحلة 3): الدور، وضع الإرسال، البانر، حجم الأرشيف، القاموس، والمزود المحلي والسبك."""
     r = prompts.get_role(settings.role()) or {}
     gl = glossary_mod.get_glossary()
     pend = sum(1 for e in gl.entries(False) if e.get("status") == "pending")
@@ -1414,8 +1534,16 @@ def _pipeline_text():
     if getattr(Config, "LOCAL_POLISH_CMD", ""):
         noop_s = f" · تخطي No-Op {st['local_noop']}" if st.get("local_noop") else ""
         local_info = f" | مزود محلي نشط (نجح {st.get('local_ok', 0)}/{st.get('local_calls', 0)}{noop_s})"
+    synth_info = ""
+    if st.get("synth_calls") or st.get("synth_ok") or st.get("synth_fail"):
+        err_s = f" ({str(st.get('synth_last_error'))[:40]})" if st.get("synth_fail") and st.get("synth_last_error") else ""
+        fail_s = f" · فشل {st['synth_fail']}{err_s}" if st.get("synth_fail") else ""
+        synth_info = f" | سبك ذهبي {st.get('synth_ok', 0)}/{st.get('synth_calls', 0)}{fail_s}"
+    elif getattr(Config, "LOCAL_POLISH_CMD", "") and getattr(Config, "COMPARE_MODE", "synthesizer") == "synthesizer":
+        synth_info = f" | سبك ذهبي {st.get('synth_ok', 0)}/{st.get('synth_calls', 0)}"
     return (f"🏭 خط الإنتاج: دور {settings.role()} ({r.get('name', '?')}) | إرسال {settings.delivery_mode()} | بانر {settings.header_target()} | "
-            f"أرشيف {archive.count_entries()} تفريغ | قاموس {len(gl.entries(False))} مدخل" + (f" ({pend} معلَّق — /glossary)" if pend else "") + local_info)
+            f"أرشيف {archive.count_entries()} تفريغ | قاموس {len(gl.entries(False))} مدخل"
+            + (f" ({pend} معلَّق — /glossary)" if pend else "") + local_info + synth_info)
 
 
 def _models_state_text():
@@ -1434,15 +1562,24 @@ def _models_state_text():
     return "\n".join(lines)
 
 
-def _send_document(token, chat_id, filename, data_bytes, mime, caption, reply_to_id):
+def _send_document(token, chat_id, filename, data_bytes, mime, caption, reply_to_id, notify_on_error=True):
     resp = _http_post(
         _api(token, "sendDocument"),
         data={"chat_id": chat_id, "caption": caption, "reply_to_message_id": reply_to_id},
         files={"document": (filename, data_bytes, mime)},
         timeout=_tg_timeout(Config.TELEGRAM_DOWNLOAD_TIMEOUT),
     )
-    if resp.status_code != 200:
-        send_telegram_message(token, chat_id, f"⚠️ فشل إرسال الملف ({resp.status_code}).", reply_to_id=reply_to_id)
+    if getattr(resp, "status_code", None) == 429:
+        delay = min(10.0, max(0.5, _extract_retry_after(resp)))
+        time.sleep(delay)
+        resp = _http_post(
+            _api(token, "sendDocument"),
+            data={"chat_id": chat_id, "caption": caption, "reply_to_message_id": reply_to_id},
+            files={"document": (filename, data_bytes, mime)},
+            timeout=_tg_timeout(Config.TELEGRAM_DOWNLOAD_TIMEOUT),
+        )
+    if getattr(resp, "status_code", None) != 200 and notify_on_error:
+        send_telegram_message(token, chat_id, f"⚠️ فشل إرسال الملف ({getattr(resp, 'status_code', '?')}).", reply_to_id=reply_to_id)
     return resp
 
 
@@ -1809,18 +1946,32 @@ def handle_text(token, chat_id, msg, msg_text):
             try:
                 src = _download_file(token, doc["file_id"]).decode("utf-8", errors="replace")
             except Exception as e:
-                send_telegram_message(token, chat_id, f"⚠️ تعذر قراءة الملف المرفق ({e}).", reply_to_id=msg["message_id"])
+                send_telegram_message(token, chat_id, f"⚠️ تعذر قراءة الملف المرفق ({logkit.redact(str(e))}).", reply_to_id=msg["message_id"])
                 return
         src = _strip_banner(src)
         if not src.strip():
             send_telegram_message(token, chat_id, "رُدّ بـ /polish على رسالة تفريغ أو ملف .md (أو اكتب النص بعد الأمر).", reply_to_id=msg["message_id"])
             return
-        import text_assist
-        polished, reason = text_assist.polish(src, settings.effective_role(), glossary_mod.get_glossary())
-        if polished:
-            send_telegram_message(token, chat_id, delivery.polished_message_html(polished, settings.effective_role()), reply_to_id=msg["message_id"], parse_mode="HTML")
+        role_id = settings.effective_role()
+        gl = glossary_mod.get_glossary()
+        reply_id = msg["message_id"]
+
+        def _work():
+            try:
+                import text_assist
+                polished, reason = text_assist.polish(src, role_id, gl)
+                if polished:
+                    send_telegram_message(token, chat_id, delivery.polished_message_html(polished, role_id), reply_to_id=reply_id, parse_mode="HTML")
+                else:
+                    send_telegram_message(token, chat_id, f"⚠️ تعذر التنظيم الآن ({logkit.redact(str(reason or ''))}).", reply_to_id=reply_id)
+            except Exception as e:
+                STATE["last_error"] = f"polish: {logkit.redact(str(e))}"
+                send_telegram_message(token, chat_id, f"⚠️ تعذر التنظيم الآن ({type(e).__name__}).", reply_to_id=reply_id)
+
+        if getattr(Config, "PLAN_SYNC_FOR_TESTS", False):
+            _work()
         else:
-            send_telegram_message(token, chat_id, f"⚠️ تعذر التنظيم الآن ({reason}).", reply_to_id=msg["message_id"])
+            delivery._start_bg_thread(_work)
 
     elif cmd in ("/project_group", "/group"):
         # مرحلة 2 (04 §2.4): تثبيت مجموعة المشروع صراحةً في keys.json
@@ -2142,6 +2293,11 @@ def main(stop_event=None, pool=None, poll_params=None):
                     STATE["stopped_reason"] = "401"
                     print("🛑 401 Unauthorized: توكن تليجرام باطل — إيقاف الـ poller (صحّح TELEGRAM_BOT_TOKEN وأعد التشغيل).")
                     return
+                if res.status_code == 429:
+                    delay = min(60.0, max(2.0, _extract_retry_after(res)))
+                    STATE["last_error"] = f"getUpdates 429 (retry_after={delay:.1f}s)"
+                    _wait(stop_event, delay)
+                    continue
                 if res.status_code != 200:
                     STATE["last_error"] = f"getUpdates {res.status_code}"
                     _wait(stop_event, 2)

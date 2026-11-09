@@ -3,8 +3,8 @@
 **المشروع:** منظومة التفريغ الصوتي الذكي (Gemini-3.8-Flash)  
 **الفرع النشط:** `A-test`  
 **الإصدار الحالي:** `2.0.0-phase7.1`  
-**حالة الاختبارات:** 504 اختبار ناجح بنسبة 100% (504 passed / 0 failed)  
-**آخر تحديث:** 2026-11-08  
+**حالة الاختبارات:** 596 اختباراً (595 passed / 1 skipped لصلاحيات POSIX على Windows / 0 failed)  
+**آخر تحديث:** 2026-11-09  
 
 ---
 
@@ -37,7 +37,7 @@
   تشغيل 5 وكلاء متخصصين (Hostile Critic, Pragmatic Tech Lead, Skeptical Architect, Details Auditor, Inventive Catalyst) والتوافق على بنية MVA الأبسط بدون تعقيد Router زائف.
 - [x] **[M7] تنفيذ وبرمجة المزود المحلي المستقل في الكود (Sprint 1-4):**  
   - إضافة `LOCAL_POLISH_CMD` و `LOCAL_POLISH_TIMEOUT` في `config.py` وتعميتها في `logkit.py`.
-  - تطبيق استدعاء `subprocess.run` في `text_assist.py` بترميز UTF-8 مع مهلة 8 ثوانٍ وقتل تلقائي للعمليات وتراجع فوري لـ Gemini.
+  - تطبيق استدعاء `subprocess.run` في `text_assist.py` بترميز UTF-8 مع مهلة قابلة للضبط (افتراضياً `180.0s`) وقتل تلقائي للعمليات وتراجع فوري لـ Gemini.
   - إضافة 5 اختبارات وحدة شاملة لكافة حالات النجاح والتراجع في `tests/test_phase4_polish.py`.
 - [x] **[M8] تقفيل ثغرات الـ Redaction والـ Observability (استجابة لتدقيق Arena.ai):**  
   - حجب وتعمية أي مسارات سرية من stderr عبر regex وتطهير `polish_error` في `delivery.py` و `text_assist.py`.
@@ -46,11 +46,15 @@
   - توثيق متغيرات المزود في `.env.example` وتطهير مسارات المستخدم.
   - حذف سطر Dockerfile من `02_التدقيق` للمطابقة التامة.
   - اجتياز 504 اختباراً بنسبة 100% خضراء (504 passed / 0 failed).
+- [x] **[M9] تطبيق إصلاحات تقرير التدقيق الموحد `EGM` (Wave 1 → Wave 3):**  
+  - **Wave 1 (أمن الويب والإقلاع):** فصل `_is_local()` عند `TRUST_PROXY=1`، رفض `Content-Length <= 0`، حماية `/api/add_key` بـ `rate_limited` وحجم أقصى وحجب `logkit.redact`، ضبط socket timeout، وتقديم `apply_persisted_overrides()` قبل `start_queue()` + إغلاق رشيق بالخيط/stop-file لـ Windows.
+  - **Wave 2 (محرك التسليم واتساق السجلات):** تفكيك `delivery.deliver()`، ترحيل وضع `merged` إلى `_replace_or_send()`، حماية `draft_mid=None` وفشل `send_document` في `_send_long()`، توحيد `_make_delivery_tracker` مع `on_polished`/`_synth_recorded`، إنقاذ الخام في `polished_only`، وإغلاق سباقات الأرشيف والجلسات عبر معرّف المدخل الصريح و`session_id`.
+  - **Wave 3 (صمود تليجرام والمزود المحلي والأداء):** دعم UTF-16 وتجنب NUL sentinel و429 `retry_after` في الإرسال والتحديث والاستقبال، إصلاح `===USER_INPUT===` في `local_provider_template.py`، تحسين كاشف No-Op بالتشابه وتحييد `smart_verbatim`، تشغيل `/polish` بالخلفية، دعم `float` لـ `local_polish_timeout`، رصد السبك في `/status` و`/doctor`، عزل `keys.json` التالف وتشفير `key_groups.json` بـ `sha256`، وكاش `jobs.load_state()`.
 
 ---
 
 ## 🎯 الحالة التشغيلية الحالية (Operational Status)
 
-- **المنظومة:** جاهزة ومستقرة تماماً على فرع `A-test`.
-- **الاختبارات:** 504 اختبار ناجح (100%).
-- **حزم النشر:** 43 ملفاً صافياً (666KB) خالية 100% من أي أسرار أو سكريبتات محلية.
+- **المنظومة:** جاهزة ومستقرة تماماً على فرع `A-test` بعد إغلاق جميع بنود Wave 1–Wave 3.
+- **الاختبارات:** 596 اختباراً (`595 passed`, `1 skipped` POSIX على Windows، `0 failed`) + 8/8 زوايا في `test_360_exhaustive.py`.
+- **حزم النشر:** 43 ملفاً صافياً (772KB) خالية 100% من أي أسرار أو سكريبتات محلية.

@@ -3,7 +3,7 @@
 نقطة الانطلاق الرئيسية الموحدة 360° (Master Unified Runner)
 - يشغل خادم الويب والواجهة الصوتية في خيط خلفي (Web Service)
 - يشغل بوت التليجرام في خيط خلفي (Telegram Bot)
-- Runtime: poller قابل لإعادة التشغيل (L1) + pool تفريغ مشترك + watchdog مستقل لا يلمس الشبكة (03b)
+- Runtime: poller قابل لإعادة التشغيل (L1) + الطابور الموحد voice_queue + watchdog مستقل لا يلمس الشبكة (03b)
 - SIGTERM/SIGINT → إيقاف رشيق: انتظار المهام الجارية ≤ SHUTDOWN_GRACE ثم خروج 0 (Pterodactyl Stop/Restart)
 - الخيط الرئيسي خامل: يراقب المراقب (watchdog) والويب فقط
 - Startup Ping: رسالة على تليجرام عند الإقلاع (تعرف لو الاستضافة عملت Restart)
@@ -18,7 +18,6 @@ import json
 import signal
 import logging
 import threading
-from concurrent.futures import ThreadPoolExecutor
 from config import Config
 from key_manager import key_manager
 import web_service
@@ -81,15 +80,14 @@ def _setup_logging():
 
 class Runtime:
     """
-    يملك خيوط النظام: poller (قابل لإعادة التشغيل L1)، pool التفريغ المشترك، watchdog، notifier.
+    يملك خيوط النظام: poller (قابل لإعادة التشغيل L1)، watchdog، notifier، بينما voice_queue يدير التفريغ.
     - `restart_poller()`: يضبط stop_event القديم (الـ poller القديم يخرج عند أول فرصة ويقتل Session خيطه)،
-      ثم يطلق خيطاً جديداً بـ stop_event جديد. الـ pool لا يُمس — المهام الجارية تكمل.
+      ثم يطلق خيطاً جديداً بـ stop_event جديد. الطابور لا يُمس — المهام الجارية تكمل.
     - `shutdown()`: إيقاف رشيق (03b الطبقة 0.5): stop_event → انتظار in_flight ≤ SHUTDOWN_GRACE → خروج 0.
     """
 
     def __init__(self, bot_token, chat_id):
         self.bot_token, self.chat_id = bot_token, chat_id
-        self.pool = ThreadPoolExecutor(max_workers=max(1, Config.BOT_WORKERS), thread_name_prefix="transcribe")
         self.poller_stop = None
         self.poller_thread = None
         self.global_stop = threading.Event()
@@ -106,7 +104,7 @@ class Runtime:
     def start_poller(self):
         with self._lock:
             self.poller_stop = threading.Event()
-            t = threading.Thread(target=telegram_bot.main, kwargs={"stop_event": self.poller_stop, "pool": self.pool},
+            t = threading.Thread(target=telegram_bot.main, kwargs={"stop_event": self.poller_stop},
                                  daemon=True, name=f"telegram-bot-{telegram_bot.STATE['poller_generation'] + 1}")
             t.start()
             self.poller_thread = t
@@ -166,9 +164,13 @@ class Runtime:
     def start_worker_beat(self):
         if not os.environ.get("SUPERVISED_CHILD"):
             return None
+        stop_file = os.environ.get("WORKER_STOP_FILE", "").strip()
 
         def _run():
             while not self._beat_stop.wait(Config.WORKER_BEAT_INTERVAL):
+                if stop_file and os.path.exists(stop_file):
+                    self.global_stop.set()
+                    break
                 supervisor.touch_beat(Config.WORKER_BEAT_FILE)
         supervisor.touch_beat(Config.WORKER_BEAT_FILE)
         self._beat_thread = threading.Thread(target=_run, daemon=True, name="worker-beat")
@@ -177,7 +179,7 @@ class Runtime:
 
     # ---- shutdown ----
     def shutdown(self, reason="SIGTERM"):
-        """إيقاف رشيق: يرجع عدد المهام التي لم تكتمل خلال المهلة (0 = نظيف)."""
+        """إيقاف رشيق: يرجع عدد المهام أو خيوط السبك التي لم تكتمل خلال المهلة (0 = نظيف)."""
         print(f"🛑 {reason}: إيقاف رشيق — لا أستقبل جديداً، أنتظر المهام الجارية ≤ {Config.SHUTDOWN_GRACE}ث...")
         self.global_stop.set()
         if self.poller_stop is not None:
@@ -193,10 +195,10 @@ class Runtime:
         telegram_bot.stop_queue(timeout=1)
         bg_left = 0
         if hasattr(delivery, "active_background_threads") and delivery.active_background_threads():
-            bg_wait = max(min(2.0, float(Config.SHUTDOWN_GRACE)), deadline - time.monotonic())
+            bg_cap = float(getattr(Config, "SHUTDOWN_BG_GRACE", 10.0))
+            bg_wait = max(min(bg_cap, float(Config.SHUTDOWN_GRACE)), deadline - time.monotonic())
             print(f"⏳ انتظار اكتمال خيوط التنظيم/السبك الخلفية (≤ {bg_wait:.1f}ث)...")
             bg_left = delivery.wait_background_threads(timeout=bg_wait)
-        self.pool.shutdown(wait=False, cancel_futures=True)
         if self.notifier is not None:
             self.notifier.stop(timeout=1)
         self._beat_stop.set()
@@ -204,7 +206,7 @@ class Runtime:
             print(f"⚠️ {left} مهمة جارية لم تكتمل + {max(0, pending - left)} في الانتظار + {bg_left} خيط سبك خلفي — مهام تليجرام ستُستأنف بعد الإقلاع من jobs.ndjson (P0).")
         else:
             print("👋 تم إيقاف المنظومة بنجاح (0 مهام معلقة).")
-        return left
+        return left + bg_left
 
     @staticmethod
     def _in_flight():
@@ -357,7 +359,12 @@ def _idle_loop(rt, web_t, bot_token, tick=1.0):
     next_check = time.monotonic() + period
     next_doctor = time.monotonic() + max(60, Config.DOCTOR_INTERVAL_MIN * 60) if Config.DOCTOR_INTERVAL_MIN > 0 else None
     web_restarts = 0
+    stop_file = os.environ.get("WORKER_STOP_FILE", "").strip()
     while not rt.global_stop.wait(tick):
+        if stop_file and os.path.exists(stop_file):
+            print("📨 إشارة إيقاف من المشرف (worker.stop) — بدء الإيقاف الرشيق")
+            rt.global_stop.set()
+            break
         if next_doctor is not None and time.monotonic() >= next_doctor:
             next_doctor = time.monotonic() + Config.DOCTOR_INTERVAL_MIN * 60
             _periodic_doctor(rt)
@@ -408,6 +415,14 @@ def main():
     except Exception as e:
         print(f"⚠️ تعذر تحميل circuit.json: {e} — نكمل بقواطع في الذاكرة فقط.")
 
+    # 11 §4: تجاوزات settings.json (/set) تُطبَّق على Config قبل بدء الويب والطابور واستئناف المهام
+    try:
+        n_over = panel.apply_persisted_overrides()
+        if n_over:
+            print(f"⚙️ طُبّق {n_over} تجاوز من settings.json")
+    except Exception as e:
+        print(f"⚠️ تجاوزات الإعدادات: {e}")
+
     # 1. خادم الويب — الربط بالمنفذ يتم هنا (في الخيط الرئيسي) كي يُكتشف فشل المنفذ فوراً لا بصمت (G27)
     web_t = None
     web_error = None
@@ -438,13 +453,6 @@ def main():
         telegram_bot.start_queue(resume=bool(bot_token))
     except Exception as e:
         print(f"⚠️ تعذر بدء الطابور الموحّد: {e}")
-    # 11 §4: تجاوزات settings.json (/set) تُطبَّق على Config قبل أي عمل
-    try:
-        n_over = panel.apply_persisted_overrides()
-        if n_over:
-            print(f"⚙️ طُبّق {n_over} تجاوز من settings.json")
-    except Exception as e:
-        print(f"⚠️ تجاوزات الإعدادات: {e}")
     if bot_token:
         telegram_bot.register_commands(bot_token)     # 11 §5
         rt.start_poller()

@@ -240,9 +240,12 @@ def test_deliver_merged_oversized_fallback(monkeypatch):
         assert t is not None
         t.join(timeout=3)
 
-        # لم يعدل الرسالة لتجنب تجاوز حد تليجرام، بل أرسل شلبي كرسالة/مستند مستقل
-        assert len(fs.edited_texts) == 0
-        # تم إرسال رسالة شلبي المستقلة
+        # تُغلق رسالة الانتظار أولاً دون حذف مسودة جيميني ثم يُرسل شلبي كرسالة/مستند مستقل
+        assert len(fs.edited_texts) == 1
+        assert "⏳" not in fs.edited_texts[0][1]
+        assert "جيميني عادي" in fs.edited_texts[0][1]
+        assert "نسخة شلبي أدناه" in fs.edited_texts[0][1]
+        # تم إرسال رسالة/ملف شلبي المستقلة
         assert len(fs.sent_texts) >= 3 or len(fs.docs) >= 1
     finally:
         settings.set_compare_mode(old)
@@ -574,9 +577,16 @@ def test_deliver_synthesizer_mid_none_graceful_fallback(monkeypatch):
     settings.set_compare_mode("synthesizer")
     try:
         class NoneSender(FakeSender):
+            def __init__(self):
+                super().__init__()
+                self.polished_init_failed = False
+
             def send_text(self, text, reply_to, parse_mode=None):
-                # أول رسالة ترجع None لمحاكاة فشل الإرسال الأولي
-                return None
+                # أول رسالة مؤقتة للسبك ترجع None لمحاكاة فشل الإرسال الأولي
+                if not self.polished_init_failed and "جاري توليد" in text:
+                    self.polished_init_failed = True
+                    return None
+                return super().send_text(text, reply_to, parse_mode=parse_mode)
 
         ns = NoneSender()
         monkeypatch.setattr(text_assist, "synthesize", lambda raw, g, s, **kw: ("النسخة الذهبية مع mid=None", None))
@@ -594,7 +604,10 @@ def test_deliver_synthesizer_mid_none_graceful_fallback(monkeypatch):
         t = res.get("compare_thread")
         assert t is not None
         t.join(timeout=3)
+        assert ns.polished_init_failed is True
         assert res["polished"] == "النسخة الذهبية مع mid=None"
+        assert any("النسخة الذهبية مع mid=None" in txt for _mid, txt, _rt, _pm in ns.sent_texts)
+        assert res.get("polished_msg_id") is not None
     finally:
         settings.set_compare_mode(old_mode)
 

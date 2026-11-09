@@ -74,7 +74,8 @@ def trace_text(job_id):
             if r.get("synth_golden"):
                 det = f"🏆 سبك ذهبي ({r.get('synth_elapsed', '?')}ث)".strip()
             else:
-                det = f"{'مكرر من ' + str(r.get('dedup_of')) if r.get('dedup_of') else ''} {r.get('mode') or ''} {'+منظم' if r.get('polished') else ''}".strip()
+                draft_tag = "(مسودة)" if r.get("draft") else ""
+                det = f"{draft_tag} {'مكرر من ' + str(r.get('dedup_of')) if r.get('dedup_of') else ''} {r.get('mode') or ''} {'+منظم' if r.get('polished') else ''}".strip()
         elif ev == "failed":
             det = str(r.get("error", ""))[:160]
         elif ev == "deferred":
@@ -367,6 +368,32 @@ def doctor_report(bot_state=None, queue=None, watchdog=None, now=None, check_tel
         txt = f"Python {platform.python_version()} · {sys.platform} · تشغيل منذ {up // 60 if up is not None else '?'} د" + (f" · العامل #{gen}" if gen else "") + wd
         return OK, txt
     add("العملية", _process)
+
+    # 12) التنظيم المحلي والسبك الذهبي
+    def _polish_synth():
+        import text_assist
+        st = text_assist.stats()
+        has_local = bool(getattr(Config, "LOCAL_POLISH_CMD", ""))
+        l_ok = st.get("local_ok", 0)
+        l_calls = st.get("local_calls", 0)
+        l_noop = st.get("local_noop", 0)
+        s_ok = st.get("synth_ok", 0)
+        s_calls = st.get("synth_calls", 0)
+        s_fail = st.get("synth_fail", 0)
+        parts = []
+        if has_local or l_calls:
+            noop_s = f" (No-Op {l_noop})" if l_noop else ""
+            parts.append(f"محلي {l_ok}/{l_calls}{noop_s}")
+        else:
+            parts.append("محلي غير مهيأ")
+        parts.append(f"سبك {s_ok}/{s_calls}" + (f" · فشل {s_fail}" if s_fail else ""))
+        if s_fail and st.get("synth_last_error"):
+            parts.append(f"آخر خطأ: {str(st['synth_last_error'])[:60]}")
+        txt = " · ".join(parts)
+        if s_calls > 0 and s_ok == 0 and s_fail > 0:
+            return WARN, txt
+        return OK, txt
+    add("التنظيم والسبك", _polish_synth)
 
     worst = OK
     for st, _ in results:

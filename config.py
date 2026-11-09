@@ -37,7 +37,8 @@ def _load_dotenv(path):
 
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-_load_dotenv(os.path.join(_SCRIPT_DIR, ".env"))
+if not os.environ.get("PYTEST_DISABLE_DOTENV"):
+    _load_dotenv(os.path.join(_SCRIPT_DIR, ".env"))
 
 
 class Config:
@@ -274,6 +275,7 @@ class Config:
     EMERGENCY_SHORT_POLL_INTERVAL = 2
     # إيقاف رشيق عند SIGTERM (Pterodactyl): انتظار المهام الجارية ≤ هذه الثواني ثم خروج 0
     SHUTDOWN_GRACE = int(os.environ.get("SHUTDOWN_GRACE", "20"))
+    SHUTDOWN_BG_GRACE = float(os.environ.get("SHUTDOWN_BG_GRACE", "10.0"))
 
     # --- الطبقة 4 (1c): Supervisor/Worker اختياري [قرار-مالك ج3] — SUPERVISED=0 افتراضياً ---
     SUPERVISED = os.environ.get("SUPERVISED", "0").strip() in ("1", "true", "True")
@@ -372,6 +374,9 @@ class Config:
     FEATURE_PLAN = os.environ.get("FEATURE_PLAN", "1") not in ("0", "false", "False", "")   # 13 §5: علم ميزة
     # الويب (13 §1): rate limit بالـ IP على /api/transcribe · توكن عبر cookie HttpOnly بعد ?token= مرة واحدة
     WEB_RATE_LIMIT_PER_MIN = int(os.environ.get("WEB_RATE_LIMIT_PER_MIN", "30"))
+    WEB_ADD_KEY_RATE_LIMIT_PER_MIN = int(os.environ.get("WEB_ADD_KEY_RATE_LIMIT_PER_MIN", "20"))
+    WEB_ADD_KEY_MAX_BYTES = int(os.environ.get("WEB_ADD_KEY_MAX_BYTES", str(64 * 1024)))
+    WEB_SOCKET_TIMEOUT = float(os.environ.get("WEB_SOCKET_TIMEOUT", "30.0"))
     WEB_COOKIE_NAME = "web_access"
     WEB_POLISH = os.environ.get("WEB_POLISH", "1") not in ("0", "false", "False", "")       # 13 §3: الويب يمر بالتنظيم أيضاً
 

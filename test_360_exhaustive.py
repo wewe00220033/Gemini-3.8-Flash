@@ -46,7 +46,7 @@ Config.KEYS_JSON_FILE = os.path.join(TEST_DIR, "keys.json")
 Config.SETTINGS_FILE = os.path.join(TEST_DIR, "settings.json")
 Config.GLOSSARY_FILE = os.path.join(TEST_DIR, "glossary.json")
 Config.ROLES_FILE = os.path.join(TEST_DIR, "roles.json")
-Config.CURRENT_SESSION_FILE = os.path.join(Config.STATE_DIR, "current_session.json")
+Config.CURRENT_SESSION_FILE = os.path.join(Config.SESSIONS_DIR, "current_session.json")
 Config.SESSIONS_INDEX_FILE = os.path.join(Config.SESSIONS_DIR, "sessions_index.json")
 
 os.makedirs(Config.LOGS_DIR, exist_ok=True)

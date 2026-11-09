@@ -52,6 +52,7 @@ class Supervisor:
         self.data_dir = data_dir or (os.environ.get("DATA_DIR", "").strip() or script_dir)
         self.state_dir = os.path.join(self.data_dir, "state")
         self.beat_file = os.path.join(self.state_dir, "worker.beat")
+        self.stop_file = os.path.join(self.state_dir, "worker.stop")
         self.reason_file = os.path.join(self.state_dir, "restart_reason.json")
         self.script = script or os.path.join(script_dir, "main.py")
         self.python = python or sys.executable
@@ -109,6 +110,11 @@ class Supervisor:
     def spawn(self):
         self._ensure_dirs()
         self.generation += 1
+        try:
+            if os.path.exists(self.stop_file):
+                os.remove(self.stop_file)
+        except OSError:
+            pass
         # نبض أولي: العامل الجديد يحتاج وقتاً للإقلاع قبل أول لمسة — لا نحكم عليه متجمداً فوراً
         try:
             with open(self.beat_file, "w", encoding="utf-8") as f:
@@ -119,24 +125,36 @@ class Supervisor:
         env["SUPERVISED_CHILD"] = "1"
         env["SUPERVISED"] = "1"
         env["WORKER_GENERATION"] = str(self.generation)
+        env["WORKER_STOP_FILE"] = self.stop_file
         env.setdefault("PYTHONUNBUFFERED", "1")
         cmd = [self.python, self.script, "--worker", "--generation", str(self.generation)]
         self.proc = subprocess.Popen(cmd, env=env, cwd=os.path.dirname(self.script) or None)
         self._log(f"👷 supervisor: أطلقت العامل #{self.generation} (pid {self.proc.pid})")
         return self.proc
 
-    def _terminate(self, grace):
-        """terminate → انتظار grace → kill. يرجع كود الخروج."""
+    def _terminate(self, grace, graceful=True):
+        """إيقاف رشيق (stop_file على Windows / SIGTERM) → انتظار → terminate → kill. يرجع كود الخروج."""
         p = self.proc
         if p is None:
             return None
         if p.poll() is None:
+            if graceful and os.name == "nt":
+                try:
+                    self._ensure_dirs()
+                    with open(self.stop_file, "w", encoding="utf-8") as f:
+                        f.write(str(time.time()))
+                except OSError:
+                    pass
+                try:
+                    return p.wait(timeout=min(grace, max(1.0, float(self.shutdown_grace))))
+                except subprocess.TimeoutExpired:
+                    pass
             try:
                 p.terminate()
             except OSError:
                 pass
             try:
-                return p.wait(timeout=grace)
+                return p.wait(timeout=grace if (not graceful or os.name != "nt") else 2)
             except subprocess.TimeoutExpired:
                 try:
                     p.kill()
@@ -170,7 +188,7 @@ class Supervisor:
         self.spawn()
         while True:
             if self.stopping:
-                code = self._terminate(self.shutdown_grace + 5)
+                code = self._terminate(self.shutdown_grace + 5, graceful=True)
                 return "stopping", code
             code = self.proc.poll()
             if code is not None:
@@ -182,7 +200,7 @@ class Supervisor:
             age = self.beat_age()
             if age is not None and age > self.beat_max:
                 self._log(f"🧊 supervisor: العامل #{self.generation} متجمد (نبض منذ {int(age)}ث > {self.beat_max}) → terminate/kill")
-                code = self._terminate(10)
+                code = self._terminate(10, graceful=False)
                 return "frozen", code
             self._sleep(1)
 

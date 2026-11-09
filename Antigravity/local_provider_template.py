@@ -40,15 +40,28 @@ def execute_custom_provider(raw_text: str, system_prompt: str = "") -> str:
     return polished_output
 
 
+def _split_payload(input_data: str) -> tuple[str, str]:
+    """يفصل توجيه النظام عن النص الخام وفق بروتوكول ===USER_INPUT===."""
+    marker = "===USER_INPUT==="
+    if marker in input_data:
+        sys_part, _, raw_part = input_data.partition(marker)
+        return raw_part.strip(), sys_part.strip()
+    return input_data, ""
+
+
 def main():
     try:
-        # قراءة النص الخام الممرر من البوت عبر مدخل الأوامر stdin
+        # قراءة النص الممرر من البوت عبر مدخل الأوامر stdin وفصل البرومبت عن النص الخام
         input_data = sys.stdin.read()
         if not input_data.strip():
             sys.exit(0)
 
-        # استدعاء المزود الخارجي
-        result = execute_custom_provider(input_data)
+        raw_text, system_prompt = _split_payload(input_data)
+        if not raw_text.strip():
+            sys.exit(0)
+
+        # استدعاء المزود الخارجي بالنص الخام وتوجيه النظام مفصولين
+        result = execute_custom_provider(raw_text, system_prompt=system_prompt)
 
         # إخراج النص المنظم مباشرة عبر stdout ليقرأه البوت
         sys.stdout.write(result)

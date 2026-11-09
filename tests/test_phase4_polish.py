@@ -603,9 +603,9 @@ def test_local_provider_observability_and_stats(monkeypatch, tmp_path):
     st_after = text_assist.stats()
 
     assert res == "منظم محلي" and err is None
-    # الزيادة واحدة فقط وليست مضاعفة (لا تضخم)
-    assert st_after["calls"] == st_before["calls"] + 1
-    assert st_after["ok"] == st_before["ok"] + 1
+    # عدادات السحابة لا تتضخم بنجاح المحلي، والمحلي يزيد مرة واحدة فقط
+    assert st_after["calls"] == st_before["calls"]
+    assert st_after["ok"] == st_before["ok"]
     assert st_after["local_calls"] == st_before.get("local_calls", 0) + 1
     assert st_after["local_ok"] == st_before.get("local_ok", 0) + 1
 

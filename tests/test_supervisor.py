@@ -156,3 +156,36 @@ def test_supervisor_module_has_no_project_imports():
     src = open(sv.__file__, encoding="utf-8").read()
     for name in ("config", "requests", "telegram_bot", "voice_queue", "heartbeat", "netsession"):
         assert f"import {name}" not in src and f"from {name}" not in src
+
+
+def test_stop_file_enables_graceful_exit_on_windows_and_idle_loop(tmp_path, monkeypatch):
+    """T-10 (B-09): worker.stop يُكتب عند الإيقاف الرشيق ويفعّل global_stop في main._idle_loop."""
+    import importlib
+    script = tmp_path / "graceful_worker.py"
+    script.write_text(
+        "import os, time\n"
+        "stop = os.environ['WORKER_STOP_FILE']\n"
+        "for _ in range(100):\n"
+        "    if os.path.exists(stop):\n"
+        "        with open(stop + '.seen', 'w') as f: f.write('ok')\n"
+        "        raise SystemExit(0)\n"
+        "    time.sleep(0.05)\n",
+        encoding="utf-8",
+    )
+    data = tmp_path / "data"
+    s = sv.Supervisor(data_dir=str(data), script=str(script), python=sys.executable,
+                      sleep=lambda sec: time.sleep(min(sec, 0.05)), log=lambda *a: None, shutdown_grace=2)
+    threading.Timer(0.25, lambda: setattr(s, "stopping", True)).start()
+    assert s.run() == 0
+    if os.name == "nt":
+        assert (data / "state" / "worker.stop.seen").exists()
+
+    import main
+    importlib.reload(main)
+    stop_p = tmp_path / "idle.stop"
+    monkeypatch.setenv("WORKER_STOP_FILE", str(stop_p))
+    rt = main.Runtime("TOK", "777")
+    threading.Timer(0.15, lambda: stop_p.write_text("stop", encoding="utf-8")).start()
+    t0 = time.monotonic()
+    main._idle_loop(rt, None, "TOK", tick=0.05)
+    assert rt.global_stop.is_set() and time.monotonic() - t0 < 2.0
