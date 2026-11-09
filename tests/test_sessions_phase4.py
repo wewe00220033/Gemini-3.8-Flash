@@ -406,7 +406,7 @@ def test_deliver_writes_session_and_title_and_suggests_name(S, fresh_env):
     import archive
     s = S.start()
     msgs = []
-    sender = delivery.Sender(lambda t, r, p: msgs.append((t, r)) or len(msgs))
+    sender = delivery.Sender(lambda t, r, p=None, reply_markup=None: msgs.append((t, r)) or len(msgs))
     res = delivery.deliver(LONG_RAW, M1, "A", {"elapsed": 1.0}, sender, reply_to_id=1,
                            polish_fn=lambda raw, role, gl: ("منظم", None), title_fn=lambda raw: "إعداد Nginx")
     assert res["session"] == s["name"] and res["session_written"] and res["title"] == "إعداد Nginx"

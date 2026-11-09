@@ -168,7 +168,7 @@ def test_delivery_and_transcriber_use_session_role(S, fresh_env, engine):
         seen["role"] = role
         return ("منظم", None)
 
-    sender = delivery.Sender(lambda t, r, p: 1)
+    sender = delivery.Sender(lambda t, r, p=None, reply_markup=None: 1)
     res = delivery.deliver("نص طويل بما يكفي ليُنظَّم هنا الآن", M1, "A", {}, sender, polish_fn=polish_fn, title_fn=lambda r: None)
     assert seen["role"] == "medical" and res["role"] == "medical"
     role_line = (prompts.get_role("medical") or {}).get("layer_a") or ""
@@ -233,7 +233,7 @@ def test_long_text_preview_keeps_head(S, fresh_env):
     import delivery
     s = S.start("طويلة")
     msgs, docs = [], []
-    sender = delivery.Sender(lambda t, r, p: msgs.append(t) or len(msgs),
+    sender = delivery.Sender(lambda t, r, p=None, reply_markup=None: msgs.append(t) or len(msgs),
                              send_document=lambda fn, data, mime, cap, r: docs.append(fn) or 900)
     long_raw = ("كلمة " * 20 + "\n") * 150                                   # > POLISH_FILE_THRESHOLD
     assert len(long_raw) > delivery.Config.POLISH_FILE_THRESHOLD
@@ -444,7 +444,7 @@ def test_delivery_passes_summary_to_polish_never_to_transcription(S, fresh_env, 
 
     import text_assist
     monkeypatch.setattr(text_assist, "generate", lambda a, b, timeout=None: ("ملخص الجلسة L2", None))
-    sender = delivery.Sender(lambda t, r, p: 1)
+    sender = delivery.Sender(lambda t, r, p=None, reply_markup=None: 1)
     res = delivery.deliver("الفويس الخامس هنا بما يكفي", M1, "A", {}, sender, polish_fn=polish_fn, title_fn=lambda r: None)
     assert res["summary_updated"] is True and S.summary() == "ملخص الجلسة L2" and seen == [None]   # الخامس: يُحدَّث بعده
     res = delivery.deliver("الفويس السادس هنا بما يكفي", M1, "A", {}, sender, polish_fn=polish_fn, title_fn=lambda r: None)

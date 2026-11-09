@@ -14,6 +14,7 @@
 """
 
 import html
+import logging
 import re
 import threading
 import time
@@ -27,17 +28,214 @@ import glossary as glossary_mod
 import sessions
 import logkit
 
+logger = logging.getLogger("delivery")
+
+
+MAX_FINAL_CHUNKS = 8
+
+
+def _utf16_len(text):
+    """حساب طول النص بوحدات UTF-16 Code Units لمطابقة معايير تليجرام الصارمة (4096)."""
+    return len(str(text or "").encode("utf-16-le")) // 2
+
 
 class Sender:
-    """واجهة الإرسال القابلة للحقن: send_text(text, reply_to, parse_mode) -> message_id|None ؛ send_document(...) ؛ send_action(...) ؛ set_reaction(...) ؛ edit_text(...) ؛ delete_text(...)"""
+    """واجهة الإرسال القابلة للحقن: send_text(text, reply_to, parse_mode, reply_markup=None) -> message_id|None ؛ send_document(...) ؛ send_action(...) ؛ set_reaction(...) ؛ edit_text(...) ؛ delete_text(...)"""
 
     def __init__(self, send_text, send_document=None, send_action=None, set_reaction=None, edit_text=None, delete_text=None):
-        self.send_text = send_text
+        def _send(text, reply_to=None, parse_mode=None, reply_markup=None, **kwargs):
+            if send_text is None:
+                return None
+            try:
+                return send_text(text, reply_to, parse_mode, reply_markup=reply_markup, **kwargs)
+            except TypeError:
+                try:
+                    return send_text(text, reply_to, parse_mode, reply_markup)
+                except TypeError:
+                    return send_text(text, reply_to, parse_mode)
+
+        self.send_text = _send
         self.send_document = send_document
         self.send_action = send_action
         self.set_reaction = set_reaction
-        self.edit_text = edit_text
+
+        if edit_text is not None:
+            def _edit(message_id, text, parse_mode="HTML", reply_markup=None, **kwargs):
+                try:
+                    return edit_text(message_id, text, parse_mode, reply_markup=reply_markup, **kwargs)
+                except TypeError:
+                    try:
+                        return edit_text(message_id, text, parse_mode, reply_markup)
+                    except TypeError:
+                        return edit_text(message_id, text, parse_mode)
+            self.edit_text = _edit
+        else:
+            self.edit_text = None
+
         self.delete_text = delete_text
+
+
+class LiveMessageController:
+    """
+    منسق الرسالة الحية الفردية (Single-Writer) لمسار السبك (Synthesizer).
+    - يضمن رسالة تليجرام حية واحدة تُعدل في مكانها عبر قفل تسلسلي وحيد (_writer_lock).
+    - يمنع أي تحديثات وسيطة بعد الاعتماد النهائي (finalized=True).
+    - يدير الشبكة الوسيطة بدون إعادة محاولة عمياء لـ 429 (retry_429=False).
+    - يفرض فاصلاً زمنياً (1.5-2.0ث) بين طلبات editMessageText لمنع 429 Too Many Requests.
+    - يقسم المخرجات النهائية الطويلة (> 4000 UTF-16) حتى 8 قطع كتل <pre> متوازنة.
+    """
+    def __init__(self, sender, anchor, title=None, session_name=None, role_id=None, min_edit_interval=1.5):
+        self.sender = sender
+        self.anchor = anchor
+        self.title = title
+        self.session_name = session_name
+        self.role_id = role_id
+        self.min_edit_interval = min_edit_interval
+        self._writer_lock = threading.Lock()
+        self.live_mid = None
+        self.finalized = False
+        self._last_edit_time = 0.0
+
+    def start_live(self, initial_html):
+        """إرسال الرسالة الحية الأولى في الشات وحجز live_mid."""
+        with self._writer_lock:
+            if self.live_mid is not None or self.finalized:
+                return self.live_mid
+            try:
+                self.live_mid = self.sender.send_text(initial_html, self.anchor, "HTML")
+            except Exception as e:
+                logger.warning("⚠️ فشل فتح الرسالة الحية: %s", e)
+                self.live_mid = None
+            self._last_edit_time = time.monotonic()
+            return self.live_mid
+
+    def update_interim(self, html_text, force=False):
+        """تحديث الرسالة الحية في مكانها بنبضات الحالة الوسيطة (فلاش جاهز / شلبي قيد العمل)."""
+        with self._writer_lock:
+            if self.finalized or self.live_mid is None:
+                return False
+            now = time.monotonic()
+            if not force and (now - self._last_edit_time) < self.min_edit_interval:
+                return False
+            if getattr(self.sender, "edit_text", None) is None:
+                return False
+            try:
+                ok = self.sender.edit_text(self.live_mid, html_text, parse_mode="HTML")
+                if ok:
+                    self._last_edit_time = time.monotonic()
+                return ok
+            except Exception as e:
+                logger.debug("⚠️ فشل التحديث الوسيط للحية: %s", e)
+                return False
+
+    def finalize(self, golden_text, is_golden=True, telemetry=None, reply_markup=None):
+        """
+        اعتماد وتسليم النتيجة النهائية:
+        1. يقفل الحية نهائياً (finalized = True).
+        2. لو <= 4000 UTF-16: يستبدل الرسالة الحية في مكانها (دون زر .md).
+        3. لو > 4000 UTF-16: يجزئ حتى 8 قطع كتل <pre> متوازنة؛ القطعة 0 تحل محل الحية،
+           والقطع 1..7 تُرسل كردود متتابعة تحتها، مع وضع الزر على القطعة الأخيرة فقط.
+        يرجع قائمة بمعرفات الرسائل المرسلة: [mid_0, mid_1, ...].
+        """
+        with self._writer_lock:
+            self.finalized = True
+            sent_mids = []
+            if is_golden:
+                full_html = synthesizer_final_message_html(
+                    golden_text,
+                    role_id=self.role_id,
+                    session_name=self.session_name,
+                    title=self.title,
+                    telemetry=telemetry,
+                )
+            else:
+                full_html = golden_text
+
+            parsed_utf16 = _utf16_len(_html_to_plain(full_html))
+            raw_utf16 = _utf16_len(full_html)
+            limit = 4000
+
+            import telegram_bot
+            html_chunks_fn = getattr(telegram_bot, "_html_chunks", None)
+
+            can_edit = self.live_mid is not None and getattr(self.sender, "edit_text", None) is not None
+            can_delete = self.live_mid is not None and getattr(self.sender, "delete_text", None) is not None
+
+            if (parsed_utf16 <= limit and raw_utf16 <= limit) or html_chunks_fn is None:
+                if can_edit:
+                    ok = False
+                    try:
+                        ok = self.sender.edit_text(self.live_mid, full_html, parse_mode="HTML")
+                    except Exception:
+                        ok = False
+                    if not ok:
+                        plain_full = _html_to_plain(full_html)
+                        if _utf16_len(plain_full) <= limit:
+                            try:
+                                ok = self.sender.edit_text(self.live_mid, plain_full, parse_mode=None)
+                            except Exception:
+                                ok = False
+                    if ok:
+                        sent_mids.append(self.live_mid)
+                        return sent_mids
+
+                mid = self.sender.send_text(full_html, self.anchor, "HTML")
+                if mid:
+                    sent_mids.append(mid)
+                    if can_delete:
+                        try:
+                            self.sender.delete_text(self.live_mid)
+                        except Exception:
+                            pass
+                return sent_mids
+
+            raw_chunks = list(html_chunks_fn(full_html, limit))
+            total_chunks = len(raw_chunks)
+            if total_chunks > MAX_FINAL_CHUNKS:
+                raw_chunks = raw_chunks[:MAX_FINAL_CHUNKS]
+                notice = "\n\n<i>[...تم إرسال أول 8 أجزاء فقط لاستيفاء الحد الأقصى للشات. يمكنك طلب الملف كاملاً...]</i>"
+                raw_chunks[-1] = raw_chunks[-1] + notice
+                total_chunks = MAX_FINAL_CHUNKS
+
+            chunk_0 = raw_chunks[0]
+            first_ok = False
+            if can_edit:
+                try:
+                    first_ok = self.sender.edit_text(self.live_mid, chunk_0, parse_mode="HTML")
+                except Exception:
+                    first_ok = False
+                if not first_ok:
+                    plain_0 = _html_to_plain(chunk_0)
+                    try:
+                        first_ok = self.sender.edit_text(self.live_mid, plain_0, parse_mode=None)
+                    except Exception:
+                        first_ok = False
+                if first_ok:
+                    sent_mids.append(self.live_mid)
+
+            if not first_ok:
+                mid_0 = self.sender.send_text(chunk_0, self.anchor, "HTML")
+                if mid_0:
+                    sent_mids.append(mid_0)
+                    if can_delete:
+                        try:
+                            self.sender.delete_text(self.live_mid)
+                        except Exception:
+                            pass
+                parent_anchor = mid_0 or self.anchor
+            else:
+                parent_anchor = self.live_mid
+
+            for i in range(1, total_chunks):
+                chunk_i = raw_chunks[i]
+                is_last = (i == total_chunks - 1)
+                markup = reply_markup if is_last else None
+                sub_mid = self.sender.send_text(chunk_i, parent_anchor, "HTML", reply_markup=markup)
+                if sub_mid:
+                    sent_mids.append(sub_mid)
+                    parent_anchor = sub_mid
+
+            return sent_mids
 
 
 _bg_threads_lock = threading.Lock()
@@ -152,7 +350,8 @@ def _local_timeout_label():
 
 def merged_compare_message_html(gemini_text, shelby_text=None, role_id=None, session_name=None, shelby_error=None, status_line=None):
     role = prompts.get_role(role_id) or {}
-    head = f"<b>📝 النسخة المنظمة</b> · دور: {html.escape(role.get('name', role_id))}"
+    role_name = role.get("name") or role_id or "عام"
+    head = f"<b>📝 النسخة المنظمة</b> · دور: {html.escape(str(role_name))}"
     if session_name:
         head += f" · جلسة: «{html.escape(session_name)}»"
 
@@ -188,10 +387,11 @@ def synthesizer_interim_message_html(gemini_text, role_id=None, session_name=Non
     تعرض مسودة جيميني الفورية كاملة داخل <pre>، مع شريط الحالة الحي بالأسفل خارج <pre>.
     """
     role = prompts.get_role(role_id) or {}
+    role_name = role.get("name") or role_id or "عام"
     head_parts = []
     if title:
         head_parts.append(f"🏷️ <b>{html.escape(title)}</b>")
-    head_txt = f"<b>📝 النسخة المنظمة</b> · دور: {html.escape(role.get('name', role_id))}"
+    head_txt = f"<b>📝 النسخة المنظمة</b> · دور: {html.escape(str(role_name))}"
     if session_name:
         head_txt += f" · جلسة: «{html.escape(session_name)}»"
     head_parts.append(head_txt)
@@ -225,10 +425,11 @@ def synthesizer_final_message_html(golden_text, role_id=None, session_name=None,
     تعرض النسخة الذهبية داخل <pre>، وتذييل التوقيت الدقيق خارج <pre>.
     """
     role = prompts.get_role(role_id) or {}
+    role_name = role.get("name") or role_id or "عام"
     head_parts = []
     if title:
         head_parts.append(f"🏷️ <b>{html.escape(title)}</b>")
-    head_txt = f"<b>🏆 النسخة الذهبية المسبوكة</b> · دور: {html.escape(role.get('name', role_id))}"
+    head_txt = f"<b>🏆 النسخة الذهبية المسبوكة</b> · دور: {html.escape(str(role_name))}"
     if session_name:
         head_txt += f" · جلسة: «{html.escape(session_name)}»"
     head_parts.append(head_txt)
@@ -494,6 +695,9 @@ def _deliver_synthesizer(raw, polished, role_id, gl, l2, session_name, sender, a
         polished, role_id=role_id, session_name=session_name,
         title=result["title"], shelby_status="waiting"
     )
+    controller = LiveMessageController(
+        sender, anchor, title=result.get("title"), session_name=session_name, role_id=role_id
+    )
     draft_separated = len(init_html) > max_edit
     if draft_separated:
         clean_draft_html = polished_message_html(
@@ -509,21 +713,15 @@ def _deliver_synthesizer(raw, polished, role_id, gl, l2, session_name, sender, a
         )
         draft_sent = (draft_mid is not None)
         wait_anchor = draft_mid or anchor
-        mid = sender.send_text(
-            f"⏳ <i>جاري توليد النسخة الذهبية المسبوكة مع شلبي (مهلة {t_label})...</i>",
-            wait_anchor,
-            "HTML",
+        controller.anchor = wait_anchor
+        mid = controller.start_live(
+            f"⏳ <i>جاري توليد النسخة الذهبية المسبوكة مع شلبي (مهلة {t_label})...</i>"
         )
         result["polished_msg_id"] = draft_mid or mid
     else:
         draft_sent = True
         wait_anchor = anchor
-        mid = _send_long(
-            sender, init_html, polished, anchor,
-            filename_prefix="polished",
-            caption="📝 النسخة المنظمة (طويلة → ملف)",
-            head_html=_entry_head_html(result["title"], session_name),
-        )
+        mid = controller.start_live(init_html)
         result["polished_msg_id"] = mid
 
     def _bg_synthesizer():
@@ -558,6 +756,7 @@ def _deliver_synthesizer(raw, polished, role_id, gl, l2, session_name, sender, a
                     text_assist.note_shelby_noop()
                     print("⚠️ Shelby returned raw text unchanged (No-Op) — تخطي نداء السبك الثالث لتوفير الكوتة.")
                     _bg_finalize(polished, polished, session_text=polished, is_golden=False)
+                    controller.finalized = True
                     noop_html, noop_plain = _draft_fallback_view(
                         "noop",
                         "ℹ️ <i>تم اعتماد مسودة جيميني أعلاه (أعاد شلبي النص دون تنظيم فعلي)</i>",
@@ -595,21 +794,16 @@ def _deliver_synthesizer(raw, polished, role_id, gl, l2, session_name, sender, a
                         "synth": synth_elapsed,
                         "total": wall_total,
                     }
-                    full_html = synthesizer_final_message_html(
-                        golden_text, role_id=role_id, session_name=session_name,
-                        title=result["title"], telemetry=telemetry
+                    sent_mids = controller.finalize(
+                        golden_text, is_golden=True, telemetry=telemetry
                     )
-                    sent_mid = _replace_or_send(
-                        sender, mid, wait_anchor, full_html, golden_text,
-                        filename_prefix="golden_synthesized",
-                        caption="🏆 النسخة الذهبية المسبوكة",
-                        head_html=_entry_head_html(result["title"], session_name),
-                    )
-                    if not use_short_above and sent_mid is not None:
+                    if sent_mids:
                         with res_lock:
-                            result["polished_msg_id"] = sent_mid
+                            result["polished_msg_id"] = sent_mids[0]
+                            result["golden_mids"] = sent_mids
                 else:
                     _bg_finalize(polished, polished, session_text=polished, is_golden=False)
+                    controller.finalized = True
                     fallback_html = merged_compare_message_html(
                         polished, shelby_text=s_text, role_id=role_id, session_name=session_name
                     )
@@ -624,6 +818,7 @@ def _deliver_synthesizer(raw, polished, role_id, gl, l2, session_name, sender, a
                             result["polished_msg_id"] = sent_mid
             else:
                 _bg_finalize(polished, polished, session_text=polished, is_golden=False)
+                controller.finalized = True
                 err_s = str(s_err or "خطأ غير معروف")
                 if "دون تنظيم فعلي" in err_s:
                     print("⚠️ Shelby returned raw text unchanged (No-Op) — تخطي نداء السبك الثالث لتوفير الكوتة.")
@@ -663,6 +858,7 @@ def _deliver_synthesizer(raw, polished, role_id, gl, l2, session_name, sender, a
             err_txt = logkit.redact(f"{type(e).__name__}: {e}")[:400]
             print(f"⚠️ Synthesizer bg error: {err_txt}")
             _bg_finalize(polished, polished, session_text=polished, is_golden=False)
+            controller.finalized = True
             err_html, err_plain = _draft_fallback_view(
                 "error",
                 f"⚠️ <i>تم اعتماد مسودة جيميني أعلاه (خطأ أثناء السبك: {html.escape(err_txt)})</i>",

@@ -45,7 +45,7 @@ class FakeSender:
         self.docs = []       # (filename, size, mime, caption, reply_to)
         self._next = 100
 
-    def send_text(self, text, reply_to, parse_mode):
+    def send_text(self, text, reply_to, parse_mode=None, reply_markup=None):
         self._next += 1
         self.msgs.append((text, reply_to, parse_mode, self._next))
         return self._next
@@ -725,7 +725,7 @@ def test_delivery_raw_only_reaction_done(monkeypatch):
     actions = []
     reactions = []
     sender = delivery.Sender(
-        send_text=lambda t, r, p: 100,
+        send_text=lambda t, r, p=None, reply_markup=None: 100,
         send_action=lambda act: actions.append(act),
         set_reaction=lambda em: reactions.append(em),
     )

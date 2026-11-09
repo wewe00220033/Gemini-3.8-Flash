@@ -150,7 +150,7 @@ def _chunk_text(text, limit):
 
 _TAG_RE = re.compile(r"</?([a-zA-Z][a-zA-Z0-9]*)(?:\s+[^<>]*)?>")
 # الوسوم التي لا تحتاج إغلاقاً — لا تُفتح في نهاية القطعة تلقائياً
-_VOID_TAGS = {"br", "hr", "img", "code"}
+_VOID_TAGS = {"br", "hr", "img"}
 
 
 def _pick_pua_sentinel(text):
@@ -317,7 +317,7 @@ def send_chat_action(token, chat_id, action="typing"):
         pass
 
 
-def send_html_get_id(token, chat_id, text, reply_to_id=None):
+def send_html_get_id(token, chat_id, text, reply_to_id=None, reply_markup=None):
     """يرسل HTML (مقسماً لو طويل) ويرجع message_id لأول قطعة (لربط المنظم بالخام) أو None. fallback نص خام.
 
     التقسيم عبر `_html_chunks` لا `_chunk_text`: الأخير يقطع الوسوم في منتصفها فتصل قطع
@@ -325,10 +325,14 @@ def send_html_get_id(token, chat_id, text, reply_to_id=None):
     """
     first_id = None
     limit = Config.TELEGRAM_MAX_MSG - 50
-    for i, chunk in enumerate(_html_chunks(text, limit)):
+    chunks = list(_html_chunks(text, limit))
+    total_chunks = len(chunks)
+    for i, chunk in enumerate(chunks):
         payload = {"chat_id": chat_id, "text": chunk, "parse_mode": "HTML"}
         if reply_to_id and i == 0:
             payload["reply_to_message_id"] = reply_to_id
+        if reply_markup is not None and i == total_chunks - 1:
+            payload["reply_markup"] = reply_markup
         try:
             resp = _tg_post(token, "sendMessage", payload)
             if getattr(resp, "status_code", None) == 429:
@@ -372,7 +376,7 @@ def _extract_retry_after(resp):
     return 1.0
 
 
-def edit_telegram_message(token, chat_id, message_id, text, parse_mode="HTML"):
+def edit_telegram_message(token, chat_id, message_id, text, parse_mode="HTML", reply_markup=None):
     """
     تعديل رسالة نصية موجودة في تليجرام عبر editMessageText.
     - يعيد المحاولة مرة واحدة عند HTTP 429 وفق retry_after (بحد أقصى 10ث).
@@ -388,6 +392,8 @@ def edit_telegram_message(token, chat_id, message_id, text, parse_mode="HTML"):
     }
     if parse_mode:
         payload["parse_mode"] = parse_mode
+    if reply_markup is not None:
+        payload["reply_markup"] = reply_markup
     try:
         r = _tg_post(token, "editMessageText", payload, timeout=15)
         if r.status_code == 429:
@@ -416,11 +422,11 @@ def make_sender(token, chat_id, reaction_msg_id=None):
             return _send_document(token, chat_id, fn, data, mime, caption, reply_to)
 
     return delivery.Sender(
-        send_text=lambda text, reply_to, parse_mode=None: send_html_get_id(token, chat_id, text, reply_to),
+        send_text=lambda text, reply_to, parse_mode=None, reply_markup=None: send_html_get_id(token, chat_id, text, reply_to, reply_markup=reply_markup),
         send_document=_send_doc_compat,
         send_action=lambda action="typing": send_chat_action(token, chat_id, action),
         set_reaction=(lambda emoji: set_reaction(token, chat_id, reaction_msg_id, emoji)) if reaction_msg_id else None,
-        edit_text=lambda message_id, text, parse_mode="HTML": edit_telegram_message(token, chat_id, message_id, text, parse_mode),
+        edit_text=lambda message_id, text, parse_mode="HTML", reply_markup=None: edit_telegram_message(token, chat_id, message_id, text, parse_mode, reply_markup=reply_markup),
         delete_text=lambda message_id: delete_message(token, chat_id, message_id),
     )
 

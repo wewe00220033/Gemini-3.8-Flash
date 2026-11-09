@@ -27,12 +27,12 @@ class _FakeSender:
         self.with_doc = with_doc
         self.edit_raises = edit_raises
 
-    def send_text(self, text, reply_to, parse_mode=None):
+    def send_text(self, text, reply_to, parse_mode=None, reply_markup=None):
         mid = len(self.sent) + 1
         self.sent.append((mid, text, reply_to, parse_mode))
         return mid
 
-    def edit_text(self, mid, text, parse_mode="HTML"):
+    def edit_text(self, mid, text, parse_mode="HTML", reply_markup=None):
         self.edits.append((mid, text, parse_mode))
         if self.edit_raises:
             raise RuntimeError("Telegram edit failure")
@@ -143,10 +143,9 @@ def test_p0_01_size_thresholds_edit_or_close_and_send_document(monkeypatch, char
         assert golden in edited_txt
         assert len(fs.docs) == 0
     else:
-        assert "اكتملت المعالجة" in edited_txt
-        assert len(fs.docs) == 1
-        assert fs.docs[0][0] == "golden_synthesized.md"
-        assert fs.docs[0][1] == golden.encode("utf-8")
+        # Contract 7: zero automatic .md; delivered as text chunks in chat
+        assert len(fs.docs) == 0
+        assert len(fs.sent) >= 2
 
 
 @pytest.mark.parametrize("golden_len,expect_doc", [
@@ -185,7 +184,8 @@ def test_p0_01_large_initial_draft_isolates_waiting_notice(monkeypatch, golden_l
     assert fs.edits[0][0] == wait_mid
     assert "جاري توليد" not in fs.edits[0][1]
     if expect_doc:
-        assert any(d[0] == "golden_synthesized.md" and d[1] == golden.encode("utf-8") for d in fs.docs)
+        assert not any(d[0] == "golden_synthesized.md" for d in fs.docs)
+        assert len(fs.sent) >= 2
     else:
         assert golden in fs.edits[0][1]
 
@@ -425,13 +425,13 @@ class _StatefulChatSender:
         self.with_delete = with_delete
         self.with_doc = with_doc
 
-    def send_text(self, text, reply_to=None, parse_mode=None):
+    def send_text(self, text, reply_to=None, parse_mode=None, reply_markup=None):
         mid = self._next_id
         self._next_id += 1
         self.messages[mid] = {"text": text, "parse_mode": parse_mode, "reply_to": reply_to}
         return mid
 
-    def edit_text(self, mid, text, parse_mode="HTML"):
+    def edit_text(self, mid, text, parse_mode="HTML", reply_markup=None):
         self.edits.append((mid, text, parse_mode))
         if self.policy == "html_only":
             if parse_mode == "HTML":
@@ -501,10 +501,8 @@ def test_t06_failed_edit_must_close_original_message(monkeypatch, is_oversized, 
     hanging = [t for t in remaining_texts if "⏳" in t or "جاري توليد" in t]
     assert hanging == [], f"Found hanging waiting message(s): {hanging}"
 
-    if is_oversized:
-        assert any(d[0] == "golden_synthesized.md" and d[1] == golden.encode("utf-8") for d in chat.docs)
-    else:
-        assert any("ذهبية-T06" in t for t in remaining_texts)
+    assert not any(d[0] == "golden_synthesized.md" for d in chat.docs)
+    assert any("ذهبية-T06" in t for t in remaining_texts)
 
     if not is_oversized and policy == "html_only":
         # تراجع من HTML إلى Plain في نفس الرسالة بدون رسالة إضافية

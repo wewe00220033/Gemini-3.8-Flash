@@ -32,7 +32,7 @@ class FakeSender:
         self.edited_texts = []
         self.docs = []
 
-    def send_text(self, text, reply_to, parse_mode=None):
+    def send_text(self, text, reply_to, parse_mode=None, reply_markup=None):
         mid = len(self.sent_texts) + 1
         self.sent_texts.append((mid, text, reply_to, parse_mode))
         return mid
@@ -41,7 +41,7 @@ class FakeSender:
         self.docs.append((fn, data, mime, caption, reply_to))
         return 999
 
-    def edit_text(self, message_id, text, parse_mode="HTML"):
+    def edit_text(self, message_id, text, parse_mode="HTML", reply_markup=None):
         self.edited_texts.append((message_id, text, parse_mode))
         return True
 
@@ -492,13 +492,11 @@ def test_deliver_synthesizer_oversized_fallback(monkeypatch):
         assert t is not None
         t.join(timeout=3)
 
-        # ناتج ضخم يتجاوز حد التعديل -> إغلاق رسالة الانتظار بإشعار قصير ثم إرسال الناتج كملف .md كامل
+        # ناتج ضخم يتجاوز حد التعديل -> تجزئة لقطع نصية متوازنة في الشات دون أي ملف .md تلقائي (Contract 7)
+        assert len(fs.docs) == 0
         assert len(fs.edited_texts) == 1
-        assert "اكتملت المعالجة" in fs.edited_texts[0][1]
         assert "جاري توليد" not in fs.edited_texts[0][1]
-        assert len(fs.docs) == 1
-        assert fs.docs[0][0] == "golden_synthesized.md"
-        assert fs.docs[0][1] == huge_golden.encode("utf-8")
+        assert len(fs.sent_texts) >= 2
     finally:
         settings.set_compare_mode(old_mode)
 

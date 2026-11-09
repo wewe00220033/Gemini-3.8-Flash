@@ -90,7 +90,7 @@ class _Recorder:
         self.events = []
         self.t0 = None
 
-    def send_text(self, text, reply_to=None, parse_mode=None):
+    def send_text(self, text, reply_to=None, parse_mode=None, reply_markup=None):
         self.events.append(("text", round(time.time() - self.t0, 2), text))
         return 1
 

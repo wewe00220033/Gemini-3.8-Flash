@@ -43,7 +43,7 @@ class _ResilienceSender:
         self.has_delete = has_delete
         self._send_calls = 0
 
-    def send_text(self, text, reply_to, parse_mode=None):
+    def send_text(self, text, reply_to, parse_mode=None, reply_markup=None):
         self._send_calls += 1
         if self._send_calls in self.fail_send_at:
             return None
@@ -51,7 +51,7 @@ class _ResilienceSender:
         self.sent.append((mid, text, reply_to, parse_mode))
         return mid
 
-    def edit_text(self, mid, text, parse_mode="HTML"):
+    def edit_text(self, mid, text, parse_mode="HTML", reply_markup=None):
         self.edits.append((mid, text, parse_mode))
         if callable(self.edit_return):
             return self.edit_return(mid, text, parse_mode)

@@ -181,8 +181,8 @@ def test_b10_polish_local_noop_falls_back_in_polish_and_does_not_double_count(mo
     sent_msgs = []
     edits = []
     sender = delivery.Sender(
-        send_text=lambda txt, rt, pm=None: sent_msgs.append(txt) or len(sent_msgs),
-        edit_text=lambda mid, txt, pm="HTML": edits.append(txt) or True,
+        send_text=lambda txt, rt, pm=None, reply_markup=None: sent_msgs.append(txt) or len(sent_msgs),
+        edit_text=lambda mid, txt, pm="HTML", reply_markup=None: edits.append(txt) or True,
     )
     noop_mid = text_assist.stats()["local_noop"]
     dres = delivery.deliver(
