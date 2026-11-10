@@ -132,7 +132,8 @@ class LiveMessageController:
                 logger.debug("⚠️ فشل التحديث الوسيط للحية: %s", e)
                 return False
 
-    def finalize(self, golden_text, is_golden=True, telemetry=None, reply_markup=None):
+    def finalize(self, golden_text, is_golden=True, telemetry=None, reply_markup=None,
+                 gemini_text=None, shelby_text=None):
         """
         اعتماد وتسليم النتيجة النهائية:
         1. يقفل الحية نهائياً (finalized = True).
@@ -147,6 +148,8 @@ class LiveMessageController:
             if is_golden:
                 full_html = synthesizer_final_message_html(
                     golden_text,
+                    gemini_text=gemini_text,
+                    shelby_text=shelby_text,
                     role_id=self.role_id,
                     session_name=self.session_name,
                     title=self.title,
@@ -164,8 +167,16 @@ class LiveMessageController:
             if is_golden and (parsed_utf16 > limit or raw_utf16 > limit) and reply_markup is None:
                 try:
                     import md_cache
+                    md_text = golden_text
+                    if gemini_text and shelby_text:
+                        md_text = (
+                            f"{golden_text}\n\n---\n"
+                            f"## 📋 ملحق المسودات الأولية\n\n"
+                            f"### ⚡ مسودة فلاش (جيميني)\n{gemini_text}\n\n"
+                            f"### 🦙 مسودة شلبي (محلي)\n{shelby_text}\n"
+                        )
                     token = md_cache.store(
-                        golden_text,
+                        md_text,
                         chat_id=self.chat_id,
                         user_id=self.user_id,
                         entry_id=self.entry_id,
@@ -411,16 +422,50 @@ def merged_compare_message_html(gemini_text, shelby_text=None, role_id=None, ses
     return "\n".join(blocks)
 
 
-def synthesizer_interim_message_html(gemini_text, role_id=None, session_name=None, title=None, shelby_status="waiting", error_detail=None):
+def synthesizer_interim_message_html(gemini_text, shelby_text=None, role_id=None, session_name=None, title=None, shelby_status="waiting", error_detail=None):
     """
-    الرسالة الحية الأولى أثناء تشغيل السبك:
-    تعرض مسودة جيميني الفورية كاملة داخل <pre>، مع شريط الحالة الحي بالأسفل خارج <pre>.
+    الرسالة الحية أثناء تشغيل السبك:
+    - المرحلة 1 (انتظار شلبي): تعرض مسودة فلاش (جيميني) داخل <pre>، مع مؤشر انتظار شلبي.
+    - المرحلة 2 (وصول شلبي وبدء السبك): تعرض مسودة فلاش ومسودة شلبي معاً داخل <pre> لكل منهما مع صمام أمان لاقتطاع النص إن تجاوز 3400 UTF-16 لتفادي خطأ تليجرام 400.
     """
     role = prompts.get_role(role_id) or {}
     role_name = role.get("name") or role_id or "عام"
     head_parts = []
     if title:
         head_parts.append(f"🏷️ <b>{html.escape(title)}</b>")
+
+    if shelby_text:
+        head_txt = f"<b>📝 المسودات الأولية (فلاش + شلبي)</b> · دور: {html.escape(str(role_name))}"
+        if session_name:
+            head_txt += f" · جلسة: «{html.escape(session_name)}»"
+        head_parts.append(head_txt)
+
+        body_gemini = gemini_text
+        body_shelby = shelby_text
+        if settings.header_for("polished"):
+            banner = archive.banner_text() + "\n"
+            body_gemini = banner + body_gemini
+            body_shelby = banner + body_shelby
+
+        # صمام أمان الحجم للحية الوسيطة (Interim Truncation Guard)
+        # تليجرام يقبل بحد أقصى 4096 حرف؛ نحافظ على المجموع ≤ 3400 UTF-16 لضمان سلامة التعديل
+        max_draft = 1600
+        if _utf16_len(body_gemini) + _utf16_len(body_shelby) > 3400:
+            if _utf16_len(body_gemini) > max_draft:
+                body_gemini = body_gemini[:max_draft] + "\n[...يظهر كاملاً في السبك النهائي...]"
+            if _utf16_len(body_shelby) > max_draft:
+                body_shelby = body_shelby[:max_draft] + "\n[...يظهر كاملاً في السبك النهائي...]"
+
+        blocks = [
+            "\n".join(head_parts),
+            "⚡ <b>[مسودة فلاش]:</b>",
+            f"<pre>{html.escape(body_gemini)}</pre>",
+            "🦙 <b>[مسودة شلبي]:</b>",
+            f"<pre>{html.escape(body_shelby)}</pre>",
+            "⏳ <b>جاري السبك الثلاثي لإنتاج النسخة الذهبية المعتمدة...</b>",
+        ]
+        return "\n".join(blocks)
+
     head_txt = f"<b>📝 النسخة المنظمة</b> · دور: {html.escape(str(role_name))}"
     if session_name:
         head_txt += f" · جلسة: «{html.escape(session_name)}»"
@@ -449,10 +494,12 @@ def synthesizer_interim_message_html(gemini_text, role_id=None, session_name=Non
     return "\n".join(blocks)
 
 
-def synthesizer_final_message_html(golden_text, role_id=None, session_name=None, title=None, telemetry=None):
+def synthesizer_final_message_html(golden_text, gemini_text=None, shelby_text=None,
+                                   role_id=None, session_name=None, title=None, telemetry=None):
     """
     الرسالة الذهبية النهائية المسبوكة بعد نجاح الوكيل الثالث:
-    تعرض النسخة الذهبية داخل <pre>، وتذييل التوقيت الدقيق خارج <pre>.
+    تعرض النسخة الذهبية داخل <pre>، ومسودتي فلاش وشلبي مطويتين أسفلها داخل <blockquote expandable>،
+    وتذييل التوقيت الدقيق خارج <pre>.
     """
     role = prompts.get_role(role_id) or {}
     role_name = role.get("name") or role_id or "عام"
@@ -472,6 +519,19 @@ def synthesizer_final_message_html(golden_text, role_id=None, session_name=None,
         "\n".join(head_parts),
         f"<pre>{html.escape(body)}</pre>",
     ]
+
+    # مسودتا فلاش وشلبي مطويتان داخل <blockquote expandable> (بدون pre داخلي حتى لا يرفضه تليجرام)
+    if gemini_text:
+        body_gem = gemini_text
+        if settings.header_for("polished"):
+            body_gem = archive.banner_text() + "\n" + gemini_text
+        blocks.append(f"<blockquote expandable>⚡ <b>[مسودة فلاش]:</b>\n{html.escape(body_gem)}</blockquote>")
+
+    if shelby_text:
+        body_shl = shelby_text
+        if settings.header_for("polished"):
+            body_shl = archive.banner_text() + "\n" + shelby_text
+        blocks.append(f"<blockquote expandable>🦙 <b>[مسودة شلبي]:</b>\n{html.escape(body_shl)}</blockquote>")
 
     if telemetry and isinstance(telemetry, dict):
         t_gem = f"{telemetry.get('gemini', 0):.1f}ث"
@@ -804,6 +864,23 @@ def _deliver_synthesizer(raw, polished, role_id, gl, l2, session_name, sender, a
                             result["polished_msg_id"] = sent_mid
                     return
 
+                # --- المرحلة 2: تحديث الرسالة الحية بمسودة شلبي مع مسودة فلاش فوراً ---
+                if not use_short_above:
+                    interim_both_html = synthesizer_interim_message_html(
+                        polished,
+                        shelby_text=s_text,
+                        role_id=role_id,
+                        session_name=session_name,
+                        title=result.get("title"),
+                        shelby_status="synthesizing",
+                    )
+                    controller.update_interim(interim_both_html, force=False)
+                else:
+                    controller.update_interim(
+                        "⏳ <b>تم استلام مسودة شلبي. جاري السبك الثلاثي...</b>",
+                        force=False,
+                    )
+
                 t0_synth = time.monotonic()
                 synth_kwargs = {"context_summary": l2} if _accepts_context_summary(text_assist.synthesize) else {}
                 golden_text, synth_err = text_assist.synthesize(
@@ -827,7 +904,11 @@ def _deliver_synthesizer(raw, polished, role_id, gl, l2, session_name, sender, a
                         "total": wall_total,
                     }
                     sent_mids = controller.finalize(
-                        golden_text, is_golden=True, telemetry=telemetry
+                        golden_text,
+                        is_golden=True,
+                        telemetry=telemetry,
+                        gemini_text=polished,
+                        shelby_text=s_text,
                     )
                     if sent_mids:
                         with res_lock:

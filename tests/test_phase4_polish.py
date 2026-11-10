@@ -10,6 +10,7 @@
 import importlib
 import json
 import pytest
+import config
 
 VALID_A = "AIzaSy" + "A" * 33
 M1 = "gemini-3.6-flash"
@@ -506,7 +507,9 @@ def test_local_provider_timeout_fallback(monkeypatch, tmp_path):
     real_polish = importlib.reload(text_assist).polish
     monkeypatch.setattr(text_assist, "polish", real_polish)
     monkeypatch.setattr(text_assist.Config, "LOCAL_POLISH_CMD", f'"{sys.executable}" "{script}"')
+    monkeypatch.setattr(config.Config, "LOCAL_POLISH_CMD", f'"{sys.executable}" "{script}"')
     monkeypatch.setattr(text_assist.Config, "LOCAL_POLISH_TIMEOUT", 0.1)
+    monkeypatch.setattr(config.Config, "LOCAL_POLISH_TIMEOUT", 0.1)
     monkeypatch.setattr(text_assist, "generate", lambda sys_t, raw_t: ("بديل سحابي من Gemini", None))
 
     res, err = text_assist.polish("فويس خام")

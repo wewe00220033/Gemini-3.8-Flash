@@ -1,0 +1,145 @@
+# -*- coding: utf-8 -*-
+"""
+اختبارات ميزة عرض مسودة شلبي مع مسودة فلاش لحظياً في الرسالة الحية وختامياً في النسخة المسبوكة.
+"""
+
+import html
+import pytest
+import config
+import delivery
+import settings
+import telegram_bot
+from delivery import (
+    synthesizer_interim_message_html,
+    synthesizer_final_message_html,
+    LiveMessageController,
+    _utf16_len,
+)
+
+
+class FakeSender:
+    def __init__(self):
+        self.sent = []
+        self.edits = []
+        self.docs = []
+
+    def send_text(self, text, reply_to, parse_mode=None, reply_markup=None):
+        mid = len(self.sent) + 1
+        self.sent.append((mid, text, reply_to, parse_mode, reply_markup))
+        return mid
+
+    def edit_text(self, mid, text, parse_mode="HTML", reply_markup=None):
+        self.edits.append((mid, text, parse_mode, reply_markup))
+        return True
+
+    def delete_text(self, mid):
+        return True
+
+    def send_document(self, fn, data, mime, caption, reply_to):
+        self.docs.append((fn, data, mime, caption, reply_to))
+        return 999
+
+    def as_sender(self):
+        return delivery.Sender(
+            send_text=self.send_text,
+            send_document=self.send_document,
+            edit_text=self.edit_text,
+            delete_text=self.delete_text,
+        )
+
+
+def test_synthesizer_interim_message_html_phase1_vs_phase2():
+    # المرحلة 1: فلاش فقط مع انتظار شلبي
+    h1 = synthesizer_interim_message_html("مسودة فلاش وحدها", shelby_text=None, title="تسجيل 1")
+    assert "مسودة فلاش وحدها" in h1
+    assert "جاري توليد النسخة الذهبية" in h1
+    assert "مسودة شلبي" not in h1
+
+    # المرحلة 2: وصول شلبي وتحديث الحية بالمسودتين
+    h2 = synthesizer_interim_message_html("مسودة فلاش السريعة", shelby_text="مسودة شلبي المحلية", title="تسجيل 1", shelby_status="synthesizing")
+    assert "⚡ <b>[مسودة فلاش]:</b>" in h2
+    assert "مسودة فلاش السريعة" in h2
+    assert "🦙 <b>[مسودة شلبي]:</b>" in h2
+    assert "مسودة شلبي المحلية" in h2
+    assert "جاري السبك الثلاثي لإنتاج النسخة الذهبية المعتمدة" in h2
+
+
+def test_synthesizer_interim_truncation_guard_protects_4000_limit():
+    huge_flash = "فلاش " * 500  # ~2500 حرف
+    huge_shelby = "شلبي " * 500  # ~2500 حرف
+    h = synthesizer_interim_message_html(huge_flash, shelby_text=huge_shelby, title="جلسة ضخمة")
+    # التأكد من عمل صمام الأمان وبقاء الحجم الكلي تحت سقف تليجرام 4096
+    assert _utf16_len(h) <= 3900
+    assert "[...يظهر كاملاً في السبك النهائي...]" in h
+
+
+def test_synthesizer_final_message_html_expandable_blockquotes():
+    golden = "النسخة الذهبية الصافية المسبوكة بدقة"
+    flash = "مسودة فلاش الأصلية بالتفصيل"
+    shelby = "مسودة شلبي المحلية بالتفصيل"
+    telemetry = {"gemini": 5.5, "shelby": 7.3, "synth": 4.9, "total": 18.2}
+
+    final_h = synthesizer_final_message_html(
+        golden,
+        gemini_text=flash,
+        shelby_text=shelby,
+        title="فويس تجريبي",
+        telemetry=telemetry,
+    )
+
+    # الذهبية في pre
+    assert f"<pre>" in final_h
+    assert html.escape(golden) in final_h
+    # المسودتان داخل blockquote expandable
+    assert "blockquote expandable" in final_h
+    assert "⚡ <b>[مسودة فلاش]:</b>" in final_h
+    assert html.escape(flash) in final_h
+    assert "🦙 <b>[مسودة شلبي]:</b>" in final_h
+    assert html.escape(shelby) in final_h
+    # تذييل التيليمتري
+    assert "⚡ فلاش: 5.5ث | 🤖 شلبي: 7.3ث | 🏆 السبك: 4.9ث | ⏱️ إجمالي: 18.2ث" in final_h
+
+
+def test_html_chunks_preserves_blockquote_expandable():
+    # التحقق من احتفاظ الوسم بخاصية expandable عند التقطيع
+    long_body = "نص طويل مكرر داخل الاقتباس المطوي. " * 100
+    html_text = f"<blockquote expandable>⚡ <b>مسودة:</b>\n{long_body}</blockquote>"
+    chunks = list(telegram_bot._html_chunks(html_text, limit=400))
+    assert len(chunks) > 1
+    for chunk in chunks:
+        assert "<blockquote expandable>" in chunk
+        assert chunk.endswith("</blockquote>")
+
+
+def test_live_message_controller_finalize_with_drafts_and_md_cache(tmp_path, monkeypatch):
+    import md_cache
+    monkeypatch.setattr(md_cache.Config, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(config.Config, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(delivery.Config, "DATA_DIR", str(tmp_path))
+
+    sender = FakeSender()
+    ctrl = LiveMessageController(
+        sender.as_sender(), anchor=10, title="فحص المسبوكة", chat_id="12345", user_id="67890", entry_id="E1"
+    )
+    ctrl.start_live("رسالة البداية")
+
+    golden = "ذهب مسبوك " * 350  # نص طويل > 4000 UTF-16 لتفعيل التجزئة وزر .md
+    flash = "مسودة فلاش كاملة"
+    shelby = "مسودة شلبي كاملة"
+
+    mids = ctrl.finalize(golden, is_golden=True, gemini_text=flash, shelby_text=shelby)
+    assert len(mids) >= 1
+    # التأكد من وجود الزر التفاعلي على القطعة الأخيرة
+    last_sent = sender.sent[-1] if sender.sent else sender.edits[-1]
+    assert last_sent is not None
+
+    # فحص الكاش وتأكيد وجود ملحق المسودات في ملف .md
+    import os
+    cached_files = [f for f in os.listdir(md_cache.get_cache_dir()) if f.endswith(".json")]
+    assert len(cached_files) == 1
+    token = cached_files[0][:-5]
+    item = md_cache.get(token)
+    assert item is not None
+    assert "## 📋 ملحق المسودات الأولية" in item["text"]
+    assert "مسودة فلاش كاملة" in item["text"]
+    assert "مسودة شلبي كاملة" in item["text"]

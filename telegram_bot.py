@@ -211,17 +211,20 @@ def _html_chunks(text, limit):
             body = marker_re.sub(lambda m: tags[int(m.group(1))], raw)
             stack = list(carry)
             for m in _TAG_RE.finditer(body):
-                closing, name = m.group(0).startswith("</"), m.group(1).lower()
+                raw_tag = m.group(0)
+                closing, name = raw_tag.startswith("</"), m.group(1).lower()
                 if name in _VOID_TAGS:
                     continue
                 if closing:
-                    if name in stack:
-                        while stack and stack.pop() != name:
-                            pass
+                    if any(t[0] == name for t in stack):
+                        while stack:
+                            popped_name, _ = stack.pop()
+                            if popped_name == name:
+                                break
                 else:
-                    stack.append(name)
-            out.append("".join("<%s>" % n for n in carry) + body +
-                       "".join("</%s>" % n for n in reversed(stack)))
+                    stack.append((name, raw_tag))
+            out.append("".join(tag_open for _, tag_open in carry) + body +
+                       "".join("</%s>" % n for n, _ in reversed(stack)))
             carry = stack
         return out
 
