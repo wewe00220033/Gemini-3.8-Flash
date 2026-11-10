@@ -133,7 +133,7 @@ class LiveMessageController:
                 return False
 
     def finalize(self, golden_text, is_golden=True, telemetry=None, reply_markup=None,
-                 gemini_text=None, shelby_text=None):
+                 gemini_text=None, shelby_text=None, synth_provider=None):
         """
         اعتماد وتسليم النتيجة النهائية:
         1. يقفل الحية نهائياً (finalized = True).
@@ -154,6 +154,7 @@ class LiveMessageController:
                     session_name=self.session_name,
                     title=self.title,
                     telemetry=telemetry,
+                    synth_provider=synth_provider,
                 )
             else:
                 full_html = golden_text
@@ -442,10 +443,6 @@ def synthesizer_interim_message_html(gemini_text, shelby_text=None, role_id=None
 
         body_gemini = gemini_text
         body_shelby = shelby_text
-        if settings.header_for("polished"):
-            banner = archive.banner_text() + "\n"
-            body_gemini = banner + body_gemini
-            body_shelby = banner + body_shelby
 
         # صمام أمان الحجم للحية الوسيطة (Interim Truncation Guard)
         # تليجرام يقبل بحد أقصى 4096 حرف؛ نحافظ على المجموع ≤ 3400 UTF-16 لضمان سلامة التعديل
@@ -472,8 +469,6 @@ def synthesizer_interim_message_html(gemini_text, shelby_text=None, role_id=None
     head_parts.append(head_txt)
 
     body = gemini_text
-    if settings.header_for("polished"):
-        body = archive.banner_text() + "\n" + gemini_text
 
     blocks = [
         "\n".join(head_parts),
@@ -496,10 +491,10 @@ def synthesizer_interim_message_html(gemini_text, shelby_text=None, role_id=None
 
 def synthesizer_final_message_html(golden_text, gemini_text=None, shelby_text=None,
                                    role_id=None, session_name=None, title=None, telemetry=None,
-                                   include_drafts=False):
+                                   include_drafts=False, synth_provider=None):
     """
     الرسالة الذهبية النهائية المسبوكة بعد نجاح الوكيل الثالث:
-    تعرض النسخة الذهبية داخل <pre>، مع وسم يوضح المساهمين (فلاش + شلبي)، وتذييل التوقيت الدقيق خارج <pre>.
+    تعرض النسخة الذهبية داخل <pre>، مع وسم يوضح المساهمين (فلاش + شلبي) والمزود الفعلي للسبك، وتذييل التوقيت الدقيق خارج <pre>.
     (افتراضياً لا تُعرض المسودات المطوية في الشات النهائي لإبقاء الرسالة نظيفة وموجزة، مع حفظها في كاش .md).
     """
     role = prompts.get_role(role_id) or {}
@@ -508,14 +503,24 @@ def synthesizer_final_message_html(golden_text, gemini_text=None, shelby_text=No
     if title:
         head_parts.append(f"🏷️ <b>{html.escape(title)}</b>")
 
-    head_txt = f"<b>🏆 النسخة الذهبية المسبوكة (السبّاك)</b> · دور: {html.escape(str(role_name))}"
+    provider = synth_provider
+    if not provider and isinstance(telemetry, dict):
+        provider = telemetry.get("synth_provider")
+
+    provider_tag = ""
+    if provider == "shelby":
+        provider_tag = " [🦙 شلبي]"
+    elif provider == "flash":
+        provider_tag = " [⚡ فلاش (ارتداد)]"
+    elif provider:
+        provider_tag = f" [{html.escape(str(provider))}]"
+
+    head_txt = f"<b>🏆 النسخة الذهبية المسبوكة (السبّاك){provider_tag}</b> · دور: {html.escape(str(role_name))}"
     if session_name:
         head_txt += f" · جلسة: «{html.escape(session_name)}»"
     head_parts.append(head_txt)
 
     body = golden_text
-    if settings.header_for("polished"):
-        body = archive.banner_text() + "\n" + golden_text
 
     blocks = [
         "\n".join(head_parts),
@@ -525,23 +530,22 @@ def synthesizer_final_message_html(golden_text, gemini_text=None, shelby_text=No
     # لو طُلب صراحة تضمين المسودات الأولية (افتراضياً تُحذف في الرد النهائي بناءً على رغبة المستخدم)
     if include_drafts:
         if gemini_text:
-            body_gem = gemini_text
-            if settings.header_for("polished"):
-                body_gem = archive.banner_text() + "\n" + gemini_text
-            blocks.append(f"<blockquote expandable>⚡ <b>[مسودة فلاش]:</b>\n{html.escape(body_gem)}</blockquote>")
+            blocks.append(f"<blockquote expandable>⚡ <b>[مسودة فلاش]:</b>\n{html.escape(gemini_text)}</blockquote>")
 
         if shelby_text:
-            body_shl = shelby_text
-            if settings.header_for("polished"):
-                body_shl = archive.banner_text() + "\n" + shelby_text
-            blocks.append(f"<blockquote expandable>🦙 <b>[مسودة شلبي]:</b>\n{html.escape(body_shl)}</blockquote>")
+            blocks.append(f"<blockquote expandable>🦙 <b>[مسودة شلبي]:</b>\n{html.escape(shelby_text)}</blockquote>")
 
     if telemetry and isinstance(telemetry, dict):
         t_gem = f"{telemetry.get('gemini', 0):.1f}ث"
         t_shl = f"{telemetry.get('shelby', 0):.1f}ث"
         t_syn = f"{telemetry.get('synth', 0):.1f}ث"
         t_tot = f"{telemetry.get('total', 0):.1f}ث"
-        blocks.append(f"⚡ فلاش: {t_gem} | 🤖 شلبي: {t_shl} | 🏆 السبك: {t_syn} | ⏱️ إجمالي: {t_tot}")
+        prov_label = ""
+        if provider == "shelby":
+            prov_label = " (🦙 شلبي)"
+        elif provider == "flash":
+            prov_label = " (⚡ فلاش)"
+        blocks.append(f"⚡ فلاش: {t_gem} | 🤖 شلبي: {t_shl} | 🏆 السبك: {t_syn}{prov_label} | ⏱️ إجمالي: {t_tot}")
 
     return "\n".join(blocks)
 
@@ -886,9 +890,25 @@ def _deliver_synthesizer(raw, polished, role_id, gl, l2, session_name, sender, a
 
                 t0_synth = time.monotonic()
                 synth_kwargs = {"context_summary": l2} if _accepts_context_summary(text_assist.synthesize) else {}
-                golden_text, synth_err = text_assist.synthesize(
-                    raw, polished, s_text, role_id=role_id, glossary=gl, **synth_kwargs
-                )
+                try:
+                    synth_res = text_assist.synthesize(
+                        raw, polished, s_text, role_id=role_id, glossary=gl, return_provider=True, **synth_kwargs
+                    )
+                except TypeError:
+                    synth_res = text_assist.synthesize(
+                        raw, polished, s_text, role_id=role_id, glossary=gl, **synth_kwargs
+                    )
+
+                if isinstance(synth_res, tuple) and len(synth_res) == 3:
+                    golden_text, synth_err, synth_provider = synth_res
+                elif isinstance(synth_res, tuple) and len(synth_res) == 2:
+                    golden_text, synth_err = synth_res
+                    synth_provider = getattr(text_assist, "get_last_synth_provider", lambda: "shelby")()
+                else:
+                    golden_text = synth_res
+                    synth_err = None
+                    synth_provider = "shelby"
+
                 synth_elapsed = time.monotonic() - t0_synth
 
                 if golden_text:
@@ -905,6 +925,7 @@ def _deliver_synthesizer(raw, polished, role_id, gl, l2, session_name, sender, a
                         "shelby": shelby_elapsed,
                         "synth": synth_elapsed,
                         "total": wall_total,
+                        "synth_provider": synth_provider,
                     }
                     sent_mids = controller.finalize(
                         golden_text,
@@ -912,6 +933,7 @@ def _deliver_synthesizer(raw, polished, role_id, gl, l2, session_name, sender, a
                         telemetry=telemetry,
                         gemini_text=polished,
                         shelby_text=s_text,
+                        synth_provider=synth_provider,
                     )
                     if sent_mids:
                         with res_lock:

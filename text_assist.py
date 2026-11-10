@@ -505,17 +505,23 @@ def polish(raw_text, role_id=None, glossary=None, context_summary=None):
     return text.strip(), None
 
 
-def synthesize(raw_text, gemini_draft=None, shelby_draft=None, role_id=None, glossary=None, context_summary=None):
+def get_last_synth_provider():
+    with _lock:
+        return _state.get("synth_last_provider", "shelby")
+
+
+def synthesize(raw_text, gemini_draft=None, shelby_draft=None, role_id=None, glossary=None, context_summary=None, return_provider=False):
     """
     يستدعي الوكيل الثالث (السبّاك النهائي Master Synthesizer) لسبك مسودتي جيميني وشلبي
     في ناتج ذهبي موحد فائق القوة والدقة.
+    المحرك الأساسي: شلبي محلياً (_call_local_provider(stage="synthesis")).
+    الاحتياطي التلقائي: جيميني فلاش (generate) في حال تعذر شلبي أو انتهاء مهلته أو No-Op.
     يرجع (golden_text, None) عند النجاح، أو (None, reason) عند الفشل.
-    القاموس يُطبَّق على الناتج النهائي.
-    يدعم السبك مع مسودتين، مسودة واحدة، أو من النص الخام مباشرة.
+    إذا طُلب return_provider=True يرجع (golden_text, err, provider).
     """
     assert_not_forbidden_assist_model()
     if is_effective_empty(raw_text):
-        return None, "نص فارغ"
+        return (None, "نص فارغ", "none") if return_provider else (None, "نص فارغ")
 
     role_id = role_id or Config.DEFAULT_ROLE
     system_text, user_content = prompts.compose_synthesis_prompt(
@@ -533,19 +539,57 @@ def synthesize(raw_text, gemini_draft=None, shelby_draft=None, role_id=None, glo
     with _lock:
         _state["synth_calls"] = _state.get("synth_calls", 0) + 1
 
-    text, reason = generate(system_text, user_content)
+    local_cmd = getattr(Config, "LOCAL_POLISH_CMD", "") or ""
+    shelby_success = False
+    text = None
+    reason = None
+    provider = "none"
+
+    # 1. المحاولة الأساسية: شلبي محلياً
+    if local_cmd:
+        shelby_timeout = float(getattr(Config, "LOCAL_POLISH_TIMEOUT", 180.0) or 180.0)
+        text, reason = _call_local_provider(
+            system_text,
+            user_content,
+            stage="synthesis",
+            timeout=shelby_timeout,
+            priority=True,
+        )
+        if text:
+            if not is_shelby_noop(raw_text, text, role_id=role_id):
+                shelby_success = True
+                provider = "shelby"
+            else:
+                note_shelby_noop()
+                logger.warning("⚠️ شلبي أعاد النص دون تنظيم فعلي في السبك (No-Op) — ارتداد لفلاش")
+                text = None
+                reason = "شلبي أعاد نصاً غير مسبوك (No-Op)"
+        else:
+            logger.warning("⚠️ تعذر سبك شلبي محلياً (%s) — ارتداد لفلاش", reason)
+
+    # 2. الاحتياطي التلقائي: جيميني فلاش
+    if not shelby_success:
+        with _lock:
+            _state["synth_fallback_calls"] = _state.get("synth_fallback_calls", 0) + 1
+        text, reason = generate(system_text, user_content)
+        if text:
+            provider = "flash"
+
     if text:
         with _lock:
             _state["synth_ok"] = _state.get("synth_ok", 0) + 1
+            _state["synth_last_provider"] = provider
         if glossary is not None:
             text, _n = glossary.apply(text, target="polished")
-        return text.strip(), None
+        out_text = text.strip()
+        return (out_text, None, provider) if return_provider else (out_text, None)
 
     reason = logkit.redact(reason)
     with _lock:
         _state["synth_fail"] = _state.get("synth_fail", 0) + 1
         _state["synth_last_error"] = str(reason or "")
-    return None, reason
+        _state["synth_last_provider"] = "none"
+    return (None, reason, "none") if return_provider else (None, reason)
 
 
 def synthesize_ex(raw_text, gemini_draft=None, shelby_draft=None, role_id=None, glossary=None, context_summary=None, flow_start=None):

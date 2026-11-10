@@ -152,3 +152,56 @@ def test_live_message_controller_finalize_with_drafts_and_md_cache(tmp_path, mon
     assert "## 📋 ملحق المسودات الأولية" in item["text"]
     assert "مسودة فلاش كاملة" in item["text"]
     assert "مسودة شلبي كاملة" in item["text"]
+
+
+def test_synthesizer_final_message_provider_tags_and_clean_body():
+    # 1. اختبار شلبي كمزود أساسي ونظافة الكتلة من بانر Verbatim
+    golden = "📌 **عنوان مسبوك**\n\nنص ذهبي نقي بدون أي تلوث."
+    telemetry_shelby = {"gemini": 4.4, "shelby": 8.7, "synth": 8.7, "total": 22.8, "synth_provider": "shelby"}
+    html_shelby = synthesizer_final_message_html(
+        golden,
+        gemini_text="مسودة فلاش",
+        shelby_text="مسودة شلبي",
+        telemetry=telemetry_shelby,
+        synth_provider="shelby",
+    )
+    assert "[🦙 شلبي]" in html_shelby
+    assert "🏆 السبك: 8.7ث (🦙 شلبي)" in html_shelby
+    assert "Verbatim Transcription" not in html_shelby
+    assert "تفريغ الفويس المسجل" not in html_shelby
+
+    # 2. اختبار ارتداد فلاش
+    telemetry_flash = {"gemini": 4.4, "shelby": 8.7, "synth": 1.6, "total": 15.0, "synth_provider": "flash"}
+    html_flash = synthesizer_final_message_html(
+        golden,
+        gemini_text="مسودة فلاش",
+        shelby_text="مسودة شلبي",
+        telemetry=telemetry_flash,
+        synth_provider="flash",
+    )
+    assert "[⚡ فلاش (ارتداد)]" in html_flash
+    assert "🏆 السبك: 1.6ث (⚡ فلاش)" in html_flash
+
+
+def test_text_assist_synthesize_prefers_shelby_and_falls_back(monkeypatch):
+    import text_assist
+    monkeypatch.setattr(config.Config, "LOCAL_POLISH_CMD", "dummy_shelby_cmd")
+
+    # سيناريو أ: شلبي ينجح محلياً -> السبّاك شلبي
+    monkeypatch.setattr(text_assist, "_call_local_provider", lambda sys_t, usr_c, **kw: ("ناتج سبك شلبي المتقن", None))
+    monkeypatch.setattr(text_assist, "generate", lambda sys_t, usr_c, **kw: ("ناتج فلاش الاحتياطي", None))
+
+    text, err, provider = text_assist.synthesize("نص خام", "مسودة فلاش", "مسودة شلبي", return_provider=True)
+    assert err is None
+    assert text == "ناتج سبك شلبي المتقن"
+    assert provider == "shelby"
+    assert text_assist.get_last_synth_provider() == "shelby"
+
+    # سيناريو ب: شلبي يفشل أو ينتهي وقته -> الارتداد التلقائي إلى فلاش
+    monkeypatch.setattr(text_assist, "_call_local_provider", lambda sys_t, usr_c, **kw: (None, "تجاوز مهلة شلبي"))
+    text_f, err_f, provider_f = text_assist.synthesize("نص خام", "مسودة فلاش", "مسودة شلبي", return_provider=True)
+    assert err_f is None
+    assert text_f == "ناتج فلاش الاحتياطي"
+    assert provider_f == "flash"
+    assert text_assist.get_last_synth_provider() == "flash"
+
