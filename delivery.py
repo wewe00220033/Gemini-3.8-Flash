@@ -508,14 +508,7 @@ def synthesizer_final_message_html(golden_text, gemini_text=None, shelby_text=No
     if title:
         head_parts.append(f"🏷️ <b>{html.escape(title)}</b>")
 
-    providers = []
-    if gemini_text:
-        providers.append("فلاش")
-    if shelby_text:
-        providers.append("شلبي")
-    provider_suffix = f" ({' + '.join(providers)})" if providers else " (فلاش + شلبي)"
-
-    head_txt = f"<b>🏆 النسخة الذهبية المسبوكة{provider_suffix}</b> · دور: {html.escape(str(role_name))}"
+    head_txt = f"<b>🏆 النسخة الذهبية المسبوكة (السبّاك)</b> · دور: {html.escape(str(role_name))}"
     if session_name:
         head_txt += f" · جلسة: «{html.escape(session_name)}»"
     head_parts.append(head_txt)

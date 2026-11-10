@@ -90,8 +90,8 @@ def test_synthesizer_final_message_html_expandable_blockquotes():
     # الذهبية في pre
     assert f"<pre>" in final_h
     assert html.escape(golden) in final_h
-    # ترويسة واضحة تحدد المساهمين (فلاش + شلبي)
-    assert "🏆 النسخة الذهبية المسبوكة (فلاش + شلبي)" in final_h
+    # ترويسة واضحة ومحددة للسبّاك النهائي
+    assert "🏆 النسخة الذهبية المسبوكة (السبّاك)" in final_h
     # افتراضياً: المسودات تُحذف من الرسالة النهائية لإبقاء الشات نظيفاً
     assert "blockquote expandable" not in final_h
     # تذييل التيليمتري
