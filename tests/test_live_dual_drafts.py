@@ -90,14 +90,23 @@ def test_synthesizer_final_message_html_expandable_blockquotes():
     # الذهبية في pre
     assert f"<pre>" in final_h
     assert html.escape(golden) in final_h
-    # المسودتان داخل blockquote expandable
-    assert "blockquote expandable" in final_h
-    assert "⚡ <b>[مسودة فلاش]:</b>" in final_h
-    assert html.escape(flash) in final_h
-    assert "🦙 <b>[مسودة شلبي]:</b>" in final_h
-    assert html.escape(shelby) in final_h
+    # ترويسة واضحة تحدد المساهمين (فلاش + شلبي)
+    assert "🏆 النسخة الذهبية المسبوكة (فلاش + شلبي)" in final_h
+    # افتراضياً: المسودات تُحذف من الرسالة النهائية لإبقاء الشات نظيفاً
+    assert "blockquote expandable" not in final_h
     # تذييل التيليمتري
     assert "⚡ فلاش: 5.5ث | 🤖 شلبي: 7.3ث | 🏆 السبك: 4.9ث | ⏱️ إجمالي: 18.2ث" in final_h
+
+    # لو طُلب صراحة include_drafts=True
+    final_with_drafts = synthesizer_final_message_html(
+        golden,
+        gemini_text=flash,
+        shelby_text=shelby,
+        include_drafts=True,
+    )
+    assert "blockquote expandable" in final_with_drafts
+    assert "⚡ <b>[مسودة فلاش]:</b>" in final_with_drafts
+    assert "🦙 <b>[مسودة شلبي]:</b>" in final_with_drafts
 
 
 def test_html_chunks_preserves_blockquote_expandable():
@@ -123,7 +132,7 @@ def test_live_message_controller_finalize_with_drafts_and_md_cache(tmp_path, mon
     )
     ctrl.start_live("رسالة البداية")
 
-    golden = "ذهب مسبوك " * 350  # نص طويل > 4000 UTF-16 لتفعيل التجزئة وزر .md
+    golden = "ذهب مسبوك " * 450  # نص طويل > 4000 UTF-16 لتفعيل التجزئة وزر .md
     flash = "مسودة فلاش كاملة"
     shelby = "مسودة شلبي كاملة"
 

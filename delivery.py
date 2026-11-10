@@ -495,18 +495,27 @@ def synthesizer_interim_message_html(gemini_text, shelby_text=None, role_id=None
 
 
 def synthesizer_final_message_html(golden_text, gemini_text=None, shelby_text=None,
-                                   role_id=None, session_name=None, title=None, telemetry=None):
+                                   role_id=None, session_name=None, title=None, telemetry=None,
+                                   include_drafts=False):
     """
     الرسالة الذهبية النهائية المسبوكة بعد نجاح الوكيل الثالث:
-    تعرض النسخة الذهبية داخل <pre>، ومسودتي فلاش وشلبي مطويتين أسفلها داخل <blockquote expandable>،
-    وتذييل التوقيت الدقيق خارج <pre>.
+    تعرض النسخة الذهبية داخل <pre>، مع وسم يوضح المساهمين (فلاش + شلبي)، وتذييل التوقيت الدقيق خارج <pre>.
+    (افتراضياً لا تُعرض المسودات المطوية في الشات النهائي لإبقاء الرسالة نظيفة وموجزة، مع حفظها في كاش .md).
     """
     role = prompts.get_role(role_id) or {}
     role_name = role.get("name") or role_id or "عام"
     head_parts = []
     if title:
         head_parts.append(f"🏷️ <b>{html.escape(title)}</b>")
-    head_txt = f"<b>🏆 النسخة الذهبية المسبوكة</b> · دور: {html.escape(str(role_name))}"
+
+    providers = []
+    if gemini_text:
+        providers.append("فلاش")
+    if shelby_text:
+        providers.append("شلبي")
+    provider_suffix = f" ({' + '.join(providers)})" if providers else " (فلاش + شلبي)"
+
+    head_txt = f"<b>🏆 النسخة الذهبية المسبوكة{provider_suffix}</b> · دور: {html.escape(str(role_name))}"
     if session_name:
         head_txt += f" · جلسة: «{html.escape(session_name)}»"
     head_parts.append(head_txt)
@@ -520,18 +529,19 @@ def synthesizer_final_message_html(golden_text, gemini_text=None, shelby_text=No
         f"<pre>{html.escape(body)}</pre>",
     ]
 
-    # مسودتا فلاش وشلبي مطويتان داخل <blockquote expandable> (بدون pre داخلي حتى لا يرفضه تليجرام)
-    if gemini_text:
-        body_gem = gemini_text
-        if settings.header_for("polished"):
-            body_gem = archive.banner_text() + "\n" + gemini_text
-        blocks.append(f"<blockquote expandable>⚡ <b>[مسودة فلاش]:</b>\n{html.escape(body_gem)}</blockquote>")
+    # لو طُلب صراحة تضمين المسودات الأولية (افتراضياً تُحذف في الرد النهائي بناءً على رغبة المستخدم)
+    if include_drafts:
+        if gemini_text:
+            body_gem = gemini_text
+            if settings.header_for("polished"):
+                body_gem = archive.banner_text() + "\n" + gemini_text
+            blocks.append(f"<blockquote expandable>⚡ <b>[مسودة فلاش]:</b>\n{html.escape(body_gem)}</blockquote>")
 
-    if shelby_text:
-        body_shl = shelby_text
-        if settings.header_for("polished"):
-            body_shl = archive.banner_text() + "\n" + shelby_text
-        blocks.append(f"<blockquote expandable>🦙 <b>[مسودة شلبي]:</b>\n{html.escape(body_shl)}</blockquote>")
+        if shelby_text:
+            body_shl = shelby_text
+            if settings.header_for("polished"):
+                body_shl = archive.banner_text() + "\n" + shelby_text
+            blocks.append(f"<blockquote expandable>🦙 <b>[مسودة شلبي]:</b>\n{html.escape(body_shl)}</blockquote>")
 
     if telemetry and isinstance(telemetry, dict):
         t_gem = f"{telemetry.get('gemini', 0):.1f}ث"
