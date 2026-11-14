@@ -370,10 +370,12 @@ def _call_local_provider(system_text, raw_text, stage="polish", timeout=None, pr
 
 _AR_DIACRITICS_RE = re.compile(r"[\u064B-\u065F\u0670\u0640]")
 _NOOP_PUNCT_RE = re.compile(r"[\.\,\،\؛\:\!\؟\?\-\–\—\"\'\(\)\[\]\{\}«»…]+")
+_TAG_RE = re.compile(r"</?audio_transcript>", re.IGNORECASE)
 
 
 def _normalize_for_noop(text):
     s = str(text or "").strip().lower()
+    s = _TAG_RE.sub(" ", s)
     s = _AR_DIACRITICS_RE.sub("", s)
     s = s.replace("أ", "ا").replace("إ", "ا").replace("آ", "ا")
     s = s.replace("ى", "ي").replace("ة", "ه")

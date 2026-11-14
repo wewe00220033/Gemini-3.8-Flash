@@ -51,9 +51,8 @@ _POLISH_COMMON = (
     "8. 👥 المتكلمون والحوار: إذا تبيّن بوضوح وجود أكثر من متكلم، ميّزهم بـ **المتكلم 1:** و **المتكلم 2:** (أو بأسمائهم إن ذُكرت صراحة في النص). إذا كان متكلماً واحداً لا تضف أي تسمية.\n"
     "9. 📑 العنوان والفقرات والتنسيق (متوافق مع تليجرام): ممنوع استخدام وسوم العناوين غير المدعومة بتليجرام (مثل # و ##). ابدأ بعنوان رئيسي مسبوق بإيموجي بخط عريض: 📌 **العنوان**. قسّم النص إلى فقرات منطقية متماسكة بعلامات ترقيم سليمة (، ؛ ؟ . « »)، واستخدم 🔹 للقرارات والخطوات.\n"
     "10. 🗺️ الخريطة الذهنية الهرمية (3 مستويات كحد أقصى): في نهاية النص المنظم، أضف خريطة ذهنية هرمية رأسية ملخصة تحت عنوان 📍 **الخريطة الذهنية للموضوع:** (Root → Branch → Leaf) لا تتجاوز أسطرها 32 حرفاً لتناسب شاشات الموبايل دون كسر السطور.\n"
-    "11. ⚠️ الحالات الخاصة وحدود الطول: إذا كان النص فارغاً أو بلا معنى، أخرج فقط: [لا يوجد نص قابل للتنظيم]. إذا كان النص طويلاً جداً، اختم بـ [يتبع: لم يكتمل تحرير النص]. وإذا كان النص قصيراً جداً (< 40 كلمة)، نظّمه في سطر أو سطرين واحتفظ ببساطته دون اصطناع خريطة.\n"
-    "12. 🎯 المراجعة الداخلية وشكل المخرجات الصافي: راجع الناتج بصمت داخلياً للتأكد من انعدام الهلوسة وحفظ كامل المحتوى والتصحيح الذاتي. أخرج النص المنظم النهائي مباشرة، بلا أي مقدمات ('إليك النص')، وبلا خاتمة، ولا تعليقات.\n"
-    "إن تعذّر التحرير لأي سبب (نص مقطوع، فارغ، غير مفهوم) أخرج النص الخام كما هو داخل الكتلة بلا أي اعتذار أو تعليق أو مقدمة."
+    "11. ⚠️ الحالات الخاصة وحدود الطول: إذا كان النص فارغاً أو بلا معنى، أخرج فقط: [لا يوجد نص قابل للتنظيم]. إذا كان النص طويلاً جداً، اختم بـ [يتبع: لم يكتمل تحرير النص]. وإذا كان النص قصيراً جداً (< 40 كلمة)، نظّمه في سطر أو سطرين واحتفظ ببساطته دون اصطناع خريطة. وإن تعذّر التحرير لأي سبب آخر (نص مقطوع أو غير مفهوم) فأخرج النص الخام كما ورد بلا أي اعتذار أو تعليق أو مقدمة، ولا تُخرج وسمي <audio_transcript> في الناتج أبداً.\n"
+    "12. 🎯 المراجعة الداخلية وشكل المخرجات الصافي: راجع الناتج بصمت داخلياً للتأكد من انعدام الهلوسة وحفظ كامل المحتوى والتصحيح الذاتي. أخرج النص المنظم النهائي مباشرة، بلا أي مقدمات ('إليك النص')، وبلا خاتمة، ولا تعليقات."
 )
 
 DEFAULT_ROLES = {
@@ -97,7 +96,7 @@ DEFAULT_ROLES = {
     "medical": {
         "name": "طبيب", "protected": True,
         "layer_a": "المجال: طبي؛ المصطلحات الطبية وأسماء الأدوية تُكتب بالإنجليزية.",
-        "layer_b": "نظّم النص طبياً(الشكوى / الملاحظات / الخطة إن وردت). المصطلحات الطبية بالإنجليزية. "
+        "layer_b": "نظّم النص طبياً (الشكوى / الملاحظات / الخطة إن وردت). المصطلحات الطبية بالإنجليزية. "
                    "أضف في النهاية سطراً: «⚠️ هذا تفريغ آلي وليس استشارة طبية».",
     },
 }
@@ -261,12 +260,14 @@ _TAG = "audio_transcript"
 _OPEN = "<" + _TAG + ">"
 _CLOSE = "<" + "/" + _TAG + ">"
 _CLOSE_SAFE = "<" + "\\/" + _TAG + ">"
+TRANSCRIPT_WRAP_OVERHEAD = len(_OPEN) + len(_CLOSE) + 2   # = 39
 
 
 def wrap_transcript(text):
-    """يغلّف الخام بوسم العزل. تكراري (idempotent) فقط عند تغليف صحيح من الطرفين."""
+    """يغلّف الخام بوسم العزل (DEC-05). تكراري فقط عند تغليف صحيح وحيد من الطرفين؛ يحيّد أي وسم إغلاق داخلي."""
     t = str(text or "").strip()
-    if t.startswith(_OPEN) and t.endswith(_CLOSE):
+    if (t.startswith(_OPEN) and t.endswith(_CLOSE)
+            and t.count(_OPEN) == 1 and t.count(_CLOSE) == 1):
         return t
     safe = t.replace(_CLOSE, _CLOSE_SAFE)
     return _OPEN + "\n" + safe + "\n" + _CLOSE
@@ -327,9 +328,10 @@ def compose_synthesis_prompt(raw_text, gemini_draft=None, shelby_draft=None, rol
         s_header = ""
 
     raw_header = "=== 🎙️ أصل التفريغ الصوتي الخام ===\n"
+    wrapped = wrap_transcript(raw)
 
     # 2. حساب السقف واقتطاع المسودات إذا لزم الأمر لحماية الخام والدستور
-    fixed_overhead = len(sys_text) + len(raw_header) + len(raw) + len(tail) + 16 + 39
+    fixed_overhead = len(sys_text) + len(raw_header) + len(wrapped) + len(tail) + 16
     draft_headers_len = (len(g_header) + 4 if has_g else 0) + (len(s_header) + 4 if has_s else 0)
     avail_drafts = max_chars - fixed_overhead - draft_headers_len
 
@@ -366,14 +368,15 @@ def compose_synthesis_prompt(raw_text, gemini_draft=None, shelby_draft=None, rol
 
     # في حال كان الخام نفسه ضخماً للغاية وتجاوز السقف مع الدستور
     cur_draft_headers_len = (len(g_header) + 4 if has_g else 0) + (len(s_header) + 4 if has_s else 0)
-    total_len = len(sys_text) + len(raw_header) + len(raw) + len(tail) + cur_draft_headers_len + len(g_draft) + len(s_draft) + 39
+    total_len = len(sys_text) + len(raw_header) + len(wrapped) + len(tail) + cur_draft_headers_len + len(g_draft) + len(s_draft)
     if total_len > max_chars:
         raw_trunc_marker = "\n[...تم اقتطاع النص الخام لضخامته...]"
-        allowed_raw = max_chars - (len(sys_text) + len(raw_header) + len(tail) + cur_draft_headers_len + len(g_draft) + len(s_draft) + len(raw_trunc_marker) + 16 + 39)
+        allowed_raw = max_chars - (len(sys_text) + len(raw_header) + len(tail) + cur_draft_headers_len + len(g_draft) + len(s_draft) + len(raw_trunc_marker) + 16 + TRANSCRIPT_WRAP_OVERHEAD)
         if allowed_raw > 100:
             raw = raw[:allowed_raw].rstrip() + raw_trunc_marker
+            wrapped = wrap_transcript(raw)
 
-    parts = [f"{raw_header}{wrap_transcript(raw)}"]
+    parts = [f"{raw_header}{wrapped}"]
     if has_g and g_draft:
         parts.append(f"{g_header}{g_draft}")
     if has_s and s_draft:
