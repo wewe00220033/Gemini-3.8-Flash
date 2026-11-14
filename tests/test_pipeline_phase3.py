@@ -166,7 +166,7 @@ def test_glossary_add_remove_find_parse(mods):
     assert not created2 and e2["id"] == e["id"]          # نفس اللفظ → إلحاق لا تكرار
     assert g.find("كلود")["id"] == e["id"]
     assert g.remove(e["id"]) is not None
-    assert g.find("كلود") is None
+    assert g.find(e["id"]) is None
 
 
 def test_glossary_corrupt_file_falls_back_to_defaults_with_notice(mods, tmp_path):
@@ -609,7 +609,7 @@ def test_cmd_mode_role_header(bot, mods):
     tb.handle_text("T", "1", {"message_id": 1}, "/role nope")
     assert "غير معروف" in _last_text(sent) and settings.role() == "devops"
     tb.handle_text("T", "1", {"message_id": 1}, "/roles")
-    assert "devops" in _last_text(sent)
+    assert "devops" in _last_text(sent) and "general" in _last_text(sent)
     tb.handle_text("T", "1", {"message_id": 1}, "/header off")
     assert settings.header_target() == "off"
 
