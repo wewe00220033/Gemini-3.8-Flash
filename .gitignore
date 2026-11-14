@@ -39,3 +39,5 @@ deploy_ready.zip
 # Release and deploy packages
 deploy_latest.zip
 releases/
+
+*.local_backup
