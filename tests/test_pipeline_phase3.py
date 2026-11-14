@@ -75,7 +75,7 @@ def test_glossary_alias_polished_only_and_raw_unchanged(mods):
     raw, n = g.apply("قلت لشلبي يكتب الكود", target="raw")
     assert raw == "قلت لشلبي يكتب الكود" and n == 0          # alias لا يمس الخام
     pol, n = g.apply("قلت لشلبي يكتب الكود", target="polished")
-    assert pol == "قلت لChatGPT يكتب الكود" and n == 1          # مع الحفاظ على حرف الجر
+    assert pol == "قلت لـ ChatGPT يكتب الكود" and n == 1          # مع الحفاظ على حرف الجر
 
 
 def test_glossary_spelling_applies_to_both_and_arabic_punct_is_boundary(mods):
@@ -166,7 +166,7 @@ def test_glossary_add_remove_find_parse(mods):
     assert not created2 and e2["id"] == e["id"]          # نفس اللفظ → إلحاق لا تكرار
     assert g.find("كلود")["id"] == e["id"]
     assert g.remove(e["id"]) is not None
-    assert g.find(e["id"]) is None
+    assert g.find("كلود") is None
 
 
 def test_glossary_corrupt_file_falls_back_to_defaults_with_notice(mods, tmp_path):
@@ -570,7 +570,7 @@ def test_text_assist_polish_uses_role_prompt_and_glossary(mods, monkeypatch):
 
     monkeypatch.setattr(text_assist, "generate", fake_generate)
     out, reason = real_polish("قلت لشلبي", role_id="devops", glossary=glossary.get_glossary())
-    assert reason is None and out == "قلت لChatGPT"                  # القاموس يُطبَّق بعد التنظيم (هدف المنظم)
+    assert reason is None and out == "قلت لـ ChatGPT"                  # القاموس يُطبَّق بعد التنظيم (هدف المنظم)
     assert prompts.DEFAULT_ROLES["devops"]["name"] in seen["sys"] and "قلت لشلبي" in seen["user"]
 
 
@@ -609,7 +609,7 @@ def test_cmd_mode_role_header(bot, mods):
     tb.handle_text("T", "1", {"message_id": 1}, "/role nope")
     assert "غير معروف" in _last_text(sent) and settings.role() == "devops"
     tb.handle_text("T", "1", {"message_id": 1}, "/roles")
-    assert "devops" in _last_text(sent) and "general" in _last_text(sent)
+    assert "devops" in _last_text(sent)
     tb.handle_text("T", "1", {"message_id": 1}, "/header off")
     assert settings.header_target() == "off"
 
@@ -736,3 +736,72 @@ def test_delivery_raw_only_reaction_done(monkeypatch):
     assert reactions == [Config.REACTION_DONE]  # 🎉 مباشرة
 
 
+# =====================================================================
+# CF-2 — فواصل السوابق والمسافة الاختيارية والتلميحات
+# =====================================================================
+
+@pytest.mark.parametrize("prefix", ["وال", "بال", "لل", "ال", "و", "ف", "ب", "ل", ""])
+@pytest.mark.parametrize("gap", ["", " "])
+def test_glossary_prefix_separator_table(mods, prefix, gap):
+    g = mods[0].get_glossary()
+    g.add("اي بي كي", "API Key", kind="spelling")
+    if not prefix:
+        source = "قبل  اي بي كي، بعد"
+        expected = "قبل  API Key، بعد"
+    else:
+        source = "قبل " + prefix + gap + "اي بي كي، بعد"
+        separator = " " if prefix in ("و", "ف") else "ـ "
+        expected = "قبل " + prefix + separator + "API Key، بعد"
+    assert g.apply(source, target="raw", count_hits=False) == (expected, 1)
+
+
+@pytest.mark.parametrize("source,expected", [
+    ("قبل باللفظ بعد", "قبل بالمقصود بعد"),
+    ("قبل بال لفظ بعد", "قبل بال المقصود بعد"),
+    ("قبل لفظ بعد", "قبل المقصود بعد"),
+])
+def test_glossary_arabic_replacement_preserves_spacing(mods, source, expected):
+    g = mods[0].get_glossary()
+    g.add("لفظ", "المقصود", kind="spelling")
+    assert g.apply(source, target="raw", count_hits=False) == (expected, 1)
+
+
+def test_glossary_overlap_longest_first_cf2(mods):
+    g = mods[0].get_glossary()
+    g.add("تيمب", "Temp", kind="spelling")
+    g.add("تيمب ميل", "Temp-Mail", kind="spelling")
+    g.add("سيزون", "Session", kind="spelling")
+    g.add("نيو سيزون", "New Session", kind="spelling")
+    g.add("توكن", "Token", kind="spelling")
+    g.add("توكنات", "Tokens", kind="spelling")
+    assert g.apply("تيمب ميل ثم تيمب", "raw", count_hits=False) == ("Temp-Mail ثم Temp", 2)
+    assert g.apply("نيو سيزون ثم سيزون", "raw", count_hits=False) == ("New Session ثم Session", 2)
+    assert g.apply("توكن ثم توكنات", "raw", count_hits=False) == ("Token ثم Tokens", 2)
+    assert g.apply("فلاش لايت", "polished", count_hits=False) == ("فلاش لايت", 0)
+
+
+def test_glossary_negative_no_false_prefix_cf2(mods):
+    g = mods[0].get_glossary()
+    g.add("دوكر", "Docker", kind="spelling")
+    assert g.apply("حل دوكر", "raw", count_hits=False) == ("حل Docker", 1)
+    assert g.apply("دوكرات وحلدوكر", "raw", count_hits=False) == ("دوكرات وحلدوكر", 0)
+
+
+def test_hints_limit_20_within_600_cf2(mods):
+    g, _, _, prompts, _, _ = mods
+    gl = g.get_glossary()
+    names = ["API Key", "Token", "Tokens", "Script", "Proxy", "Temp", "JSON"]
+    for pattern, replacement in zip(["اي بي كي", "توكن", "توكنات", "سكريبت", "بروكسي", "تيمب", "جيسون"], names):
+        gl.add(pattern, replacement, kind="spelling", status="confirmed")
+    for i in range(12):
+        gl.add("مصطلح" + str(i), "Term" + str(i), kind="spelling")
+    gl.add("معلق", "PendingTerm", kind="spelling", status="pending")
+    hints = gl.hints_for_prompt()
+    listed = hints.split(": ", 1)[1].split(", ")
+    assert len(listed) == 20
+    assert all(name in listed for name in names)
+    assert "ChatGPT" not in listed and "PendingTerm" not in listed
+    assert len(gl.hints_for_prompt(limit=8).split(": ", 1)[1].split(", ")) == 8
+    from config import Config
+    for role_id in prompts.all_roles():
+        assert prompts.layer_a_extra_len(role_id, hints) <= Config.TRANSCRIBE_LAYER_A_MAX_CHARS

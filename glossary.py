@@ -7,7 +7,7 @@
 - نوعان: `spelling` (تصحيح إملائي — يُطبَّق على الخام والمنظم) و`alias` (لقب/كناية — المنظم فقط افتراضياً؛
   الخام يبقى كما نُطق = أمانة النص).
 - `scope` لكل مدخل: both / polished_only / raw_only.
-- مطابقة بحدود الكلمة مع السوابق العربية (و/ف/ب/ل/ال/وال/بال/لل) — السابقة تُحفظ ("وشلبي" → "وChatGPT").
+- مطابقة بحدود الكلمة مع السوابق العربية (و/ف/ب/ل/ال/وال/بال/لل)، متصلة أو بمسافة واحدة؛ قبل بديل لاتيني: وصلة «ـ » للسوابق المتصلة ومسافة لـ و/ف، والعربية بلا تغيير.
 - تطبيع الهمزات/الياء/التاء المربوطة في **المطابقة فقط** لا في النص الناتج.
 - `context_rules`: {"if_near_any": [...], "then": "skip"} ضمن ±5 كلمات (أوبس قرب "ستوديو" = OBS لا Opus).
 - الأنماط الأطول أولاً (منع "فلاش" من أكل "فلاش لايت").
@@ -34,7 +34,7 @@ def _audit(action, **fields):
 
 SCHEMA_VERSION = 1
 PREFIXES = ("وال", "بال", "لل", "ال", "و", "ف", "ب", "ل")
-_PREFIX_RE = "(?:" + "|".join(sorted(PREFIXES, key=len, reverse=True)) + ")?"
+_PREFIX_RE = "(?:" + "|".join(sorted(PREFIXES, key=len, reverse=True)) + ")"
 # حدود الكلمة: حروف عربية (الأحرف فقط — لا علامات الترقيم العربية مثل ، ؛ ؟) + \w
 _AR_LETTER = r"\u0621-\u064A\u066E-\u06D3"
 _WB_L = r"(?<![\w" + _AR_LETTER + r"])"
@@ -133,7 +133,7 @@ class Glossary:
             if not pats or not e.get("replacement"):
                 continue
             alts = sorted({normalize(p) for p in pats}, key=len, reverse=True)
-            rx = re.compile(_WB_L + "(" + _PREFIX_RE + ")(" + "|".join(re.escape(a) for a in alts) + ")" + _WB_R,
+            rx = re.compile(_WB_L + "(?:(" + _PREFIX_RE + r")(\s?))?(" + "|".join(re.escape(a) for a in alts) + ")" + _WB_R,
                             re.IGNORECASE)
             compiled.append((e, rx, max(len(a) for a in alts)))
         compiled.sort(key=lambda t: t[2], reverse=True)     # الأنماط الأطول أولاً (05 §3 قاعدة 4)
@@ -198,9 +198,14 @@ class Glossary:
                 before = text[:m.start()].rstrip()
                 if normalize(before).endswith(prev_word_norm):
                     continue
-            prefix = text[m.start(1):m.end(1)]
+            prefix = text[m.start(1):m.end(1)] if m.group(1) is not None else ""
+            gap = text[m.start(2):m.end(2)] if m.group(2) is not None else ""
+            if prefix and re.match(r"[A-Za-z]", replacement):
+                separator = " " if prefix in ("و", "ف") else "ـ "
+            else:
+                separator = gap
             out.append(text[last:m.start()])
-            out.append(prefix + replacement)
+            out.append(prefix + separator + replacement)
             last = m.end()
             n += 1
         if not n:
@@ -221,7 +226,7 @@ class Glossary:
                     return True
         return False
 
-    def hints_for_prompt(self, limit=8):
+    def hints_for_prompt(self, limit=20):
         """تلميح إملائي قصير لطبقة A (05 §5): الأسماء الإنجليزية المؤكدة من نوع spelling فقط."""
         with self._lock:
             names = [e["replacement"] for e in self.doc.get("entries", [])
