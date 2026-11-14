@@ -414,7 +414,7 @@ def polish_gemini(raw_text, role_id=None, glossary=None, context_summary=None):
     if context_summary:
         system_text += ("\n\nملخص الجلسة حتى الآن (للفهم فقط — لا تضفه ولا تعِد كتابته، نظّم النص الجديد فقط):\n"
                         + str(context_summary)[:Config.SESSION_SUMMARY_MAX_CHARS])
-    text, reason = generate(system_text, raw_text)
+    text, reason = generate(system_text, prompts.wrap_transcript(raw_text))
     if text is None:
         return None, logkit.redact(reason)
     if glossary is not None:
@@ -433,7 +433,7 @@ def polish_local(raw_text, role_id=None, glossary=None, context_summary=None):
     if context_summary:
         system_text += ("\n\nملخص الجلسة حتى الآن (للفهم فقط — لا تضفه ولا تعِد كتابته، نظّم النص الجديد فقط):\n"
                         + str(context_summary)[:Config.SESSION_SUMMARY_MAX_CHARS])
-    text, reason = _call_local_provider(system_text, raw_text)
+    text, reason = _call_local_provider(system_text, prompts.wrap_transcript(raw_text))
     if text:
         if is_shelby_noop(raw_text, text, role_id=role_id):
             with _lock:
@@ -474,7 +474,7 @@ def polish(raw_text, role_id=None, glossary=None, context_summary=None):
     reason = None
     # 1. محاولة المزود المحلي أولاً إذا كان معرّفاً
     if getattr(Config, "LOCAL_POLISH_CMD", ""):
-        text, reason = _call_local_provider(system_text, raw_text)
+        text, reason = _call_local_provider(system_text, prompts.wrap_transcript(raw_text))
         if text:
             if is_shelby_noop(raw_text, text, role_id=role_id):
                 with _lock:
@@ -496,7 +496,7 @@ def polish(raw_text, role_id=None, glossary=None, context_summary=None):
 
     # 2. المسار السحابي الافتراضي (Gemini Flash-Lite) لو المحلي غير مفعل أو فشل
     if text is None:
-        text, reason = generate(system_text, raw_text)
+        text, reason = generate(system_text, prompts.wrap_transcript(raw_text))
 
     if text is None:
         return None, logkit.redact(reason)
