@@ -906,7 +906,6 @@ def _deliver_synthesizer(raw, polished, role_id, gl, l2, session_name, sender, a
                     synth_provider = getattr(text_assist, "get_last_synth_provider", lambda: "shelby")()
                 else:
                     golden_text = synth_res
-                    synth_err = None
                     synth_provider = "shelby"
 
                 synth_elapsed = time.monotonic() - t0_synth
