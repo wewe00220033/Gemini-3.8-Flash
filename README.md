@@ -8,6 +8,10 @@
 [![Web UI](https://img.shields.io/badge/Web%20UI-Real%20Audio-green.svg)](http://localhost:8080)
 [![License: MIT](https://img.shields.io/badge/License-MIT-purple.svg)](LICENSE)
 
+**🌿 الفرع:** `A-test` · **🏷️ الإصدار:** `2.0.0-phase7.1`  
+**🔍 آخر تدقيق مستقل:** 2026-11-14 — `Arena-Ai-Agent/Claude-Fable/` (HEAD `bc23e98`)  
+**🧪 الاختبارات/CI:** 643 مجموعة (640 passed / 2 failed cp1252 / 1 skipped) · CI فاشل بسبب `pyflakes` — خطة الماستر `pending owner approval`  
+
 ---
 
 ## 🌟 مميزات المنظومة 360°
