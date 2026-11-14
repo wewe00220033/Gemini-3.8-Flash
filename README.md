@@ -9,8 +9,8 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-purple.svg)](LICENSE)
 
 **🌿 الفرع:** `A-test` · **🏷️ الإصدار:** `2.0.0-phase7.1`  
-**🔍 آخر تدقيق مستقل:** 2026-11-14 — `Arena-Ai-Agent/Claude-Fable/` (HEAD `09d5dd9`)  
-**🧪 الاختبارات/CI:** 643 مجموعة (640 passed / 2 failed cp1252 / 1 skipped) · CI فاشل بسبب `pyflakes` (يُصلَّح في CF-0) — خطة الماستر v2.4 `approved — awaiting GO`  
+**🔍 آخر تدقيق مستقل:** 2026-11-14 — `Arena-Ai-Agent/Claude-Fable/` (HEAD قبل المزامنة `4ca82a5`؛ مرجع CI `50f6926`)  
+**🧪 الاختبارات/CI:** ✅ Linux: `643 passed` على Python 3.10 و3.12؛ run `43605290628` عند `50f6926` ناجح — CF-0 مكتمل (`fa2df6f` + تصحيح `50f6926`) وCF-1 مكتمل في `4ca82a5`؛ CF-2 ينتظر الإذن. خط Windows السابق (640/2/1) لم يُعَد تشغيله.  
 
 ---
 
