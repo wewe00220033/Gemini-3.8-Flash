@@ -756,13 +756,13 @@ def test_glossary_prefix_separator_table(mods, prefix, gap):
 
 
 @pytest.mark.parametrize("source,expected", [
-    ("قبل باللفظ بعد", "قبل بالمقصود بعد"),
-    ("قبل بال لفظ بعد", "قبل بال المقصود بعد"),
-    ("قبل لفظ بعد", "قبل المقصود بعد"),
+    ("قبل باللفظ بعد", "قبل بالمعنى بعد"),
+    ("قبل بال لفظ بعد", "قبل بال معنى بعد"),
+    ("قبل لفظ بعد", "قبل معنى بعد"),
 ])
 def test_glossary_arabic_replacement_preserves_spacing(mods, source, expected):
     g = mods[0].get_glossary()
-    g.add("لفظ", "المقصود", kind="spelling")
+    g.add("لفظ", "معنى", kind="spelling")
     assert g.apply(source, target="raw", count_hits=False) == (expected, 1)
 
 
