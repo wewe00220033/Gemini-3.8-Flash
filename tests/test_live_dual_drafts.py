@@ -95,7 +95,7 @@ def test_synthesizer_final_message_html_expandable_blockquotes():
     # تذييل التيليمتري
     assert "⚡ فلاش: 5.5ث | 🤖 شلبي: 7.3ث | 🏆 السبك: 4.9ث | ⏱️ إجمالي: 18.2ث" in final_h
 
-    # لو طُلبت صراحة include_drafts=True
+    # لو طُلب صراحة include_drafts=True
     final_with_drafts = synthesizer_final_message_html(
         golden,
         gemini_text=flash,
