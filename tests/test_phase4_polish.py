@@ -638,3 +638,22 @@ def test_synth_payload_order_and_bounds_30k():
     assert o < c and out.count("</audio_transcript>") == 1
     assert c < out.rindex("المطلوب:")
 
+
+def test_silent_failure_rule_present_and_clean_markdown():
+    from prompts import _POLISH_COMMON, DEFAULT_ROLES
+    # 1. H-04 صامت الفشل موجود في القاعدة 11
+    assert "إن تعذّر التحرير لأي سبب" in _POLISH_COMMON
+    # 2. القواعد 8 و 9 و 10 خالية تماماً من النجوم Markdown المزدوجة **
+    for r_num in ["8. 👥", "9. 📑", "10. 🗺️"]:
+        idx = _POLISH_COMMON.index(r_num)
+        next_idx = _POLISH_COMMON.find("\n", idx)
+        rule_line = _POLISH_COMMON[idx:next_idx]
+        assert "**" not in rule_line, f"Double asterisk found in rule: {rule_line}"
+    # 3. إزالة النجوم من ترويسة الخريطة في الدور العام
+    assert "**" not in DEFAULT_ROLES["general"]["layer_b"]
+    # 4. التعريف البنيوي للعثمة في القاعدة 3 وخلوه من «تفيد التأكيد»
+    assert "يُحذف فقط: التكرار المتجاور لنفس الكلمة أو العبارة" in _POLISH_COMMON
+    assert "لا تُحذف أي كلمة ذات معنى مهما قصرت" in _POLISH_COMMON
+    assert "تفيد التأكيد" not in _POLISH_COMMON
+
+
