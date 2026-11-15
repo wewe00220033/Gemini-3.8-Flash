@@ -8,9 +8,9 @@
 [![Web UI](https://img.shields.io/badge/Web%20UI-Real%20Audio-green.svg)](http://localhost:8080)
 [![License: MIT](https://img.shields.io/badge/License-MIT-purple.svg)](LICENSE)
 
-**🌿 الفرع:** `A-test` · **🏷️ الإصدار:** `2.0.0-phase7.1`  
-**🔍 آخر تدقيق مستقل:** 2026-11-14 — `Arena-Ai-Agent/Claude-Fable/` (HEAD قبل المزامنة `4ca82a5`؛ مرجع CI `50f6926`)  
-**🧪 الاختبارات/CI:** ✅ Linux: `643 passed` على Python 3.10 و3.12؛ run `43605290628` عند `50f6926` ناجح — CF-0 مكتمل (`fa2df6f` + تصحيح `50f6926`) وCF-1 مكتمل في `4ca82a5`؛ CF-2 ينتظر الإذن. خط Windows السابق (640/2/1) لم يُعَد تشغيله.  
+**🌿 الفرع:** `A-test` · **🏷️ الإصدار:** `2.0.0-phase7.2`  
+**🔍 آخر تدقيق مستقل:** 2026-11-15 — `Arena-Ai-Agent/Claude-Fable/` خطة v2.4 مكتملة بالكامل (CF-0 → CF-5)؛ HEAD الكود `fbbd123`.  
+**🧪 الاختبارات/CI:** ✅ `669 passed, 1 skipped` (670 مجموعاً) محلياً على Windows/Python 3.12؛ GitHub Actions run `43680035996` عند `fbbd123` ناجح (Lint/Compile/Tests) — مصفوفة CI محصورة على Python 3.12 منذ `59b40cf`. تشمل الاختبارات المعمارية الثمانية للخطة 04 §3.1.  
 
 ---
 
@@ -200,7 +200,7 @@ pip install -r requirements-dev.txt
 python -m pytest        # 641 اختباراً (بلا شبكة: FakeTelegram + FakeClock + stub للمساعد النصي والتسمية)
 python -m pyflakes *.py
 ```
-CI يعمل تلقائياً على كل PR و Push (Python 3.10 و 3.12 بنجاح 100%). الاختبارات تعمل على Linux و Windows.
+CI يعمل تلقائياً على كل PR و Push (Python 3.12 بنجاح 100% منذ 59b40cf). الاختبارات تعمل على Linux و Windows.
 
 خارطة طريق v2 والتصميم الكامل (24 ملفاً، 70 حالة استثنائية): [`architecture-v2/`](architecture-v2/). المنجز: المراحل من 0 حتى 7.1 بالإضافة إلى المرحلة 8 لمسار السبّاك الثلاثي المسبوك (محرك Popen المحلي، قتل شجرة العمليات، منسق FIFO العادل، كاش .md الذري وزر التصدير التفاعلي، والعرض اللحظي والختامي المزدوج لمسودتي فلاش وشلبي مع النسخة الذهبية عبر كتل expandable) مكتملة بنسبة 100%. المنظومة في حالة استقرار تام ومختبرة ميدانياً.
 
