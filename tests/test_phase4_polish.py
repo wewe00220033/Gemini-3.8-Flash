@@ -655,5 +655,9 @@ def test_silent_failure_rule_present_and_clean_markdown():
     assert "يُحذف فقط: التكرار المتجاور لنفس الكلمة أو العبارة" in _POLISH_COMMON
     assert "لا تُحذف أي كلمة ذات معنى مهما قصرت" in _POLISH_COMMON
     assert "تفيد التأكيد" not in _POLISH_COMMON
+    # 5. CF-6: لا طلب تنسيق عريض بعد حذف ** (لا آلية لعرضه داخل <pre>)
+    i9 = _POLISH_COMMON.index("9. 📑")
+    assert "عريض" not in _POLISH_COMMON[i9:_POLISH_COMMON.find("\n", i9)]
+    assert "عريض" not in DEFAULT_ROLES["general"]["layer_b"]
 
 
