@@ -62,6 +62,12 @@ DEFAULT_ENTRIES = [
      "status": "pending", "context_rules": [], "note": "المالك: «تبع كلود — ف أ ب ل». المقصود غير مؤكد (Claude Code؟)"},
     {"id": "g_007", "patterns": ["أسترا", "استرا", "أسترال", "استرال"], "replacement": "?", "kind": "alias", "scope": "polished_only",
      "status": "pending", "context_rules": [], "note": "المالك: «تبع ChatGPT». المقصود غير مؤكد"},
+    {"id": "g_008", "patterns": ["موديل"], "replacement": "Model", "kind": "spelling",
+     "scope": "both", "status": "confirmed", "context_rules": []},
+    {"id": "g_009", "patterns": ["موديلين", "موديلات", "موديلز"], "replacement": "Models", "kind": "spelling",
+     "scope": "both", "status": "confirmed", "context_rules": []},
+    {"id": "g_010", "patterns": ["أوتبوت", "اوتبوت", "أوت بوت", "اوت بوت"], "replacement": "Output", "kind": "spelling",
+     "scope": "both", "status": "confirmed", "context_rules": []},
 ]
 
 _NORM_TABLE = str.maketrans({"أ": "ا", "إ": "ا", "آ": "ا", "ى": "ي", "ة": "ه"})
@@ -113,6 +119,19 @@ class Glossary:
             if not isinstance(doc, dict) or not isinstance(doc.get("entries"), list):
                 doc = _default_doc()
                 self._write(doc)
+            else:
+                # مزامنة تلقائية للمداخل الافتراضية المؤكدة في أي ملف قائم
+                existing_patterns = {normalize(p) for e in doc.get("entries", []) for p in e.get("patterns", [])}
+                updated = False
+                for def_e in DEFAULT_ENTRIES:
+                    if def_e.get("status") == "confirmed":
+                        if not any(normalize(p) in existing_patterns for p in def_e.get("patterns", [])):
+                            doc["entries"].append(dict(def_e, hits=0, created=_now()))
+                            for p in def_e.get("patterns", []):
+                                existing_patterns.add(normalize(p))
+                            updated = True
+                if updated:
+                    self._write(doc)
             self.doc = doc
             self._compile()
 

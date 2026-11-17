@@ -624,8 +624,8 @@ def test_cmd_add_word_and_glossary_and_del(bot, mods):
     tb.handle_text("T", "1", {"message_id": 1}, "/add_word كيوبرنتس = Kubernetes spelling")
     assert glossary.get_glossary().find("كيوبرنتس")["scope"] == "both"
     tb.handle_text("T", "1", {"message_id": 1}, "/glossary")
-    assert "صفحة 1/2" in _last_text(sent) and "g_001" in _last_text(sent)
-    tb.handle_text("T", "1", {"message_id": 1}, "/glossary 2")
+    assert "صفحة 1/" in _last_text(sent) and "g_001" in _last_text(sent)
+    tb.handle_text("T", "1", {"message_id": 1}, "/glossary 3")
     assert "Claude" in _last_text(sent)
     tb.handle_text("T", "1", {"message_id": 1}, f"/del_word {e['id']} confirm")
     assert glossary.get_glossary().find("كلود") is None
@@ -805,3 +805,13 @@ def test_hints_limit_20_within_600_cf2(mods):
     from config import Config
     for role_id in prompts.all_roles():
         assert prompts.layer_a_extra_len(role_id, hints) <= Config.TRANSCRIBE_LAYER_A_MAX_CHARS
+
+
+def test_glossary_model_and_output_spelling(mods):
+    glossary = mods[0]
+    g = glossary.get_glossary()
+    res, _ = g.apply("الموديل ده قارن بين الموديلين والموديلات وشوف الأوتبوت", target="polished")
+    assert "الـ Model ده" in res
+    assert "الـ Models" in res
+    assert "الـ Output" in res
+
