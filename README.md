@@ -197,7 +197,7 @@ python main.py
 ## 🧪 الاختبارات والتطوير
 ```bash
 pip install -r requirements-dev.txt
-python -m pytest        # 671 اختباراً — 670 passed, 1 skipped (بلا شبكة: FakeTelegram + FakeClock + stub للمساعد النصي والتسمية)
+python -m pytest        # 672 اختباراً — 671 passed, 1 skipped (بلا شبكة: FakeTelegram + FakeClock + stub للمساعد النصي والتسمية)
 python -m pyflakes *.py
 ```
 CI يعمل تلقائياً على كل PR و Push (Python 3.12 بنجاح 100% منذ 59b40cf). الاختبارات تعمل على Linux و Windows.

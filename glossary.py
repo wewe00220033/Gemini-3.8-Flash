@@ -68,6 +68,21 @@ DEFAULT_ENTRIES = [
      "scope": "both", "status": "confirmed", "context_rules": []},
     {"id": "g_010", "patterns": ["أوتبوت", "اوتبوت", "أوت بوت", "اوت بوت"], "replacement": "Output", "kind": "spelling",
      "scope": "both", "status": "confirmed", "context_rules": []},
+    {"id": "g_011", "patterns": ["اي بي كي", "ايه بي كي", "إي بي كي", "اي بي كيه"], "replacement": "API Key", "kind": "spelling",
+     "scope": "both", "status": "confirmed",
+     "context_rules": [{"if_near_any": ["تطبيق", "أندرويد", "تثبيت", "apk"], "then": "skip"}]},
+    {"id": "g_012", "patterns": ["توكن", "توكين"], "replacement": "Token", "kind": "spelling",
+     "scope": "both", "status": "confirmed", "context_rules": []},
+    {"id": "g_013", "patterns": ["توكنات", "توكينات", "توكنز", "توكينز"], "replacement": "Tokens", "kind": "spelling",
+     "scope": "both", "status": "confirmed", "context_rules": []},
+    {"id": "g_014", "patterns": ["سكريبت", "اسكربت", "سكربت", "اسكريبت"], "replacement": "Script", "kind": "spelling",
+     "scope": "both", "status": "confirmed", "context_rules": []},
+    {"id": "g_015", "patterns": ["بروكسي", "بروكسى"], "replacement": "Proxy", "kind": "spelling",
+     "scope": "both", "status": "confirmed", "context_rules": []},
+    {"id": "g_016", "patterns": ["تيمب", "تمب"], "replacement": "Temp", "kind": "spelling",
+     "scope": "both", "status": "confirmed", "context_rules": []},
+    {"id": "g_017", "patterns": ["جيسون", "جايسون", "چيسون"], "replacement": "JSON", "kind": "spelling",
+     "scope": "both", "status": "confirmed", "context_rules": []},
 ]
 
 _NORM_TABLE = str.maketrans({"أ": "ا", "إ": "ا", "آ": "ا", "ى": "ي", "ة": "ه"})
@@ -120,13 +135,21 @@ class Glossary:
                 doc = _default_doc()
                 self._write(doc)
             else:
-                # مزامنة تلقائية للمداخل الافتراضية المؤكدة في أي ملف قائم
+                # مزامنة تلقائية للمداخل الافتراضية المؤكدة في أي ملف قائم (مع منع تضارب المعرّفات)
                 existing_patterns = {normalize(p) for e in doc.get("entries", []) for p in e.get("patterns", [])}
+                existing_ids = {e.get("id") for e in doc.get("entries", [])}
+                nums = [int(e["id"][2:]) for e in doc.get("entries", []) if re.fullmatch(r"g_\d+", str(e.get("id", "")))]
+                next_num = (max(nums) + 1) if nums else 1
                 updated = False
                 for def_e in DEFAULT_ENTRIES:
                     if def_e.get("status") == "confirmed":
                         if not any(normalize(p) in existing_patterns for p in def_e.get("patterns", [])):
-                            doc["entries"].append(dict(def_e, hits=0, created=_now()))
+                            new_e = dict(def_e, hits=0, created=_now())
+                            if new_e.get("id") in existing_ids:
+                                new_e["id"] = f"g_{next_num:03d}"
+                                next_num += 1
+                            existing_ids.add(new_e["id"])
+                            doc["entries"].append(new_e)
                             for p in def_e.get("patterns", []):
                                 existing_patterns.add(normalize(p))
                             updated = True

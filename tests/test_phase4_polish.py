@@ -662,6 +662,11 @@ def test_silent_failure_rule_present_and_clean_markdown():
     # 6. قاعدة المصطلحات 6 تتضمن Model و Output كأمثلة قياسية
     assert "الـ Model" in _POLISH_COMMON
     assert "الـ Output" in _POLISH_COMMON
+    # 7. قاعدة حماية العامية 4 تتضمن انتي بالياء للمؤنث
+    assert "'انتي' بالياء للمؤنث" in _POLISH_COMMON
+    # 8. تفريغ الأساس يدعم كتابة انتي بالياء للمؤنث
+    from config import Config
+    assert "'انتي' بالياء للمؤنث" in Config.SYSTEM_PROMPT
 
 
 

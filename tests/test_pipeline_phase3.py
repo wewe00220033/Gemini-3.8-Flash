@@ -625,7 +625,8 @@ def test_cmd_add_word_and_glossary_and_del(bot, mods):
     assert glossary.get_glossary().find("كيوبرنتس")["scope"] == "both"
     tb.handle_text("T", "1", {"message_id": 1}, "/glossary")
     assert "صفحة 1/" in _last_text(sent) and "g_001" in _last_text(sent)
-    tb.handle_text("T", "1", {"message_id": 1}, "/glossary 3")
+    last_page = _last_text(sent).split("صفحة 1/")[1].split(":")[0]
+    tb.handle_text("T", "1", {"message_id": 1}, f"/glossary {last_page}")
     assert "Claude" in _last_text(sent)
     tb.handle_text("T", "1", {"message_id": 1}, f"/del_word {e['id']} confirm")
     assert glossary.get_glossary().find("كلود") is None
@@ -814,4 +815,29 @@ def test_glossary_model_and_output_spelling(mods):
     assert "الـ Model ده" in res
     assert "الـ Models" in res
     assert "الـ Output" in res
+
+
+def test_glossary_zizo_plan_terms_and_id_collision_guard(mods, tmp_path):
+    glossary = mods[0]
+    g = glossary.get_glossary()
+    raw_sample = "بتاع البروكسي وبتاع التيمب اعمل سكريبت يقرا الاي بي كي ويجمع توكن وتوكنات في ملف الجيسون"
+    res, _ = g.apply(raw_sample, target="raw", count_hits=False)
+    assert res == "بتاع الـ Proxy وبتاع الـ Temp اعمل Script يقرا الـ API Key ويجمع Token و Tokens في ملف الـ JSON"
+    # استثناء سياق أندرويد لـ اي بي كي
+    apk_res, _ = g.apply("نزل تطبيق أندرويد بصيغة اي بي كي", target="raw", count_hits=False)
+    assert "API Key" not in apk_res and "اي بي كي" in apk_res
+    # حماية عدم تضارب المعرّفات عند المزامنة مع ملف قائم فيه g_011 مضاف يدوياً
+    custom_path = str(tmp_path / "existing_glossary.json")
+    import json
+    with open(custom_path, "w", encoding="utf-8") as fp:
+        json.dump({"schema_version": 1, "entries": [
+            {"id": "g_011", "patterns": ["كلود"], "replacement": "Claude",
+             "kind": "spelling", "scope": "both", "status": "confirmed", "context_rules": []}
+        ]}, fp, ensure_ascii=False)
+    g2 = glossary.Glossary(path=custom_path)
+    ids = [e["id"] for e in g2.doc["entries"]]
+    assert len(ids) == len(set(ids))
+    assert g2.find("كلود")["replacement"] == "Claude"
+    assert g2.find("اي بي كي")["replacement"] == "API Key"
+
 
