@@ -659,5 +659,9 @@ def test_silent_failure_rule_present_and_clean_markdown():
     i9 = _POLISH_COMMON.index("9. 📑")
     assert "عريض" not in _POLISH_COMMON[i9:_POLISH_COMMON.find("\n", i9)]
     assert "عريض" not in DEFAULT_ROLES["general"]["layer_b"]
+    # 6. قاعدة المصطلحات 6 تتضمن Model و Output كأمثلة قياسية
+    assert "الـ Model" in _POLISH_COMMON
+    assert "الـ Output" in _POLISH_COMMON
+
 
 
