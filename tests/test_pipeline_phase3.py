@@ -841,3 +841,26 @@ def test_glossary_zizo_plan_terms_and_id_collision_guard(mods, tmp_path):
     assert g2.find("اي بي كي")["replacement"] == "API Key"
 
 
+def test_glossary_no_resurrection_deepcopy_and_car_context(mods, tmp_path):
+    glossary = mods[0]
+    p = str(tmp_path / "tombstone_test.json")
+    g = glossary.Glossary(path=p)
+    # 1. استثناء سياق السيارات لكلمة موديل
+    car_res, _ = g.apply("اشتريت عربية موديل 2015", target="raw", count_hits=False)
+    assert car_res == "اشتريت عربية موديل 2015"
+    # 2. عزل deepcopy: إضافة نمط جديد لا يلوّث DEFAULT_ENTRIES في الذاكرة
+    orig_patterns = list(next(d["patterns"] for d in glossary.DEFAULT_ENTRIES if d["replacement"] == "Token"))
+    g.add("توكنايه", "Token", kind="spelling")
+    after_patterns = list(next(d["patterns"] for d in glossary.DEFAULT_ENTRIES if d["replacement"] == "Token"))
+    assert after_patterns == orig_patterns
+    # 3. احترام الحذف المقصود (tombstone): لا يعود المدخل الافتراضي بعد إعادة التحميل
+    assert g.remove("g_008") is not None
+    g_reloaded = glossary.Glossary(path=p)
+    assert g_reloaded.find("موديل") is None
+    # وإذا أعاد المالك إضافته يدوياً يُرفع من المحذوفات ويعود للعمل
+    g_reloaded.add("موديل", "Model", kind="spelling")
+    g_reloaded2 = glossary.Glossary(path=p)
+    assert g_reloaded2.find("موديل") is not None
+
+
+

@@ -15,6 +15,7 @@
 - ملف تالف → الافتراضي يُحمَّل ويُبلَّغ (on_corrupt) ولا انهيار. Thread-safe (RLock) وكتابة ذرية.
 """
 
+import copy
 import re
 import json
 import threading
@@ -63,7 +64,8 @@ DEFAULT_ENTRIES = [
     {"id": "g_007", "patterns": ["أسترا", "استرا", "أسترال", "استرال"], "replacement": "?", "kind": "alias", "scope": "polished_only",
      "status": "pending", "context_rules": [], "note": "المالك: «تبع ChatGPT». المقصود غير مؤكد"},
     {"id": "g_008", "patterns": ["موديل"], "replacement": "Model", "kind": "spelling",
-     "scope": "both", "status": "confirmed", "context_rules": []},
+     "scope": "both", "status": "confirmed",
+     "context_rules": [{"if_near_any": ["عربية", "عربيه", "سيارة", "سياره", "موتوسيكل", "فستان", "ماركة"], "then": "skip"}]},
     {"id": "g_009", "patterns": ["موديلين", "موديلات", "موديلز"], "replacement": "Models", "kind": "spelling",
      "scope": "both", "status": "confirmed", "context_rules": []},
     {"id": "g_010", "patterns": ["أوتبوت", "اوتبوت", "أوت بوت", "اوت بوت"], "replacement": "Output", "kind": "spelling",
@@ -104,7 +106,14 @@ def _now():
 
 
 def _default_doc():
-    return {"schema_version": SCHEMA_VERSION, "entries": [dict(e, hits=0, created=_now()) for e in DEFAULT_ENTRIES]}
+    now = _now()
+    entries = []
+    for e in DEFAULT_ENTRIES:
+        ne = copy.deepcopy(e)
+        ne["hits"] = 0
+        ne["created"] = now
+        entries.append(ne)
+    return {"schema_version": SCHEMA_VERSION, "entries": entries, "tombstones": []}
 
 
 class Glossary:
@@ -135,24 +144,36 @@ class Glossary:
                 doc = _default_doc()
                 self._write(doc)
             else:
-                # مزامنة تلقائية للمداخل الافتراضية المؤكدة في أي ملف قائم (مع منع تضارب المعرّفات)
+                # مزامنة تلقائية للمداخل الافتراضية المؤكدة في أي ملف قائم (مع احترام tombstones ومنع تضارب المعرّفات والنسخ السطحي)
+                tombstones = {str(t).lower() for t in (doc.get("tombstones") or [])}
                 existing_patterns = {normalize(p) for e in doc.get("entries", []) for p in e.get("patterns", [])}
                 existing_ids = {e.get("id") for e in doc.get("entries", [])}
                 nums = [int(e["id"][2:]) for e in doc.get("entries", []) if re.fullmatch(r"g_\d+", str(e.get("id", "")))]
                 next_num = (max(nums) + 1) if nums else 1
                 updated = False
                 for def_e in DEFAULT_ENTRIES:
-                    if def_e.get("status") == "confirmed":
-                        if not any(normalize(p) in existing_patterns for p in def_e.get("patterns", [])):
-                            new_e = dict(def_e, hits=0, created=_now())
-                            if new_e.get("id") in existing_ids:
-                                new_e["id"] = f"g_{next_num:03d}"
-                                next_num += 1
-                            existing_ids.add(new_e["id"])
-                            doc["entries"].append(new_e)
-                            for p in def_e.get("patterns", []):
-                                existing_patterns.add(normalize(p))
-                            updated = True
+                    if def_e.get("status") != "confirmed":
+                        continue
+                    rep_low = str(def_e.get("replacement", "")).lower()
+                    if str(def_e.get("id", "")).lower() in tombstones or rep_low in tombstones:
+                        continue
+                    if not any(normalize(p) in existing_patterns for p in def_e.get("patterns", [])):
+                        new_e = copy.deepcopy(def_e)
+                        new_e["hits"] = 0
+                        new_e["created"] = _now()
+                        if new_e.get("id") in existing_ids:
+                            new_e["id"] = f"g_{next_num:03d}"
+                            next_num += 1
+                        existing_ids.add(new_e["id"])
+                        doc["entries"].append(new_e)
+                        for p in def_e.get("patterns", []):
+                            existing_patterns.add(normalize(p))
+                        updated = True
+                    elif def_e.get("context_rules"):
+                        for cur_e in doc.get("entries", []):
+                            if str(cur_e.get("replacement", "")).lower() == rep_low and not cur_e.get("context_rules"):
+                                cur_e["context_rules"] = copy.deepcopy(def_e["context_rules"])
+                                updated = True
                 if updated:
                     self._write(doc)
             self.doc = doc
@@ -300,8 +321,11 @@ class Glossary:
         kind = "spelling" if kind in ("spelling", "إملائي", "تصحيح", "s") else "alias"
         scope = scope or ("both" if kind == "spelling" else "polished_only")
         with self._lock:
+            rep_low = replacement.lower()
+            if "tombstones" in self.doc and isinstance(self.doc["tombstones"], list):
+                self.doc["tombstones"] = [t for t in self.doc["tombstones"] if str(t).lower() != rep_low]
             for e in self.doc["entries"]:
-                if e.get("replacement", "").lower() == replacement.lower() and e.get("kind") == kind:
+                if e.get("replacement", "").lower() == rep_low and e.get("kind") == kind:
                     if normalize(pattern) not in {normalize(p) for p in e.get("patterns", [])}:
                         e.setdefault("patterns", []).append(pattern)
                     e["status"] = status
@@ -310,7 +334,7 @@ class Glossary:
                     _audit("glossary.add_pattern", id=e["id"], pattern=pattern, replacement=replacement)
                     return e, False
             entry = {"id": self._next_id(), "patterns": [pattern], "replacement": replacement, "kind": kind,
-                     "scope": scope, "status": status, "context_rules": list(context_rules or []), "hits": 0,
+                     "scope": scope, "status": status, "context_rules": copy.deepcopy(list(context_rules or [])), "hits": 0,
                      "created": _now()}
             self.doc["entries"].append(entry)
             self._compile()
@@ -336,6 +360,12 @@ class Glossary:
             if e is None:
                 return None
             self.doc["entries"] = [x for x in self.doc["entries"] if x is not e]
+            rep_low = str(e.get("replacement", "")).lower()
+            def_reps = {str(d.get("replacement", "")).lower() for d in DEFAULT_ENTRIES if d.get("replacement")}
+            if rep_low and rep_low in def_reps:
+                tombs = self.doc.setdefault("tombstones", [])
+                if rep_low not in {str(t).lower() for t in tombs}:
+                    tombs.append(rep_low)
             self._compile()
             self._write()
             _audit("glossary.remove", id=e.get("id"), replacement=e.get("replacement"))
