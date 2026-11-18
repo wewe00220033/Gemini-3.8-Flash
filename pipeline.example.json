@@ -1,0 +1,90 @@
+{
+  "_comment": "انسخ هذا الملف إلى DATA_DIR/pipeline.json وعدّله. غيابه = السلوك الافتراضي الحالي بالضبط. مفاتيح المزودات الخارجية تُقرأ من متغيرات البيئة بصيغة ${VAR}. تنبيه Ollama: /v1/chat/completions يتجاهل num_ctx — اضبطه في Modelfile.",
+  "version": 1,
+  "display": {
+    "mode": "single_live",
+    "show_stages": ["final"],
+    "show_md_button": false,
+    "max_chunks_per_output": 0,
+    "edit_interval_s": 1.5,
+    "live_cap_utf16": 3400,
+    "chunk_limit_utf16": 4000,
+    "silent_followups": true,
+    "write_drafts_md": true,
+    "max_parallel": 4
+  },
+  "providers": {
+    "flash_lite": {
+      "type": "gemini_api",
+      "model": "gemini-3.5-flash-lite",
+      "max_concurrent": 2,
+      "timeout_s": 40,
+      "temperature": 0.2,
+      "thinking_budget": 2048
+    },
+    "shelby": {
+      "type": "local_cli",
+      "command": "${LOCAL_POLISH_CMD}",
+      "queue": "gpu",
+      "input_format": "stdin_delimited",
+      "timeout_s": 180,
+      "lock_wait_s": 45
+    },
+    "_example_groq": {
+      "type": "openai_compat",
+      "base_url": "https://api.groq.com/openai/v1",
+      "api_key": "${GROQ_API_KEY}",
+      "model": "llama-3.3-70b-versatile",
+      "timeout_s": 60,
+      "connect_timeout_s": 10,
+      "strip_think_tags": true,
+      "extra_body": {}
+    },
+    "_example_ollama": {
+      "type": "openai_compat",
+      "base_url": "http://127.0.0.1:11434/v1",
+      "api_key": "ollama",
+      "model": "qwen2.5:7b",
+      "queue": "gpu",
+      "timeout_s": 180,
+      "extra_body": {}
+    }
+  },
+  "stages": [
+    {
+      "name": "proposers",
+      "enabled": true,
+      "prompt": "polish",
+      "inputs": ["raw"],
+      "min_success": 1,
+      "calls": [
+        { "provider": "flash_lite", "label": "فلاش" },
+        { "provider": "shelby",     "label": "شلبي" }
+      ]
+    },
+    {
+      "name": "polishers",
+      "enabled": false,
+      "prompt": "polish_multi",
+      "inputs": ["raw", "proposers"],
+      "min_success": 1,
+      "calls": []
+    },
+    {
+      "name": "final",
+      "enabled": true,
+      "prompt": "synthesis",
+      "inputs": ["raw", "proposers", "polishers"],
+      "min_success": 1,
+      "fallback": "best_available",
+      "calls": [
+        { "provider": "shelby",     "label": "سبك شلبي", "priority": true },
+        { "provider": "flash_lite", "label": "سبك فلاش", "only_if_previous_failed": true }
+      ]
+    }
+  ],
+  "guards": { "dedupe_ratio": 0.98, "noop_ratio": 0.98, "forbid_new_speaker_tags": true, "numbers_latin_subset_check": true },
+  "speakers": { "enabled": false, "tag_regex": "^🗣️(\\d+):", "strip_if_single": true },
+  "memory": { "enabled": false, "inject_max_lines": 200, "inject_max_bytes": 25600, "topics": ["coding","family","friends","education","religion","notes"], "context_per_topic_n": 3, "context_max_chars": 800, "echo_ratio_strike": 0.60 },
+  "hot_reload": { "enabled": true, "poll_interval_s": 5 }
+}

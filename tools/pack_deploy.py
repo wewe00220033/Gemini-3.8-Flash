@@ -38,7 +38,7 @@ REQUIRED_FILES = (
 # ملفات اختيارية مفيدة على الخادم
 OPTIONAL_FILES = (
     "README.md", "DEPLOY.md", "LICENSE", ".env.example", "runtime.txt", "start.sh",
-    "smoke_failover.py", "transcribe_tool.py",
+    "smoke_failover.py", "transcribe_tool.py", "pipeline.example.json", "MEMORY.example.md",
 )
 # مجلدات تُضمَّن كاملة (ملفات .py/.html/.css/.js/.txt/.md فقط)
 INCLUDE_DIRS = ("static",)
@@ -63,9 +63,10 @@ SECRET_PREFIXES = (
     "my_polish", "custom_polish", ".local", "local_", "custom_", "my_", "polish_",
 )                     # .env.local, .env.prod … (لكن .env.example مسموح صراحة)
 SECRET_DIR_PARTS = ("state", "logs", "backups", "transcripts", "sessions", "incidents", "data",
+                    "memory", "drafts",
                     ".git", "__pycache__", ".smoke_failover", ".pytest_cache", ".local", ".secrets")
 SECRET_EXTS = (".ndjson", ".log", ".pyc")
-RUNTIME_JSON = ("glossary.json", "roles.json", "settings.json", "sessions_index.json")
+RUNTIME_JSON = ("glossary.json", "roles.json", "settings.json", "sessions_index.json", "pipeline.json")
 
 
 def is_forbidden(rel):

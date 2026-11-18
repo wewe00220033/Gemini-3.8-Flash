@@ -43,6 +43,9 @@ def _apply_tmp_paths(mp, cfg_cls, base_dir):
         "GLOSSARY_FILE": os.path.join(base, "glossary.json"),
         "ROLES_FILE": os.path.join(base, "roles.json"),
         "SETTINGS_FILE": os.path.join(base, "settings.json"),
+        "PIPELINE_FILE": os.path.join(base, "pipeline.json"),
+        "MEMORY_DIR": os.path.join(base, "memory"),
+        "DRAFTS_DIR": os.path.join(base, "drafts"),
         "SESSIONS_DIR": os.path.join(base, "sessions"),
         "SESSIONS_INDEX_FILE": os.path.join(base, "sessions", "sessions_index.json"),
         "CURRENT_SESSION_FILE": os.path.join(base, "sessions", "current_session.json"),
@@ -80,7 +83,7 @@ ENV_KEYS = [
     "LOCAL_POLISH_CMD", "LOCAL_POLISH_TIMEOUT",
     "COMPARE_MODE", "DELIVERY_MODE", "TRUST_PROXY", "WEB_ALLOW_OPEN",
     "WEB_POLISH", "LOG_TO_FILE", "DEFAULT_ROLE", "SMART_TITLE_BEFORE_RAW",
-    "FEATURE_PLAN", "TEXT_ASSIST_MODEL", "WEB_ENABLED",
+    "FEATURE_PLAN", "TEXT_ASSIST_MODEL", "WEB_ENABLED", "DRAFTS_KEEP_DAYS",
 ]
 
 

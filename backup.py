@@ -11,6 +11,7 @@ import datetime
 import io
 import json
 import os
+import re
 import shutil
 import tempfile
 import threading
@@ -22,12 +23,22 @@ from config import Config
 # الملفات التي تُعدّ أسراراً ولا تدخل في /backup مهما كان موقعها
 SECRET_BASENAMES = ("keys.json", "keys.txt", ".env")
 SECRET_PREFIXES = (".keys-", "keys.json.", "keys.txt.", ".env.")
+_INLINE_KEY_RE = re.compile(r'"api_key"\s*:\s*"(?!\$\{)[^"]{16,}"')   # قيمة خام ≥16 حرفاً لا تبدأ بـ ${
 RESTORE_MAX_BYTES = 512 * 1024 * 1024   # 512MB سقف تراكمي دفاعي ضد هجمات zip-bomb
 
 _backup_lock = threading.Lock()
 
 
-def _is_secret(path):
+def _pipeline_has_inline_secret(path):
+    """pipeline.json يُعدّ سرياً لو احتوى api_key خاماً (نسي المالك صيغة ${VAR}). قراءة نصية خفيفة بلا json.loads."""
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            return bool(_INLINE_KEY_RE.search(f.read(64 * 1024)))
+    except OSError:
+        return False
+
+
+def _is_secret(path, content=None):
     base = os.path.basename(path)
     if base == ".env.example":
         return False
@@ -35,19 +46,27 @@ def _is_secret(path):
         return True
     if any(base.startswith(pfx) for pfx in SECRET_PREFIXES):
         return True
+    if base == "pipeline.json":
+        if content is not None:
+            return bool(_INLINE_KEY_RE.search(content))
+        return _pipeline_has_inline_secret(path)
     return False
 
 
 def data_roots():
-    """المجلدات/الملفات غير السرية التي تدخل في النسخة العامة (ما وُجد منها فقط)."""
+    """المجلدات/الملفات غير السرية التي تدخل في النسخة العامة (ما وُجد منها فقط).
+    تُبنى المسارات من Config.DATA_DIR وقت الاستدعاء (وليس من ثوابت الكلاس) توافقاً مع إعادة التوجيه في الاختبارات."""
     d = Config.DATA_DIR
     candidates = [
         os.path.join(d, "transcripts"),
         os.path.join(d, "sessions"),
         os.path.join(d, "state"),
+        os.path.join(d, "memory"),
+        os.path.join(d, "drafts"),
         os.path.join(d, "glossary.json"),
         os.path.join(d, "settings.json"),
         os.path.join(d, "roles.json"),
+        os.path.join(d, "pipeline.json"),
     ]
     return [c for c in candidates if os.path.exists(c)]
 
@@ -106,7 +125,11 @@ def build_secrets_backup():
 def contains_secret(zip_bytes):
     """فحص دفاعي: هل يحوي الأرشيف أي ملف سري؟ يُستخدم في الاختبارات وقبل الإرسال."""
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as z:
-        return any(_is_secret(n) for n in z.namelist())
+        for n in z.namelist():
+            content = z.read(n)[:64 * 1024].decode("utf-8", errors="ignore") if os.path.basename(n) == "pipeline.json" else None
+            if _is_secret(n, content=content):
+                return True
+        return False
 
 
 # ======================================================================
@@ -494,7 +517,8 @@ def restore_test(zip_path=None):
                 if norm.startswith("/") or ".." in norm.split("/") or (len(norm) > 1 and norm[1] == ":"):
                     rep["unsafe"].append(n)
                     continue
-                if _is_secret(n):
+                content_check = z.read(n)[:64 * 1024].decode("utf-8", errors="ignore") if os.path.basename(n) == "pipeline.json" else None
+                if _is_secret(n, content=content_check):
                     rep["secrets"].append(n)
                     continue
                 info = z.getinfo(n)

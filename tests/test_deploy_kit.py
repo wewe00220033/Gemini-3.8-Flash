@@ -172,3 +172,27 @@ def test_deploy_md_backup_row_is_correct():
     assert "يرسل لك `keys.json` كمستند" not in text                 # السطر القديم المضلّل أُزيل
     assert "/backup_secrets confirm" in text and "Pre-flight Verification" in text and "pack_deploy.py" in text
 
+
+
+def test_phase2_paths_are_forbidden_and_templates_allowed(pack, tmp_path):
+    """T1 (DEC-P2-09): memory/ وdrafts/ وpipeline.json محظورة في أرشيف النشر بينما القالبان مسموحان."""
+    f = pack.is_forbidden
+    assert f("memory/MEMORY.md") and f("drafts/2026-11-18/x.md")
+    assert f("pipeline.json") and f("sub/pipeline.json") and f("PIPELINE.JSON")
+    assert not f("pipeline.example.json") and not f("MEMORY.example.md")
+
+    root = _fake_project(tmp_path)
+    (root / "memory").mkdir()
+    (root / "memory" / "MEMORY.md").write_text("# secret owner notes\n", encoding="utf-8")
+    (root / "drafts" / "2026-11-18").mkdir(parents=True)
+    (root / "drafts" / "2026-11-18" / "e1.md").write_text("draft\n", encoding="utf-8")
+    (root / "pipeline.json").write_text('{"version": 1}\n', encoding="utf-8")
+    (root / "pipeline.example.json").write_text('{"version": 1}\n', encoding="utf-8")
+    (root / "MEMORY.example.md").write_text("# template\n", encoding="utf-8")
+
+    out = str(tmp_path / "phase2_out.zip")
+    members, _ = pack.build(out, root=str(root))
+    names = [rel for rel, _ in members]
+    assert "pipeline.example.json" in names and "MEMORY.example.md" in names
+    for forbidden in ("memory/MEMORY.md", "drafts/2026-11-18/e1.md", "pipeline.json"):
+        assert forbidden not in names, forbidden

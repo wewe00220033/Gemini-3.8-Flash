@@ -26,6 +26,9 @@ glossary.json
 roles.json
 settings.json
 transcripts/
+memory/
+drafts/
+pipeline.json
 
 # Phase 5 runtime artifacts (CCTV logs, incident reports, persistence probe) — never commit
 logs/

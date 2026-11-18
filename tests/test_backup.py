@@ -41,3 +41,34 @@ def test_empty_when_nothing_exists(fresh_env, tmp_path, monkeypatch):
     monkeypatch.setattr(backup.Config, "DATA_DIR", str(tmp_path / "nothing"))
     blob, included = backup.build_public_backup()
     assert included == [] and zipfile.ZipFile(io.BytesIO(blob)).namelist() == []
+
+
+
+def test_public_backup_phase2_paths_and_inline_api_key_guard(bk, tmp_path):
+    """T1 (DEC-P2-09): memory/ وdrafts/ وpipeline.json السليم يدخلون النسخة العامة؛ وpipeline.json بمفتاح خام يُعدّ سراً."""
+    data_dir = tmp_path / "data"
+    (data_dir / "memory").mkdir(parents=True)
+    (data_dir / "memory" / "MEMORY.md").write_text("# owner\n", encoding="utf-8")
+    (data_dir / "drafts" / "2026-11-18").mkdir(parents=True)
+    (data_dir / "drafts" / "2026-11-18" / "e1.md").write_text("draft\n", encoding="utf-8")
+    pipe_path = data_dir / "pipeline.json"
+
+    # 1) مفتاح خام (>=16 حرفاً بدون ${...}) -> يُعدّ سراً فلا يدخل النسخة العامة ولا يرفع contains_secret
+    pipe_path.write_text('{"providers": {"g": {"api_key": "' + ("gsk_" + "x" * 40) + '"}}}', encoding="utf-8")
+    blob_dirty, inc_dirty = bk.build_public_backup()
+    assert "pipeline.json" not in inc_dirty
+    assert "memory/MEMORY.md" in inc_dirty and "drafts/2026-11-18/e1.md" in inc_dirty
+    assert not bk.contains_secret(blob_dirty)
+
+    # فحص دفاعي إضافي: لو أُقحم pipeline.json بمفتاح خام داخل ZIP يدوياً تكتشفه contains_secret
+    manual_buf = io.BytesIO()
+    with zipfile.ZipFile(manual_buf, "w") as z:
+        z.writestr("pipeline.json", '{"api_key": "' + ("sk-" + "y" * 30) + '"}')
+    assert bk.contains_secret(manual_buf.getvalue())
+
+    # 2) صيغة ${GROQ_API_KEY} السليمة (أو "ollama" القصيرة) -> تدخل النسخة العامة بأمان
+    pipe_path.write_text('{"providers": {"g": {"api_key": "${GROQ_API_KEY}"}, "o": {"api_key": "ollama"}}}', encoding="utf-8")
+    blob_clean, inc_clean = bk.build_public_backup()
+    assert "pipeline.json" in inc_clean
+    assert "memory/MEMORY.md" in inc_clean and "drafts/2026-11-18/e1.md" in inc_clean
+    assert not bk.contains_secret(blob_clean)
