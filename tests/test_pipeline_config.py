@@ -158,34 +158,38 @@ def test_repeat_expansion_and_max_cap(fresh_env, caplog):
     assert any("تقليص repeat" in r.getMessage() for r in caplog.records)
 
 
-def test_lazy_reload_keeps_previous_valid_on_corrupt_and_reverts_on_delete(fresh_env, monkeypatch, caplog):
+def test_lazy_reload_keeps_previous_valid_on_corrupt_and_reverts_on_delete(fresh_env, caplog):
     """فحص (st_mtime_ns, st_size) بلا sleep: التالف يُبقي النسخة الصالحة بتحذير واحد لكل بصمة، والحذف يعيد الافتراضي."""
-    monkeypatch.setattr(pipeline_config, "_POLL_INTERVAL_S", 0.0)
     p = config.Config.PIPELINE_FILE
 
     with open(p, "w", encoding="utf-8") as f:
         f.write('{"display": {"mode": "per_output"}}')
-    assert pipeline_config.get()["display"]["mode"] == "per_output"
+    assert pipeline_config.get(force=True)["display"]["mode"] == "per_output"
 
-    # كتابة JSON تالف بحجم مختلف => يبقى "per_output" ويُسجَّل تحذير واحد فقط مهما تكرر get()
+    # تعديل فوري بدون force=True يرجع النسخة المخبأة بسبب فاصل التهدئة (throttled)
+    with open(p, "w", encoding="utf-8") as f:
+        f.write('{"display": {"mode": "mutated_throttled"}}')
+    assert pipeline_config.get(force=False)["display"]["mode"] == "per_output"
+
+    # كتابة JSON تالف بحجم مختلف مع force=True => يبقى "per_output" ويُسجَّل تحذير واحد فقط مهما تكرر get()
     caplog.clear()
     with caplog.at_level(logging.WARNING, logger="alsami.pipeline_config"):
         with open(p, "w", encoding="utf-8") as f:
             f.write("{corrupt json payload   ")
-        assert pipeline_config.get()["display"]["mode"] == "per_output"
-        assert pipeline_config.get()["display"]["mode"] == "per_output"
+        assert pipeline_config.get(force=True)["display"]["mode"] == "per_output"
+        assert pipeline_config.get(force=True)["display"]["mode"] == "per_output"
     corrupt_warnings = [r for r in caplog.records if "تعذر تحميل pipeline.json" in r.getMessage()]
     assert len(corrupt_warnings) == 1
 
-    # إصلاح الملف بحجم جديد => يتحدث فوراً
+    # إصلاح الملف بحجم جديد => يتحدث فوراً بـ force=True
     with open(p, "w", encoding="utf-8") as f:
         f.write('{"display": {"mode": "single_live", "max_parallel": 6}}')
-    reloaded = pipeline_config.get()
+    reloaded = pipeline_config.get(force=True)
     assert reloaded["display"]["mode"] == "single_live" and reloaded["display"]["max_parallel"] == 6
 
     # حذف الملف من القرص => يعود للخط الافتراضي المدمج
     os.remove(p)
-    after_del = pipeline_config.get()
+    after_del = pipeline_config.get(force=True)
     assert after_del["display"]["max_parallel"] == 4
 
 

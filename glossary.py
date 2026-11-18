@@ -16,13 +16,17 @@
 """
 
 import copy
+import logging
 import re
 import json
 import threading
 from datetime import datetime, timezone
 
 from config import Config
+from hot_reload import FileStampWatcher
 import store
+
+logger = logging.getLogger("alsami.glossary")
 
 
 def _audit(action, **fields):
@@ -116,6 +120,79 @@ def _default_doc():
     return {"schema_version": SCHEMA_VERSION, "entries": entries, "tombstones": []}
 
 
+def _matched_default_id(entry):
+    """يرجع معرّف المدخل الافتراضي الأصلي (مثل g_008) إن كان entry يمثّله، أو None للمدخلات المخصصة."""
+    if not isinstance(entry, dict):
+        return None
+    rep_low = str(entry.get("replacement") or "").strip().lower()
+    kind = entry.get("kind")
+    e_pats = {normalize(p) for p in (entry.get("patterns") or []) if p}
+    for def_e in DEFAULT_ENTRIES:
+        def_rep = str(def_e.get("replacement") or "").strip().lower()
+        if rep_low and rep_low != "?" and rep_low == def_rep and kind == def_e.get("kind"):
+            return def_e["id"]
+        def_pats = {normalize(p) for p in (def_e.get("patterns") or []) if p}
+        if e_pats and (e_pats & def_pats) and (def_rep == "?" or rep_low == def_rep):
+            return def_e["id"]
+    return None
+
+
+def _present_default_ids_in(doc):
+    return {d_id for e in (doc.get("entries") or []) if (d_id := _matched_default_id(e))}
+
+
+def _prune_resurrected_tombstones(doc):
+    """يزيل تلقائياً أي tombstone لمدخل افتراضي عاد موجوداً في entries (سواء بـ Ctrl+Z يدوياً أو بـ add)."""
+    raw_tombs = doc.get("tombstones")
+    if not isinstance(raw_tombs, list) or not raw_tombs:
+        return False
+    present_ids = {d_id.lower() for d_id in _present_default_ids_in(doc)}
+    present_reps = {
+        str(e.get("replacement") or "").strip().lower()
+        for e in (doc.get("entries") or [])
+        if str(e.get("replacement") or "").strip() not in ("", "?")
+    }
+    cleaned = [t for t in raw_tombs if str(t).lower() not in present_ids and str(t).lower() not in present_reps]
+    if len(cleaned) != len(raw_tombs):
+        doc["tombstones"] = cleaned
+        return True
+    return False
+
+
+def _sync_defaults_into_doc(doc):
+    """مزامنة المداخل الافتراضية المؤكدة مع تنظيف tombstones العائدة واحترام tombstones النشطة (بالـ id أو الاسم القديم)."""
+    updated = _prune_resurrected_tombstones(doc)
+    tombstones = {str(t).lower() for t in (doc.get("tombstones") or [])}
+    existing_patterns = {normalize(p) for e in doc.get("entries", []) for p in e.get("patterns", [])}
+    existing_ids = {e.get("id") for e in doc.get("entries", [])}
+    nums = [int(e["id"][2:]) for e in doc.get("entries", []) if re.fullmatch(r"g_\d+", str(e.get("id", "")))]
+    next_num = (max(nums) + 1) if nums else 1
+    for def_e in DEFAULT_ENTRIES:
+        if def_e.get("status") != "confirmed":
+            continue
+        rep_low = str(def_e.get("replacement", "")).lower()
+        if str(def_e.get("id", "")).lower() in tombstones or rep_low in tombstones:
+            continue
+        if not any(normalize(p) in existing_patterns for p in def_e.get("patterns", [])):
+            new_e = copy.deepcopy(def_e)
+            new_e["hits"] = 0
+            new_e["created"] = _now()
+            if new_e.get("id") in existing_ids:
+                new_e["id"] = f"g_{next_num:03d}"
+                next_num += 1
+            existing_ids.add(new_e["id"])
+            doc["entries"].append(new_e)
+            for p in def_e.get("patterns", []):
+                existing_patterns.add(normalize(p))
+            updated = True
+        elif def_e.get("context_rules"):
+            for cur_e in doc.get("entries", []):
+                if str(cur_e.get("replacement", "")).lower() == rep_low and not cur_e.get("context_rules"):
+                    cur_e["context_rules"] = copy.deepcopy(def_e["context_rules"])
+                    updated = True
+    return updated
+
+
 class Glossary:
     def __init__(self, path=None, on_corrupt=None):
         self._lock = threading.RLock()
@@ -124,10 +201,12 @@ class Glossary:
         self.corrupt_notice = None
         self.doc = {"schema_version": SCHEMA_VERSION, "entries": []}
         self._compiled = []     # [(entry, regex)] الأطول أولاً
+        self._present_default_ids = set()
+        self._watcher = FileStampWatcher()
         self.reload()
 
     # ------------------------------------------------------------------
-    # التحميل / الحفظ
+    # التحميل / الحفظ / التحديث الحي الكسول
     # ------------------------------------------------------------------
     def reload(self):
         with self._lock:
@@ -144,44 +223,71 @@ class Glossary:
                 doc = _default_doc()
                 self._write(doc)
             else:
-                # مزامنة تلقائية للمداخل الافتراضية المؤكدة في أي ملف قائم (مع احترام tombstones ومنع تضارب المعرّفات والنسخ السطحي)
-                tombstones = {str(t).lower() for t in (doc.get("tombstones") or [])}
-                existing_patterns = {normalize(p) for e in doc.get("entries", []) for p in e.get("patterns", [])}
-                existing_ids = {e.get("id") for e in doc.get("entries", [])}
-                nums = [int(e["id"][2:]) for e in doc.get("entries", []) if re.fullmatch(r"g_\d+", str(e.get("id", "")))]
-                next_num = (max(nums) + 1) if nums else 1
-                updated = False
-                for def_e in DEFAULT_ENTRIES:
-                    if def_e.get("status") != "confirmed":
-                        continue
-                    rep_low = str(def_e.get("replacement", "")).lower()
-                    if str(def_e.get("id", "")).lower() in tombstones or rep_low in tombstones:
-                        continue
-                    if not any(normalize(p) in existing_patterns for p in def_e.get("patterns", [])):
-                        new_e = copy.deepcopy(def_e)
-                        new_e["hits"] = 0
-                        new_e["created"] = _now()
-                        if new_e.get("id") in existing_ids:
-                            new_e["id"] = f"g_{next_num:03d}"
-                            next_num += 1
-                        existing_ids.add(new_e["id"])
-                        doc["entries"].append(new_e)
-                        for p in def_e.get("patterns", []):
-                            existing_patterns.add(normalize(p))
-                        updated = True
-                    elif def_e.get("context_rules"):
-                        for cur_e in doc.get("entries", []):
-                            if str(cur_e.get("replacement", "")).lower() == rep_low and not cur_e.get("context_rules"):
-                                cur_e["context_rules"] = copy.deepcopy(def_e["context_rules"])
-                                updated = True
-                if updated:
+                if _sync_defaults_into_doc(doc):
                     self._write(doc)
+                else:
+                    self._watcher.mark_loaded(self.path)
             self.doc = doc
+            self._present_default_ids = _present_default_ids_in(doc)
             self._compile()
+
+    def maybe_reload(self, force=False):
+        """
+        فحص كسول لـ `glossary.json` داخل `self._lock` دائماً:
+        - لو الملف تالف أثناء التحديث الحي: يُبقي النسخة الصالحة في الذاكرة دون المساس بملف المالك على القرص.
+        - لو اختفى مدخل افتراضي بين تحميلين: يسجّل معرّفه الافتراضي في `tombstones` تلقائياً.
+        - لو عاد مدخل محذوف للملف (Ctrl+Z): يُزال معرّفه من `tombstones` تلقائياً عبر `_sync_defaults_into_doc`.
+        """
+        with self._lock:
+            state, sig = self._watcher.check(self.path, force=force)
+            if state in ("throttled", "unchanged"):
+                return False
+            if state == "missing":
+                doc = _default_doc()
+                self.doc = doc
+                self._present_default_ids = _present_default_ids_in(doc)
+                self._compile()
+                self._write(doc)
+                return True
+            try:
+                with open(self.path, "r", encoding="utf-8") as f:
+                    doc = json.load(f)
+                if not isinstance(doc, dict) or not isinstance(doc.get("entries"), list):
+                    raise ValueError("بنية glossary.json تفتقد قائمة entries")
+            except Exception as e:
+                if self._watcher.mark_bad(sig):
+                    logger.warning("⚠️ تعذر التحديث الحي لـ glossary.json (%s: %s) — الإبقاء على النسخة الصالحة في الذاكرة",
+                                   type(e).__name__, e)
+                return False
+
+            now_def_ids = _present_default_ids_in(doc)
+            manually_deleted = sorted(self._present_default_ids - now_def_ids)
+            updated = False
+            if manually_deleted:
+                tombs = doc.setdefault("tombstones", [])
+                existing_tombs = {str(t).lower() for t in tombs}
+                for d_id in manually_deleted:
+                    if d_id.lower() not in existing_tombs:
+                        tombs.append(d_id)
+                        existing_tombs.add(d_id.lower())
+                        updated = True
+
+            if _sync_defaults_into_doc(doc):
+                updated = True
+
+            self.doc = doc
+            self._present_default_ids = _present_default_ids_in(doc)
+            self._compile()
+            if updated:
+                self._write(doc)
+            else:
+                self._watcher.mark_loaded(self.path, sig=sig)
+            return True
 
     def _write(self, doc=None):
         try:
             store.atomic_write_json(self.path, doc if doc is not None else self.doc)
+            self._watcher.mark_loaded(self.path)
         except Exception as e:  # pragma: no cover
             print(f"⚠️ glossary.json: تعذّر الحفظ ({e})")
 
@@ -217,6 +323,7 @@ class Glossary:
         if not text:
             return text, 0
         with self._lock:
+            self.maybe_reload()
             compiled = list(self._compiled)
         total = 0
         hit_entries = []
@@ -322,13 +429,13 @@ class Glossary:
         scope = scope or ("both" if kind == "spelling" else "polished_only")
         with self._lock:
             rep_low = replacement.lower()
-            if "tombstones" in self.doc and isinstance(self.doc["tombstones"], list):
-                self.doc["tombstones"] = [t for t in self.doc["tombstones"] if str(t).lower() != rep_low]
             for e in self.doc["entries"]:
                 if e.get("replacement", "").lower() == rep_low and e.get("kind") == kind:
                     if normalize(pattern) not in {normalize(p) for p in e.get("patterns", [])}:
                         e.setdefault("patterns", []).append(pattern)
                     e["status"] = status
+                    _prune_resurrected_tombstones(self.doc)
+                    self._present_default_ids = _present_default_ids_in(self.doc)
                     self._compile()
                     self._write()
                     _audit("glossary.add_pattern", id=e["id"], pattern=pattern, replacement=replacement)
@@ -337,6 +444,8 @@ class Glossary:
                      "scope": scope, "status": status, "context_rules": copy.deepcopy(list(context_rules or [])), "hits": 0,
                      "created": _now()}
             self.doc["entries"].append(entry)
+            _prune_resurrected_tombstones(self.doc)
+            self._present_default_ids = _present_default_ids_in(self.doc)
             self._compile()
             self._write()
             _audit("glossary.add", id=entry["id"], pattern=pattern, replacement=replacement, kind=kind, status=status)
@@ -360,12 +469,12 @@ class Glossary:
             if e is None:
                 return None
             self.doc["entries"] = [x for x in self.doc["entries"] if x is not e]
-            rep_low = str(e.get("replacement", "")).lower()
-            def_reps = {str(d.get("replacement", "")).lower() for d in DEFAULT_ENTRIES if d.get("replacement")}
-            if rep_low and rep_low in def_reps:
+            def_id = _matched_default_id(e)
+            if def_id:
                 tombs = self.doc.setdefault("tombstones", [])
-                if rep_low not in {str(t).lower() for t in tombs}:
-                    tombs.append(rep_low)
+                if def_id.lower() not in {str(t).lower() for t in tombs}:
+                    tombs.append(def_id)
+            self._present_default_ids = _present_default_ids_in(self.doc)
             self._compile()
             self._write()
             _audit("glossary.remove", id=e.get("id"), replacement=e.get("replacement"))

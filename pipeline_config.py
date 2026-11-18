@@ -17,9 +17,9 @@ import math
 import os
 import re
 import threading
-import time
 
 from config import Config
+from hot_reload import FileStampWatcher
 import pipeline_defaults
 import store
 
@@ -34,9 +34,7 @@ _ENV_VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 _lock = threading.RLock()
 _cached_disk_cfg = None
 _cached_path = None
-_cached_sig = None
-_bad_sig = None
-_last_check_mono = 0.0
+_watcher = FileStampWatcher(_POLL_INTERVAL_S)
 
 
 def build_default_pipeline():
@@ -209,13 +207,11 @@ def has_disk_pipeline():
 
 def reset_cache():
     """للاختبارات: تصفير الكاش وبصمات الملفات."""
-    global _cached_disk_cfg, _cached_path, _cached_sig, _bad_sig, _last_check_mono
+    global _cached_disk_cfg, _cached_path
     with _lock:
         _cached_disk_cfg = None
         _cached_path = None
-        _cached_sig = None
-        _bad_sig = None
-        _last_check_mono = 0.0
+        _watcher.reset()
 
 
 def _effective_poll_interval(cfg):
@@ -224,62 +220,52 @@ def _effective_poll_interval(cfg):
     hr = cfg.get("hot_reload") or {}
     if not hr.get("enabled", True):
         return float("inf")
-    if _POLL_INTERVAL_S < 5.0:
-        # السماح للاختبارات بتصفير _POLL_INTERVAL_S عبر monkeypatch بدون sleep
-        return max(0.0, float(_POLL_INTERVAL_S))
     return max(5.0, float(hr.get("poll_interval_s", _POLL_INTERVAL_S) or _POLL_INTERVAL_S))
 
 
 def get(force=False):
     """يرجع نسخة عميقة آمنة من إعداد خط التنظيم الفعّال مع فحص كسول `(st_mtime_ns, st_size)`.
     عند وجود `pipeline.json` على القرص تُلتقط متغيرات البيئة `${VAR}` وقيم المزودات المدمجة وقت التحميل وتُحفظ في الكاش حتى يتغير الملف أو يُعاد التشغيل."""
-    global _cached_disk_cfg, _cached_path, _cached_sig, _bad_sig, _last_check_mono
+    global _cached_disk_cfg, _cached_path
     path = getattr(Config, "PIPELINE_FILE", "")
-    now = time.monotonic()
-
-    if _cached_disk_cfg is not None and _cached_path == path and not force:
-        if (now - _last_check_mono) < _effective_poll_interval(_cached_disk_cfg):
-            return copy.deepcopy(_cached_disk_cfg)
 
     with _lock:
-        now = time.monotonic()
-        if _cached_disk_cfg is not None and _cached_path == path and not force:
-            if (now - _last_check_mono) < _effective_poll_interval(_cached_disk_cfg):
-                return copy.deepcopy(_cached_disk_cfg)
-
-        _last_check_mono = now
-        try:
-            st = os.stat(path) if path else None
-        except OSError:
-            st = None
-
-        if st is None:
+        if path != _cached_path:
             _cached_disk_cfg = None
             _cached_path = path
-            _cached_sig = None
-            _bad_sig = None
+            _watcher.reset()
+
+        state, sig = _watcher.check(path, force=force)
+
+        if state == "throttled":
+            if _cached_disk_cfg is not None:
+                return copy.deepcopy(_cached_disk_cfg)
             return build_default_pipeline()
 
-        sig = (st.st_mtime_ns, st.st_size)
-        if _cached_disk_cfg is not None and _cached_path == path and _cached_sig == sig:
-            return copy.deepcopy(_cached_disk_cfg)
+        if state == "missing":
+            _cached_disk_cfg = None
+            return build_default_pipeline()
 
+        if state == "unchanged":
+            if _cached_disk_cfg is not None:
+                return copy.deepcopy(_cached_disk_cfg)
+            return build_default_pipeline()
+
+        # state == "changed"
         try:
             with open(path, "r", encoding="utf-8") as f:
                 raw_doc = json.load(f)
             parsed = _parse_pipeline_doc(raw_doc)
         except Exception as e:
-            if _bad_sig != sig:
-                _bad_sig = sig
+            if _watcher.mark_bad(sig):
                 logger.warning("⚠️ تعذر تحميل pipeline.json (%s: %s) — الإبقاء على آخر إعداد صالح", type(e).__name__, e)
-            if _cached_disk_cfg is not None and _cached_path == path:
+            if _cached_disk_cfg is not None:
                 return copy.deepcopy(_cached_disk_cfg)
             return build_default_pipeline()
 
         _cached_disk_cfg = parsed
-        _cached_path = path
-        _cached_sig = sig
-        _bad_sig = None
+        _watcher.set_poll_interval(_effective_poll_interval(parsed))
+        _watcher.mark_loaded(path, sig=sig)
         _warn_settings_overlap_once()
         return copy.deepcopy(_cached_disk_cfg)
 

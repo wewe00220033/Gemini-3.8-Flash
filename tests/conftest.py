@@ -24,7 +24,7 @@ _CONFIG_MODULES = (
     "sessions", "delivery", "logkit", "observability", "incidents", "watchdog",
     "jobs", "voice_queue", "backup", "audit", "panel", "fsm", "assistant",
     "interactions_client", "web_service", "key_manager", "telegram_bot",
-    "main", "supervisor", "model_state", "pipeline_defaults", "pipeline_config", "engines_openai", "engines",
+    "main", "supervisor", "model_state", "pipeline_defaults", "pipeline_config", "engines_openai", "engines", "hot_reload",
 )
 
 

@@ -47,6 +47,7 @@ INCLUDE_EXTS = (".py", ".html", ".css", ".js", ".txt", ".md", ".json")
 KNOWN_ROOT_MODULES = (
     "archive.py", "assistant.py", "audit.py", "backup.py", "clock.py",
     "config.py", "delivery.py", "engines.py", "engines_openai.py", "fsm.py", "glossary.py", "heartbeat.py",
+    "hot_reload.py",
     "incidents.py", "interactions_client.py", "jobs.py", "key_manager.py",
     "logkit.py", "main.py", "md_cache.py", "model_state.py", "netsession.py",
     "observability.py", "panel.py", "pipeline_config.py", "pipeline_defaults.py", "preflight.py", "prompts.py",
