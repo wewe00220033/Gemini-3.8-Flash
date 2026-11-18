@@ -23,7 +23,7 @@ _CONFIG_MODULES = (
     "sessions", "delivery", "logkit", "observability", "incidents", "watchdog",
     "jobs", "voice_queue", "backup", "audit", "panel", "fsm", "assistant",
     "interactions_client", "web_service", "key_manager", "telegram_bot",
-    "main", "supervisor", "model_state",
+    "main", "supervisor", "model_state", "pipeline_defaults", "pipeline_config",
 )
 
 
@@ -113,7 +113,7 @@ def fresh_env(monkeypatch, tmp_path):
         inc.set_notifier(None)
     # هذه الوحدات تحمل مرجعها الخاص لـ Config (from config import Config) — بعد reload(config) يصبح قديماً
     _sync_loaded_configs(monkeypatch, config.Config)
-    for mod_name in ("settings", "prompts"):
+    for mod_name in ("settings", "prompts", "pipeline_config"):
         mod = sys.modules.get(mod_name)
         if mod is not None:
             mod.reset_cache()
@@ -138,7 +138,7 @@ def fresh_env(monkeypatch, tmp_path):
             mod = sys.modules.get(mod_name)
             if mod is not None and hasattr(mod, "Config"):
                 setattr(mod, "Config", _boot_config.Config)
-        for mod_name in ("settings", "prompts", "sessions"):
+        for mod_name in ("settings", "prompts", "sessions", "pipeline_config"):
             mod = sys.modules.get(mod_name)
             if mod is not None:
                 mod.reset_cache()
@@ -153,7 +153,7 @@ def _runtime_dirs_in_tmp(monkeypatch, tmp_path):
     import config
     _apply_tmp_paths(monkeypatch, config.Config, tmp_path)
     _sync_loaded_configs(monkeypatch, config.Config)
-    for mod_name in ("settings", "prompts", "sessions"):
+    for mod_name in ("settings", "prompts", "sessions", "pipeline_config"):
         mod = sys.modules.get(mod_name)
         if mod is not None:
             mod.reset_cache()
@@ -167,7 +167,7 @@ def _runtime_dirs_in_tmp(monkeypatch, tmp_path):
     gl = sys.modules.get("glossary")
     if gl is not None:
         gl._singleton = None
-    for mod_name in ("settings", "prompts", "sessions"):
+    for mod_name in ("settings", "prompts", "sessions", "pipeline_config"):
         mod = sys.modules.get(mod_name)
         if mod is not None:
             mod.reset_cache()
