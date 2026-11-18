@@ -25,13 +25,14 @@ _lock = threading.Lock()
 _state = {"calls": 0, "ok": 0, "fail": 0, "last_error": None, "last_ms": None}
 
 
-def assert_not_transcription():
-    if Config.AGENT_NAME in Config.MODELS or AGENT_QUOTA_MODEL in Config.MODELS:
+def assert_not_transcription(agent_name=None):
+    target = agent_name or Config.AGENT_NAME
+    if target in Config.MODELS or AGENT_QUOTA_MODEL in Config.MODELS:
         raise RuntimeError("Antigravity ممنوع للتفريغ — AGENT_NAME موجود في Config.MODELS")
 
 
-def build_payload(prompt):
-    return {"agent": Config.AGENT_NAME, "environment": Config.AGENT_ENVIRONMENT, "input": str(prompt)}
+def build_payload(prompt, agent_name=None):
+    return {"agent": agent_name or Config.AGENT_NAME, "environment": Config.AGENT_ENVIRONMENT, "input": str(prompt)}
 
 
 # ======================================================================
@@ -88,23 +89,27 @@ def _error_detail(resp):
 # ======================================================================
 # النداء
 # ======================================================================
-def run(prompt, timeout=None, post_fn=None):
+def run(prompt, timeout=None, post_fn=None, agent_name=None, ignore_feature_flag=False, return_outcome=False):
     """
     يرجع (text, None) أو (None, reason). reason عربي قصير جاهز للعرض.
+    وعند return_outcome=True يرجع (text, reason, status_kind, retry_after_s) لطبقة المحركات الموحدة.
     post_fn(url, json=..., headers=..., timeout=...) → resp — يُحقن في الاختبارات.
     """
-    if not Config.FEATURE_PLAN:
-        return None, "ميزة /plan معطّلة (FEATURE_PLAN=0)"
+    def _ret(txt, rsn, kind="fatal", retry_s=None):
+        return (txt, rsn, kind, retry_s) if return_outcome else (txt, rsn)
+
+    if not ignore_feature_flag and not Config.FEATURE_PLAN:
+        return _ret(None, "ميزة /plan معطّلة (FEATURE_PLAN=0)", "fatal")
     prompt = (prompt or "").strip()
     if not prompt:
-        return None, "لا نص للتخطيط"
+        return _ret(None, "لا نص للتخطيط", "fatal")
     try:
-        assert_not_transcription()
+        assert_not_transcription(agent_name=agent_name)
     except RuntimeError as e:
-        return None, str(e)
+        return _ret(None, str(e), "fatal")
     keys = key_manager.get_active_keys(model=AGENT_QUOTA_MODEL)
     if not keys:
-        return None, "لا مفتاح متاح لـ Antigravity الآن"
+        return _ret(None, "لا مفتاح متاح لـ Antigravity الآن", "try_next")
     key_entry = keys[0]
     key_str, key_name = key_entry.get("key"), key_entry.get("name", "Project")
     post = post_fn or requests.post
@@ -113,14 +118,17 @@ def run(prompt, timeout=None, post_fn=None):
         _state["calls"] += 1
     t0 = time.time()
     try:
-        resp = post(INTERACTIONS_URL, json=build_payload(prompt),
+        resp = post(INTERACTIONS_URL, json=build_payload(prompt, agent_name=agent_name),
                     headers={"x-goog-api-key": key_str, "Content-Type": "application/json"}, timeout=timeout)
     except requests.exceptions.Timeout:
-        return _fail(f"Antigravity لم يرد خلال {int(Config.AGENT_TIMEOUT)} ث — جرّب لاحقاً")
+        _, rsn = _fail(f"Antigravity لم يرد خلال {int(Config.AGENT_TIMEOUT)} ث — جرّب لاحقاً")
+        return _ret(None, rsn, "retry_same")
     except requests.exceptions.RequestException as e:
-        return _fail(f"شبكة: {type(e).__name__}")
+        _, rsn = _fail(f"شبكة: {type(e).__name__}")
+        return _ret(None, rsn, "retry_same")
     except Exception as e:  # أي شيء آخر (post_fn غريب…) — لا يخرج استثناء
-        return _fail(f"خطأ غير متوقع: {type(e).__name__}")
+        _, rsn = _fail(f"خطأ غير متوقع: {type(e).__name__}")
+        return _ret(None, rsn, "fatal")
     ms = int((time.time() - t0) * 1000)
     with _lock:
         _state["last_ms"] = ms
@@ -133,7 +141,8 @@ def run(prompt, timeout=None, post_fn=None):
         # غير JSON (صفحة HTML/نص خام) = شكل غير متوقع — لا نرسله للمالك كخطة
         text = extract_text(data) if isinstance(data, (dict, list)) else ""
         if not text:
-            return _fail("رد Antigravity بشكل غير متوقع (بلا نص) — قد تغيّر شكل الـ API")
+            _, rsn = _fail("رد Antigravity بشكل غير متوقع (بلا نص) — قد تغيّر شكل الـ API")
+            return _ret(None, rsn, "try_next")
         with _lock:
             _state["ok"] += 1
         try:
@@ -141,7 +150,7 @@ def run(prompt, timeout=None, post_fn=None):
         except Exception:
             pass
         print(f"🧭 [antigravity] [{key_name}] خطة في {ms / 1000:.1f} ث")
-        return text, None
+        return _ret(text, None, "ok")
     detail = _error_detail(resp)
     if status == 429:
         daily = "day" in detail.lower() or "daily" in detail.lower() or "quota" in detail.lower()
@@ -149,16 +158,22 @@ def run(prompt, timeout=None, post_fn=None):
             key_manager.mark_key_exhausted(key_str, model=AGENT_QUOTA_MODEL, daily=daily)
         except Exception:
             pass
-        return _fail("حصة Antigravity اليومية نفدت على هذا المفتاح" if daily else "تهدئة 429 من Antigravity — جرّب بعد دقيقة")
+        _, rsn = _fail("حصة Antigravity اليومية نفدت على هذا المفتاح" if daily else "تهدئة 429 من Antigravity — جرّب بعد دقيقة")
+        return _ret(None, rsn, "try_next" if daily else "retry_same")
     if status in (401, 403):
-        return _fail(f"المفتاح مرفوض لـ Antigravity ({status}) — قد يحتاج تفعيل الـ API في مشروع Google")
+        _, rsn = _fail(f"المفتاح مرفوض لـ Antigravity ({status}) — قد يحتاج تفعيل الـ API في مشروع Google")
+        return _ret(None, rsn, "fatal")
     if status == 404:
-        return _fail("Interactions API غير متاح (404) — v1beta قد تغيّر أو الوكيل غير مفعّل")
+        _, rsn = _fail("Interactions API غير متاح (404) — v1beta قد تغيّر أو الوكيل غير مفعّل")
+        return _ret(None, rsn, "fatal")
     if status == 400:
-        return _fail(f"طلب مرفوض (400): {detail or 'نص فقط مدعوم'}")
+        _, rsn = _fail(f"طلب مرفوض (400): {detail or 'نص فقط مدعوم'}")
+        return _ret(None, rsn, "fatal")
     if status >= 500:
-        return _fail(f"Google مزدحمة ({status}) — جرّب لاحقاً")
-    return _fail(f"رد غير متوقع ({status}) {detail}".strip())
+        _, rsn = _fail(f"Google مزدحمة ({status}) — جرّب لاحقاً")
+        return _ret(None, rsn, "retry_same")
+    _, rsn = _fail(f"رد غير متوقع ({status}) {detail}".strip())
+    return _ret(None, rsn, "try_next")
 
 
 def _fail(reason):

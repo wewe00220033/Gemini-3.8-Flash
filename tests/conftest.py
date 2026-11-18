@@ -10,6 +10,7 @@ import shutil
 import sys
 import importlib
 import tempfile
+import urllib.parse
 import pytest
 
 os.environ.setdefault("PYTEST_DISABLE_DOTENV", "1")
@@ -23,7 +24,7 @@ _CONFIG_MODULES = (
     "sessions", "delivery", "logkit", "observability", "incidents", "watchdog",
     "jobs", "voice_queue", "backup", "audit", "panel", "fsm", "assistant",
     "interactions_client", "web_service", "key_manager", "telegram_bot",
-    "main", "supervisor", "model_state", "pipeline_defaults", "pipeline_config",
+    "main", "supervisor", "model_state", "pipeline_defaults", "pipeline_config", "engines_openai", "engines",
 )
 
 
@@ -117,6 +118,9 @@ def fresh_env(monkeypatch, tmp_path):
         mod = sys.modules.get(mod_name)
         if mod is not None:
             mod.reset_cache()
+    eng = sys.modules.get("engines")
+    if eng is not None:
+        eng.reset_state()
     gl = sys.modules.get("glossary")
     if gl is not None:
         gl._singleton = None
@@ -145,6 +149,9 @@ def fresh_env(monkeypatch, tmp_path):
         gl_after = sys.modules.get("glossary")
         if gl_after is not None:
             gl_after._singleton = None
+        eng_after = sys.modules.get("engines")
+        if eng_after is not None:
+            eng_after.reset_state()
 
 
 @pytest.fixture(autouse=True)
@@ -163,7 +170,13 @@ def _runtime_dirs_in_tmp(monkeypatch, tmp_path):
     inc = sys.modules.get("incidents")
     if inc is not None:
         inc.reset_state()
+    eng = sys.modules.get("engines")
+    if eng is not None:
+        eng.reset_state()
     yield
+    eng = sys.modules.get("engines")
+    if eng is not None:
+        eng.reset_state()
     gl = sys.modules.get("glossary")
     if gl is not None:
         gl._singleton = None
@@ -185,9 +198,18 @@ def _no_network_polish(monkeypatch):
     def _no_post(*a, **k):
         raise AssertionError("text_assist: network call in tests is forbidden")
 
+    orig_session_send = text_assist.requests.Session.send
+
+    def _guarded_session_send(self, request, **kwargs):
+        host = (urllib.parse.urlsplit(getattr(request, "url", "") or "").hostname or "").lower()
+        if host in ("127.0.0.1", "localhost", "::1"):
+            return orig_session_send(self, request, **kwargs)
+        raise AssertionError(f"network call via Session.send in tests is forbidden: {getattr(request, 'url', '')}")
+
     monkeypatch.setattr(text_assist, "polish", _stub_polish)
     monkeypatch.setattr(text_assist, "polish_gemini", _stub_polish)
     monkeypatch.setattr(text_assist.requests, "post", _no_post)
+    monkeypatch.setattr(text_assist.requests.Session, "send", _guarded_session_send)
     # مرحلة 4: التسمية الذكية (flash-lite نصياً) بلا شبكة أيضاً — عنوان حتمي قصير
     try:
         import sessions

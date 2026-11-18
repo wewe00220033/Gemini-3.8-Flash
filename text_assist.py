@@ -171,30 +171,39 @@ def assert_not_forbidden_assist_model(model=None):
         raise RuntimeError(f"الموديل {m} من موديلات الصوت — ممنوع للمساعد النصي")
 
 
-def _payload(system_text, user_text, with_thinking=True):
+def _payload(system_text, user_text, with_thinking=True, temperature=None, thinking_budget=None):
+    temp = 0.2 if temperature is None else float(temperature)
     payload = {
         "system_instruction": {"parts": [{"text": system_text}]},
         "contents": [{"parts": [{"text": user_text}]}],
-        "generationConfig": {"temperature": 0.2},
+        "generationConfig": {"temperature": temp},
     }
-    if with_thinking and Config.TEXT_ASSIST_THINKING_BUDGET:
-        payload["generationConfig"]["thinkingConfig"] = {"thinkingBudget": int(Config.TEXT_ASSIST_THINKING_BUDGET)}
+    budget = Config.TEXT_ASSIST_THINKING_BUDGET if thinking_budget is None else thinking_budget
+    if with_thinking and budget:
+        payload["generationConfig"]["thinkingConfig"] = {"thinkingBudget": int(budget)}
     return payload
 
 
-def generate(system_text, user_text, timeout=None):
+def generate(system_text, user_text, timeout=None, model=None, temperature=None, thinking_budget=None, return_outcome=False):
     """
-    نداء نصي واحد عبر أفضل مفتاح متاح لموديل المساعد. يرجع (text, None) أو (None, reason).
+    نداء نصي واحد عبر أفضل مفتاح متاح لموديل المساعد. يرجع (text, None) أو (None, reason)؛
+    وعند return_outcome=True يرجع (text, reason, outcome, retry_after_s) لطبقة المحركات الموحدة.
     لا يلمس قواطع موديلات التفريغ (model_circuit) — موديل مستقل.
     """
-    assert_not_forbidden_assist_model()
-    model = model_name()
+    def _ret(txt, rsn, out_code=None, retry_s=None):
+        return (txt, rsn, out_code, retry_s) if return_outcome else (txt, rsn)
+
+    assert_not_forbidden_assist_model(model)
+    model = model or model_name()
     timeout = timeout or (Config.GEMINI_CONNECT_TIMEOUT, Config.TEXT_ASSIST_TIMEOUT)
     keys = key_manager.get_active_keys(model=model)
     if not keys:
-        return None, "لا مفتاح متاح للمساعد النصي الآن"
+        return _ret(None, "لا مفتاح متاح للمساعد النصي الآن", "NO_KEYS", None)
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
     last_reason = "فشل غير معروف"
+    last_outcome = transcriber.NETWORK
+    saw_rate_limit = False
+    min_retry_after = None
     for key_entry in keys:
         key_str, key_name = key_entry.get("key"), key_entry.get("name", "Project")
         with_thinking = _state["thinking_ok"] is not False
@@ -203,11 +212,15 @@ def generate(system_text, user_text, timeout=None):
                 _state["calls"] += 1
             t0 = time.monotonic()
             try:
-                resp = requests.post(url, json=_payload(system_text, user_text, with_thinking),
-                                     headers={"x-goog-api-key": key_str, "Content-Type": "application/json"},
-                                     timeout=timeout)
+                resp = requests.post(
+                    url,
+                    json=_payload(system_text, user_text, with_thinking, temperature=temperature, thinking_budget=thinking_budget),
+                    headers={"x-goog-api-key": key_str, "Content-Type": "application/json"},
+                    timeout=timeout,
+                )
             except requests.exceptions.RequestException as e:
                 last_reason = f"شبكة: {type(e).__name__}"
+                last_outcome = transcriber.NETWORK
                 break
             att = transcriber.classify_response(resp)
             elapsed = time.monotonic() - t0
@@ -218,7 +231,7 @@ def generate(system_text, user_text, timeout=None):
                         _state["thinking_ok"] = True
                 key_manager.record_success(key_str, model=model)
                 print(f"✨ [{model.replace('gemini-', '')}] [{key_name}] polish في {elapsed:.1f} ث")
-                return att.text, None
+                return _ret(att.text, None, transcriber.SUCCESS, None)
             # thinkingConfig غير مقبول؟ (400 يذكر thinking) → إعادة بدون تفكير مرة واحدة
             if att.outcome == transcriber.BAD_REQUEST and with_thinking and "thinking" in (att.detail or "").lower():
                 with _lock:
@@ -226,11 +239,15 @@ def generate(system_text, user_text, timeout=None):
                 print(f"ℹ️ المساعد النصي: {model} رفض thinkingConfig ({att.detail[:80]}) — إعادة بدون تفكير")
                 with_thinking = False
                 continue
+            last_outcome = att.outcome
             if att.outcome == transcriber.KEY_EXHAUSTED_DAILY:
                 key_manager.mark_key_exhausted(key_str, model=model, daily=True)
                 last_reason = "حصة المساعد النصي اليومية نفدت على هذا المفتاح"
             elif att.outcome == transcriber.KEY_RATE_LIMITED:
                 key_manager.mark_key_exhausted(key_str, model=model, retry_after=att.retry_after)
+                saw_rate_limit = True
+                if att.retry_after is not None:
+                    min_retry_after = att.retry_after if min_retry_after is None else min(min_retry_after, att.retry_after)
                 last_reason = "تهدئة 429 للمساعد النصي"
             elif att.outcome == transcriber.KEY_INVALID:
                 key_manager.mark_key_invalid(key_str, reason=att.detail)
@@ -241,12 +258,13 @@ def generate(system_text, user_text, timeout=None):
                     with _lock:
                         _state["fail"] += 1
                         _state["last_error"] = last_reason
-                    return None, last_reason     # مشكلة موديل/طلب: مفاتيح أخرى لن تساعد
+                    return _ret(None, last_reason, att.outcome, att.retry_after)     # مشكلة موديل/طلب: مفاتيح أخرى لن تساعد
             break   # مشكلة مفتاح → المفتاح التالي
     with _lock:
         _state["fail"] += 1
         _state["last_error"] = last_reason
-    return None, last_reason
+    final_outcome = transcriber.KEY_RATE_LIMITED if saw_rate_limit else last_outcome
+    return _ret(None, last_reason, final_outcome, min_retry_after)
 
 
 def _kill_process_tree(proc):

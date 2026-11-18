@@ -79,8 +79,7 @@ def _expand_env_value(val, missing_vars):
 
 def _normalize_providers(raw_providers):
     defaults = pipeline_defaults.builtin_providers()
-    for d in defaults.values():
-        d.pop("_unresolved", None)
+    builtin_unresolved = {k: list(v.pop("_unresolved", [])) for k, v in defaults.items()}
 
     merged_map = copy.deepcopy(defaults)
     if isinstance(raw_providers, dict):
@@ -95,15 +94,19 @@ def _normalize_providers(raw_providers):
     resolved = {}
     for name, p_cfg in merged_map.items():
         missing = []
+        inherited_builtin = not (isinstance(raw_providers, dict) and name in raw_providers) and bool(builtin_unresolved.get(name))
+        if inherited_builtin:
+            missing.extend(builtin_unresolved[name])
         expanded = _expand_env_value(p_cfg, missing)
         p_type = str(expanded.get("type") or "").strip()
-        for req_field in pipeline_defaults.REQUIRED_PROVIDER_FIELDS.get(p_type, ()):
-            f_val = str(expanded.get(req_field) or "").strip()
-            if not f_val:
-                raw_field = str(p_cfg.get(req_field) or "")
-                ref_vars = [m.group(1) for m in _ENV_VAR_RE.finditer(raw_field)]
-                if not any(v in missing for v in ref_vars) and req_field not in missing:
-                    missing.append(req_field)
+        if not inherited_builtin:
+            for req_field in pipeline_defaults.REQUIRED_PROVIDER_FIELDS.get(p_type, ()):
+                f_val = str(expanded.get(req_field) or "").strip()
+                if not f_val:
+                    raw_field = str(p_cfg.get(req_field) or "")
+                    ref_vars = [m.group(1) for m in _ENV_VAR_RE.finditer(raw_field)]
+                    if not any(v in missing for v in ref_vars) and req_field not in missing:
+                        missing.append(req_field)
         expanded["_unresolved"] = missing
         if missing and isinstance(raw_providers, dict) and name in raw_providers:
             logger.warning("⚠️ pipeline.json: المزود '%s' يفتقد متغيرات/حقول مطلوبة: %s", name, ", ".join(missing))
@@ -228,7 +231,8 @@ def _effective_poll_interval(cfg):
 
 
 def get(force=False):
-    """يرجع نسخة عميقة آمنة من إعداد خط التنظيم الفعّال مع فحص كسول `(st_mtime_ns, st_size)`."""
+    """يرجع نسخة عميقة آمنة من إعداد خط التنظيم الفعّال مع فحص كسول `(st_mtime_ns, st_size)`.
+    عند وجود `pipeline.json` على القرص تُلتقط متغيرات البيئة `${VAR}` وقيم المزودات المدمجة وقت التحميل وتُحفظ في الكاش حتى يتغير الملف أو يُعاد التشغيل."""
     global _cached_disk_cfg, _cached_path, _cached_sig, _bad_sig, _last_check_mono
     path = getattr(Config, "PIPELINE_FILE", "")
     now = time.monotonic()
