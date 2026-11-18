@@ -14,6 +14,7 @@ import html
 import re
 import os
 import threading
+import unicodedata
 import requests
 from config import Config
 from key_manager import key_manager
@@ -151,6 +152,39 @@ def _chunk_text(text, limit):
 _TAG_RE = re.compile(r"</?([a-zA-Z][a-zA-Z0-9]*)(?:\s+[^<>]*)?>")
 # الوسوم التي لا تحتاج إغلاقاً — لا تُفتح في نهاية القطعة تلقائياً
 _VOID_TAGS = {"br", "hr", "img"}
+# كيانات HTML التي يقبلها تليجرام (مسماة ورقمية): القطع داخلها = 400 can't parse entities
+_ENTITY_RE = re.compile(r"&(?:#\d{1,7}|#x[0-9a-fA-F]{1,6}|[a-zA-Z][a-zA-Z0-9]{1,8});")
+
+
+def _is_cluster_tail(rest, idx):
+    """هل الحرف عند idx تابع لما قبله (لا يجوز بدء قطعة به)؟
+    VS1–VS16، ZWJ، أو ما بعد ZWJ، أو علامة تركيبية (Mn/Mc/Me — تشكيل عربي، إيموجي مركّب).
+    Sk مستبعدة عمداً: رموز مستقلة بالتعريف (^ ` ¨) لا تابعة."""
+    ch = rest[idx]
+    code = ord(ch)
+    if 0xFE00 <= code <= 0xFE0F or code == 0x200D:
+        return True
+    if unicodedata.category(ch) in ("Mn", "Mc", "Me"):
+        return True
+    if idx > 0 and ord(rest[idx - 1]) == 0x200D:
+        return True
+    return False
+
+
+def _safe_cut(rest, cut):
+    """يرجع موضع قطع لا يقع داخل كيان HTML ولا يفصل حرفاً عن توابعه.
+    تراجع أقصى 8 محارف (حماية من نصوص Zalgo)؛ لو تعذّر يُعاد الموضع الأصلي بعد تصحيح الكيان (في النص التالف المبدوء بـ 8+ حركات معلقة دون حرف أساس تُقبل القطعة المعلقة بدل قطعة فارغة)."""
+    if cut <= 0 or cut >= len(rest):
+        return cut
+    window_start = max(0, cut - 12)
+    for m in _ENTITY_RE.finditer(rest, window_start, min(len(rest), cut + 12)):
+        if m.start() < cut < m.end():
+            cut = m.start() if m.start() > 0 else m.end()
+            break
+    orig = cut
+    while 0 < cut < len(rest) and (orig - cut) < 8 and _is_cluster_tail(rest, cut):
+        cut -= 1
+    return cut if cut > 0 else orig
 
 
 def _pick_pua_sentinel(text):
@@ -199,6 +233,7 @@ def _html_chunks(text, limit):
                 if m.start() >= cut:
                     break
             cut = max(1, cut)
+            cut = _safe_cut(rest, cut)
             raw.append(rest[:cut])
             rest = rest[cut:]
         if rest:
