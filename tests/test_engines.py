@@ -369,3 +369,18 @@ def test_session_send_guard_blocks_external_hosts_including_localhost_spoof_and_
         if fn.endswith(".py") and fn not in ("engines.py", "engines_openai.py"):
             src = open(os.path.join(ROOT, fn), encoding="utf-8").read()
             assert "import engines" not in src and "from engines" not in src, f"{fn} يستورد engines قبل أوانه"
+
+
+def test_get_semaphore_replaces_on_cap_change_ki_01():
+    """KI-01 (P3-02): مفتاح get_semaphore هو provider_name فقط، وتغيّر cap يستبدل السيمافور دون تراكم."""
+    engines.reset_state()
+    sem1 = engines.get_semaphore("prov_x", max_concurrent=2)
+    assert len(engines._semaphores) == 1
+    # استدعاء بنفس السعة يعيد نفس الكائن
+    sem1_again = engines.get_semaphore("prov_x", max_concurrent=2)
+    assert sem1_again is sem1
+    # استدعاء بسعة مختلفة يستبدل السيمافور ولا يزيد عدد العناصر في القاموس
+    sem2 = engines.get_semaphore("prov_x", max_concurrent=3)
+    assert sem2 is not sem1
+    assert len(engines._semaphores) == 1
+

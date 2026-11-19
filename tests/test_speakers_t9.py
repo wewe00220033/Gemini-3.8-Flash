@@ -602,5 +602,34 @@ def test_attempt_interactions_mock_responses(monkeypatch):
     assert transcriber.classify_interactions_response(resp_503).outcome == transcriber.MODEL_DOWN
 
 
+def test_strip_single_speaker_strips_legacy_when_speaker_tags_present_ki_02():
+    """KI-02 (P3-02): تجريد وسوم legacy دائماً عند حضور وسوم 🗣️ حتى لو كان الحوار متعدد المتحدثين."""
+    text = "🗣️1: مرحباً يا أحمد.\n🗣️2: أهلاً يا سليم.\nالمتكلم 1: سطر تقليدي خاطئ تم إقحامه.\n🗣️1: تمام نكمل كلامنا."
+    res = guards.strip_single_speaker(text)
+    assert "🗣️1: مرحباً يا أحمد." in res
+    assert "🗣️2: أهلاً يا سليم." in res
+    assert "🗣️1: تمام نكمل كلامنا." in res
+    assert "المتكلم 1:" not in res
+    assert "سطر تقليدي خاطئ" in res
+
+
+def test_extract_text_interactions_ignores_non_text_content_ki_03():
+    """KI-03 (P3-02): _extract_text_interactions يتجاهل أي content نوعه ليس text (مثل thought)."""
+    data = {
+        "steps": [
+            {
+                "content": [
+                    {"type": "thought", "text": "تفكير داخلي وسري للموديل يجب ألا يظهر"},
+                    {"type": "text", "text": "التفريغ الصوتي الفعلي الصحيح."},
+                ]
+            }
+        ]
+    }
+    extracted = transcriber._extract_text_interactions(data)
+    assert "تفكير داخلي" not in extracted
+    assert "التفريغ الصوتي الفعلي الصحيح" in extracted
+
+
+
 
 

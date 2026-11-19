@@ -30,6 +30,7 @@ _LOCAL_PATH_RE = re.compile(r'([A-Za-z]:[\\/][^\s:"\'\)]+|/(?:home|var|usr|etc|r
 
 _state_lock = threading.Lock()
 _semaphores = {}
+_semaphore_caps = {}
 _queue_locks = {}
 
 
@@ -56,17 +57,21 @@ def reset_state():
     """للاختبارات: تصفير بوابات التوازي ومنسقات الطوابير."""
     with _state_lock:
         _semaphores.clear()
+        _semaphore_caps.clear()
         _queue_locks.clear()
 
 
 def get_semaphore(provider_name, max_concurrent=2):
+    """بوابة توازي لكل مزود بالمفتاح provider_name فقط؛ وتحديث الكائن عند تغيّر cap (KI-01 — P3-02)."""
+    name = str(provider_name)
     cap = max(1, int(max_concurrent or 1))
-    key = (str(provider_name), cap)
     with _state_lock:
-        sem = _semaphores.get(key)
-        if sem is None:
+        sem = _semaphores.get(name)
+        old_cap = _semaphore_caps.get(name)
+        if sem is None or old_cap != cap:
             sem = threading.BoundedSemaphore(cap)
-            _semaphores[key] = sem
+            _semaphores[name] = sem
+            _semaphore_caps[name] = cap
         return sem
 
 

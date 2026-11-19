@@ -149,12 +149,15 @@ def strip_single_speaker(text: str, tag_regex: str = r"^🗣️(\d+):") -> str:
         if len(unique_speakers) <= 1:
             strip_pattern = re.compile(rf"(?m){pattern.pattern}\s*")
             text = strip_pattern.sub("", text)
-
-    legacy_matches = _LEGACY_SPEAKER_RE.findall(text)
-    if legacy_matches:
-        unique_legacy = set(m.strip() for m in legacy_matches)
-        if len(unique_legacy) <= 1:
+        # KI-02 (P3-02): عند حضور وسوم 🗣️ يتم تجريد وسوم legacy دائماً بغض النظر عن عددها
+        if _LEGACY_SPEAKER_RE.search(text):
             text = _LEGACY_SPEAKER_RE.sub("", text)
+    else:
+        legacy_matches = _LEGACY_SPEAKER_RE.findall(text)
+        if legacy_matches:
+            unique_legacy = set(m.strip() for m in legacy_matches)
+            if len(unique_legacy) <= 1:
+                text = _LEGACY_SPEAKER_RE.sub("", text)
 
     return text
 

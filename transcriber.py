@@ -388,7 +388,7 @@ def _extract_text_interactions(data):
             for c in contents:
                 if not isinstance(c, dict):
                     continue
-                if c.get("type") not in ("text", None):
+                if c.get("type", "text") != "text":
                     continue
                 piece = c.get("text")
                 if piece is None:
