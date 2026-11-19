@@ -512,7 +512,7 @@ def _format_label(lbl):
         return None
     if "<b" in s or s.endswith(":"):
         return s
-    if any(ord(c) > 0x2000 for c in s):
+    if any(ord(c) >= 0x2600 for c in s):
         return f"<b>[{html.escape(s)}]:</b>"
     return f"⚡ <b>[{html.escape(s)}]:</b>"
 
@@ -602,7 +602,14 @@ def render_live_html(blocks, title=None, role_id=None, session_name=None, footer
         skip_note = f"<i>...و {skipped_count} مسودات بينهما...</i>"
         note_overhead = _utf16_len(skip_note) + 1
         new_overheads = fixed_overhead + note_overhead + sum(_block_overhead(lbl) for lbl, _ in shown_blocks)
-        per_block_cap = max(100, (live_cap - new_overheads) // 2)
+        avail = live_cap - new_overheads
+        if avail < 200:
+            notice = f"<i>[...{n_total} مسودات جاهزة — تظهر في النهائي...]</i>"
+            pieces = [header_str, notice]
+            if footer_str:
+                pieces.append(footer_str)
+            return "\n".join(pieces)
+        per_block_cap = avail // 2
 
     rendered_blocks = []
     for lbl, raw_text in shown_blocks:

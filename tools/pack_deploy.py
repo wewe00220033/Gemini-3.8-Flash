@@ -50,7 +50,7 @@ KNOWN_ROOT_MODULES = (
     "hot_reload.py",
     "incidents.py", "interactions_client.py", "jobs.py", "key_manager.py",
     "logkit.py", "main.py", "md_cache.py", "model_state.py", "netsession.py",
-    "observability.py", "panel.py", "pipeline_config.py", "pipeline_defaults.py", "preflight.py", "prompts.py",
+    "observability.py", "panel.py", "pipeline_config.py", "pipeline_defaults.py", "pipeline_runner.py", "preflight.py", "prompts.py",
     "sessions.py", "settings.py", "smoke_failover.py", "store.py",
     "supervisor.py", "telegram_bot.py", "text_assist.py", "transcribe_tool.py",
     "transcriber.py", "voice_queue.py", "watchdog.py", "web_service.py",
