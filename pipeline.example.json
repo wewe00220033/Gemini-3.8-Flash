@@ -11,7 +11,12 @@
     "chunk_limit_utf16": 4000,
     "silent_followups": true,
     "write_drafts_md": true,
-    "max_parallel": 4
+    "max_parallel": 4,
+    "icons": {
+      "flash_lite": "⚡",
+      "shelby": "🦙",
+      "_example_groq": "🤖"
+    }
   },
   "providers": {
     "flash_lite": {

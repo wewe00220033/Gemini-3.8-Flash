@@ -104,6 +104,7 @@ class LiveMessageController:
         self.chat_id = chat_id
         self.user_id = user_id
         self.entry_id = entry_id
+        self.icons = None
         self._writer_lock = threading.Lock()
         self.live_mid = None
         self.finalized = False
@@ -197,6 +198,7 @@ class LiveMessageController:
                     title=self.title,
                     telemetry=telemetry,
                     synth_provider=synth_provider,
+                    icons=getattr(self, "icons", None),
                 )
             else:
                 full_html = golden_text
@@ -716,12 +718,20 @@ def synthesizer_interim_message_html(gemini_text, shelby_text=None, role_id=None
     )
 
 
-def _format_icon_label(label: str, provider: str = "") -> str:
-    """تنسيق وسم النداء أو المزود بالأيقونة التعبيرية المناسبة (DEC-P2-08/10)."""
+def _format_icon_label(label: str, provider: str = "", icons: dict = None) -> str:
+    """تنسيق وسم النداء أو المزود بالأيقونة التعبيرية المناسبة (DEC-P2-08/10, KI-04 في P3-03)."""
     lbl = str(label or provider or "").strip()
     if any(ord(c) >= 0x2600 for c in lbl):
         return lbl
-    p_lower = str(provider or "").lower()
+    p_str = str(provider or "").strip()
+    p_lower = p_str.lower()
+
+    # فحص أيقونات الإعدادات المخصصة أولاً (KI-04 في P3-03)
+    if icons and isinstance(icons, dict):
+        custom = icons.get(p_str) or icons.get(p_lower) or icons.get(lbl)
+        if custom:
+            return f"{custom} {lbl}"
+
     if "فلاش" in lbl or "flash" in p_lower:
         return f"⚡ {lbl}"
     if "شلبي" in lbl or "shelby" in p_lower:
@@ -733,7 +743,7 @@ def _format_icon_label(label: str, provider: str = "") -> str:
 
 def synthesizer_final_message_html(golden_text, gemini_text=None, shelby_text=None,
                                    role_id=None, session_name=None, title=None, telemetry=None,
-                                   include_drafts=False, synth_provider=None):
+                                   include_drafts=False, synth_provider=None, icons=None):
     """
     الرسالة الذهبية النهائية المسبوكة بعد نجاح الوكيل الثالث:
     تعرض النسخة الذهبية داخل <pre>، مع وسم يوضح المساهمين (فلاش + شلبي) والمزود الفعلي للسبك، وتذييل التوقيت الدقيق خارج <pre>.
@@ -784,7 +794,7 @@ def synthesizer_final_message_html(golden_text, gemini_text=None, shelby_text=No
             for st_name, calls_dict in stages_data.items():
                 if isinstance(calls_dict, dict):
                     for lbl, sec in calls_dict.items():
-                        icon_lbl = _format_icon_label(lbl)
+                        icon_lbl = _format_icon_label(lbl, icons=icons)
                         stage_items.append(f"{icon_lbl}: {sec:.1f}ث")
             t_tot = f"{telemetry.get('total', 0):.1f}ث"
             if stage_items:
@@ -1123,8 +1133,9 @@ def _deliver_synthesizer(raw, polished, role_id, gl, l2, session_name, sender, a
         min_exec = getattr(Config, "MIN_SHELBY_EXEC_SEC", 5.0)
         display_style = str(display.get("mode") or display.get("style") or "single_live").strip()
         show_stages_cfg = display.get("show_stages")
+        custom_icons = display.get("icons") or {}
+        controller.icons = custom_icons
         owner_ctx = memory.get_owner_context(mem_cfg) if mem_enabled else None
-        max_owner_chars = int(mem_cfg.get("inject_max_bytes", 25600) or 25600)
         discovered_topic = "notes"
 
         all_drafts_to_save = []
@@ -1143,7 +1154,7 @@ def _deliver_synthesizer(raw, polished, role_id, gl, l2, session_name, sender, a
 
         def _console_progress(event, call):
             """مستمع كونسول حي يطبع نبضات المحركات أولاً بأول على الشاشة (DEC-P2-10)."""
-            icon_lbl = _format_icon_label(call.label or call.provider, call.provider)
+            icon_lbl = _format_icon_label(call.label or call.provider, call.provider, icons=custom_icons)
             if event == "started":
                 msg = f"⏳ [{icon_lbl}] بدأ..."
             elif event == "ok":
@@ -1185,7 +1196,7 @@ def _deliver_synthesizer(raw, polished, role_id, gl, l2, session_name, sender, a
                     )
                     st_injected_calls.append(injected_res)
                     telemetry_stages[st_name][inj_lbl] = round(gemini_elapsed, 1)
-                    inj_icon_lbl = _format_icon_label(inj_lbl, c.get("provider", ""))
+                    inj_icon_lbl = _format_icon_label(inj_lbl, c.get("provider", ""), icons=custom_icons)
                     msg_inj = f"✅ [{inj_icon_lbl}] {gemini_elapsed:.1f}ث (مسودة مسبقة)"
                     print(msg_inj, flush=True)
                     logger.info(msg_inj)
@@ -1237,7 +1248,7 @@ def _deliver_synthesizer(raw, polished, role_id, gl, l2, session_name, sender, a
                     context_summary=eff_summary,
                     owner_context=owner_ctx,
                     mode="synthesis",
-                    max_owner_chars=max_owner_chars,
+                    max_owner_chars=None,
                 )
             elif p_type == "polish_multi" or (p_type == "polish" and collected_drafts):
                 p_sys, p_usr = prompts.compose_polish_multi_prompt(
@@ -1251,7 +1262,7 @@ def _deliver_synthesizer(raw, polished, role_id, gl, l2, session_name, sender, a
                     context_summary=eff_summary,
                     owner_context=owner_ctx,
                     mode="polish",
-                    max_owner_chars=max_owner_chars,
+                    max_owner_chars=None,
                 )
             else:
                 p_sys = prompts.compose_prompt(
@@ -1266,7 +1277,7 @@ def _deliver_synthesizer(raw, polished, role_id, gl, l2, session_name, sender, a
                     context_summary=eff_summary,
                     owner_context=owner_ctx,
                     mode="polish",
-                    max_owner_chars=max_owner_chars,
+                    max_owner_chars=None,
                 )
                 p_usr = raw
 

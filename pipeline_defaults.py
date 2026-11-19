@@ -54,6 +54,7 @@ DEFAULT_DISPLAY = {
     "write_drafts_md": True,
     "max_parallel": 4,
     "deadline_margin_s": 20.0,
+    "icons": {},
 }
 
 DEFAULT_GUARDS = {
