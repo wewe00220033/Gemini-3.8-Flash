@@ -456,3 +456,23 @@ def test_glossary_applied_immediately_to_each_stage(monkeypatch, tmp_path):
 
     # يجب أن يتم استبدال "غلط" بـ "صح" في المخرج النهائي المسلم
     assert finalized == ["كلمة صح تماماً"]
+
+
+# 9. اختبار قراءة القاموس الحقيقي من دالة entries() وقبول البدائل المؤكدة (T6c-fix — DEC-P2-08)
+def test_real_glossary_confirmed_entries_accepted_by_guard(tmp_path):
+    import glossary
+    gl_file = tmp_path / "glossary.json"
+    gl = glossary.Glossary(str(gl_file))
+    gl.add("شلبي", "ChatGPT", status="confirmed")
+
+    raw_text = "استخدمت شلبي في البرمجة"
+    golden_text = "استخدمت ChatGPT في البرمجة"
+
+    # الحارس يجب ألا يعتبر ChatGPT هلوسة طالما أنها بديل مؤكد في القاموس
+    warns = guards.numbers_latin_subset_check(
+        golden_text=golden_text,
+        raw_text=raw_text,
+        drafts=[],
+        glossary=gl,
+    )
+    assert warns == []

@@ -54,16 +54,19 @@ def numbers_latin_subset_check(
 
     # إضافة مصطلحات القاموس كأصل مشروع
     if glossary is not None:
-        entries = getattr(glossary, "entries", None) or getattr(glossary, "terms", None) or {}
-        if isinstance(entries, dict):
-            for k, v in entries.items():
+        ents_getter = getattr(glossary, "entries", None)
+        ents = ents_getter() if callable(ents_getter) else (ents_getter or getattr(glossary, "terms", None) or [])
+        if isinstance(ents, list):
+            for item in ents:
+                if isinstance(item, dict):
+                    if item.get("status") == "confirmed" or "status" not in item:
+                        source_texts.append(str(item.get("replacement") or item.get("term") or ""))
+                elif isinstance(item, str):
+                    source_texts.append(item)
+        elif isinstance(ents, dict):
+            for k, v in ents.items():
                 source_texts.append(str(k))
                 source_texts.append(str(v))
-        elif isinstance(entries, list):
-            for item in entries:
-                if isinstance(item, dict):
-                    source_texts.append(str(item.get("term") or ""))
-                    source_texts.append(str(item.get("replacement") or ""))
 
     # 2. استخراج الأرقام من المصادر ومن الذهبية
     source_numbers = set()
@@ -80,14 +83,19 @@ def numbers_latin_subset_check(
     golden_latin_raw = _LATIN_RE.findall(golden_text)
 
     unexpected = []
+    seen = set()
     # فحص الأرقام المستحدثة
     for num in sorted(golden_numbers):
-        if num not in source_numbers:
+        if num not in source_numbers and num not in seen:
             unexpected.append(num)
+            seen.add(num)
 
     # فحص الكلمات اللاتينية المستحدثة
     for word in golden_latin_raw:
-        if word.lower() not in source_latin and word not in unexpected:
+        w_lower = word.lower()
+        if w_lower not in source_latin and w_lower not in seen:
             unexpected.append(word)
+            seen.add(w_lower)
 
     return unexpected
+
