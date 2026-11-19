@@ -243,3 +243,62 @@ def test_dynamic_deadlines_and_queue_waiters_scale_with_repeats_and_no_runtime_i
         if fn.endswith(".py") and fn not in ("pipeline_config.py", "pipeline_defaults.py", "delivery.py"):
             src = open(os.path.join(ROOT, fn), encoding="utf-8").read()
             assert "pipeline_config" not in src and "pipeline_defaults" not in src, f"{fn} يستورد T3a قبل أوانه"
+
+
+# =====================================================================
+# اختبارات T6b-fix2: Fallback المقيد بالقائمة البيضاء لسمات Config (DEC-P2-08)
+# =====================================================================
+
+def test_whitelisted_config_fallback_when_env_empty(fresh_env, monkeypatch):
+    """
+    التحقق من أن المتغيرات المصرح بها في _CONFIG_FALLBACK_VARS (مثل LOCAL_POLISH_CMD)
+    تتفكك تلقائياً من Config عند غيابها من os.environ وتبقى _unresolved فارغة (T6b-fix2 — DEC-P2-08).
+    """
+    monkeypatch.delenv("LOCAL_POLISH_CMD", raising=False)
+    monkeypatch.setattr(config.Config, "LOCAL_POLISH_CMD", "python3 .local/shelby_polish.py")
+
+    doc = {
+        "version": 1,
+        "providers": {
+            "shelby": {
+                "type": "local_cli",
+                "command": "${LOCAL_POLISH_CMD}",
+            }
+        },
+        "stages": [],
+    }
+    with open(config.Config.PIPELINE_FILE, "w", encoding="utf-8") as f:
+        json.dump(doc, f)
+
+    cfg = pipeline_config.get(force=True)
+    shelby_cfg = cfg["providers"]["shelby"]
+    assert shelby_cfg["command"] == "python3 .local/shelby_polish.py"
+    assert shelby_cfg.get("_unresolved") == []
+
+
+def test_non_whitelisted_config_attributes_are_not_leaked(fresh_env, monkeypatch):
+    """
+    اختبار الأمان: التحقق من أن أي متغير خارج القائمة البيضاء (مثل WEB_ACCESS_TOKEN أو KEYS_JSON_FILE)
+    لا يُسحب من Config ويتفكك إلى فارغ ويُدرج في _unresolved (T6b-fix2 — DEC-P2-08).
+    """
+    monkeypatch.delenv("WEB_ACCESS_TOKEN", raising=False)
+    monkeypatch.setattr(config.Config, "WEB_ACCESS_TOKEN", "super_secret_token_123")
+
+    doc = {
+        "version": 1,
+        "providers": {
+            "custom_api": {
+                "type": "openai_compat",
+                "base_url": "https://api.example.com/v1",
+                "api_key": "${WEB_ACCESS_TOKEN}",
+            }
+        },
+        "stages": [],
+    }
+    with open(config.Config.PIPELINE_FILE, "w", encoding="utf-8") as f:
+        json.dump(doc, f)
+
+    cfg = pipeline_config.get(force=True)
+    custom_cfg = cfg["providers"]["custom_api"]
+    assert custom_cfg["api_key"] == ""
+    assert "WEB_ACCESS_TOKEN" in custom_cfg.get("_unresolved", [])

@@ -29,6 +29,15 @@ MAX_CALL_REPEAT = 20
 _POLL_INTERVAL_S = 5.0
 OVERLAPPING_SETTINGS_KEYS = ("compare_mode", "local_polish_timeout")
 
+_CONFIG_FALLBACK_VARS = (
+    "LOCAL_POLISH_CMD",
+    "LOCAL_POLISH_TIMEOUT",
+    "LOCAL_LOCK_WAIT_SEC",
+    "TEXT_ASSIST_MODEL",
+    "TEXT_ASSIST_TIMEOUT",
+    "TEXT_ASSIST_THINKING_BUDGET",
+)
+
 _ENV_VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 
 _lock = threading.RLock()
@@ -56,10 +65,16 @@ def _deep_merge_dict(base, override):
 
 
 def _expand_env_value(val, missing_vars):
+    """
+    يفك متغيرات البيئة بصيغة ${VAR} أو ${VAR:-default}.
+    ${VAR} يُفك من البيئة؛ وكاستثناء محدود من Config للمتغيرات المحسوبة تلقائياً المدرجة في _CONFIG_FALLBACK_VARS.
+    """
     if isinstance(val, str):
         def _repl(m):
             var_name, fallback = m.group(1), m.group(2)
             env_val = os.environ.get(var_name, "")
+            if env_val == "" and var_name in _CONFIG_FALLBACK_VARS:
+                env_val = str(getattr(Config, var_name, "") or "")
             if env_val != "":
                 return env_val
             if fallback is not None:
