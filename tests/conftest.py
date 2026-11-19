@@ -46,6 +46,7 @@ def _apply_tmp_paths(mp, cfg_cls, base_dir):
         "SETTINGS_FILE": os.path.join(base, "settings.json"),
         "PIPELINE_FILE": os.path.join(base, "pipeline.json"),
         "MEMORY_DIR": os.path.join(base, "memory"),
+        "MEMORY_FILE": os.path.join(base, "memory", "MEMORY.md"),
         "DRAFTS_DIR": os.path.join(base, "drafts"),
         "SESSIONS_DIR": os.path.join(base, "sessions"),
         "SESSIONS_INDEX_FILE": os.path.join(base, "sessions", "sessions_index.json"),

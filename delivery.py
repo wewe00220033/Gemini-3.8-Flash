@@ -1407,6 +1407,8 @@ def _deliver_synthesizer(raw, polished, role_id, gl, l2, session_name, sender, a
             )
             for w in subset_warns:
                 logger.warning('⚠️ guard: "%s" لم يرد في الخام أو المسودات', w)
+                if mem_enabled:
+                    memory.append_guard_warning(w, memory_cfg=mem_cfg)
 
             # فحص صدى سياق المالك في النسخة الذهبية (T7/T8 — DEC-P2-03/08)
             echo_ratio = float((cfg.get("memory") or {}).get("echo_ratio_strike") or getattr(Config, "CONTEXT_ECHO_RATIO", 0.60))

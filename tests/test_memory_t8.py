@@ -23,6 +23,7 @@ def test_owner_context_disabled_by_default(tmp_path, monkeypatch):
     mem_dir = tmp_path / "memory"
     mem_dir.mkdir()
     (mem_dir / "MEMORY.md").write_text("# ثوابت المالك\nالاسم: زيزو", encoding="utf-8")
+    monkeypatch.setattr(memory.Config, "MEMORY_DIR", str(mem_dir))
     monkeypatch.setattr(Config, "MEMORY_DIR", str(mem_dir))
 
     # الذاكرة معطلة (افتراضي)
@@ -34,6 +35,7 @@ def test_owner_context_truncation_lines_and_bytes(tmp_path, monkeypatch):
     """التحقق من قص MEMORY.md بأول 200 سطر ثم 25600 بايت UTF-8."""
     mem_dir = tmp_path / "memory"
     mem_dir.mkdir()
+    monkeypatch.setattr(memory.Config, "MEMORY_DIR", str(mem_dir))
     monkeypatch.setattr(Config, "MEMORY_DIR", str(mem_dir))
 
     # كتابة ملف به 300 سطر عربي
@@ -157,6 +159,7 @@ def test_append_daily_single_line_format(tmp_path, monkeypatch):
 def test_topic_context_rolling_fifo_compacted(tmp_path, monkeypatch):
     """التحقق من إدارة السياق المتحرك context/<topic>.md بنظام Rolling FIFO وقص الحجم."""
     mem_dir = tmp_path / "memory"
+    monkeypatch.setattr(memory.Config, "MEMORY_DIR", str(mem_dir))
     monkeypatch.setattr(Config, "MEMORY_DIR", str(mem_dir))
 
     mem_cfg = {
@@ -184,15 +187,29 @@ def test_topic_context_rolling_fifo_compacted(tmp_path, monkeypatch):
 
 
 def test_maybe_write_weekly_review(tmp_path, monkeypatch):
-    """التحقق من توليد تقرير المراجعة الأسبوعي review/YYYY-WW.md سلبياً ومطابقته للشروط الحتمية."""
+    """التحقق من توليد تقرير المراجعة الأسبوعي review/YYYY-WW.md سلبياً مع فلترة الأسبوع وتجميع تحذيرات الحارس."""
     mem_dir = tmp_path / "memory"
+    monkeypatch.setattr(memory.Config, "MEMORY_DIR", str(mem_dir))
     monkeypatch.setattr(Config, "MEMORY_DIR", str(mem_dir))
 
-    # تسجيل مدخلات في daily
     mem_cfg = {"enabled": True}
-    memory.append_daily("v1", "coding", "كود 1", memory_cfg=mem_cfg)
-    memory.append_daily("v2", "coding", "كود 2", memory_cfg=mem_cfg)
-    memory.append_daily("v3", "family", "عائلة 1", memory_cfg=mem_cfg)
+    fixed_now = datetime.datetime(2026, 11, 23, 10, 0)  # أسبوع W47
+    # الأسبوع المنصرم هو W46 (من 2026-11-16 إلى 2026-11-22)
+    ts_w46 = datetime.datetime(2026, 11, 18, 12, 0).timestamp()
+    # ملف من أسبوع قديم سابق W45 (2026-11-09)
+    ts_w45 = datetime.datetime(2026, 11, 9, 12, 0).timestamp()
+
+    # تسجيل مدخلات في الأسبوع السابق W46
+    memory.append_daily("v1", "coding", "كود 1", timestamp=ts_w46, memory_cfg=mem_cfg)
+    memory.append_daily("v2", "coding", "كود 2", timestamp=ts_w46, memory_cfg=mem_cfg)
+    memory.append_daily("v3", "family", "عائلة 1", timestamp=ts_w46, memory_cfg=mem_cfg)
+    memory.append_guard_warning("Docker", timestamp=ts_w46, memory_cfg=mem_cfg)
+    memory.append_guard_warning("Docker", timestamp=ts_w46, memory_cfg=mem_cfg)
+    memory.append_guard_warning("FastAPI", timestamp=ts_w46, memory_cfg=mem_cfg)
+
+    # تسجيل في أسبوع أقدم W45 للتأكد من فلترته وعدم احتسابه
+    memory.append_daily("v_old", "coding", "كود قديم", timestamp=ts_w45, memory_cfg=mem_cfg)
+    memory.append_guard_warning("OldWord", timestamp=ts_w45, memory_cfg=mem_cfg)
 
     # وهمي للقاموس بمدخلات معلقة
     class FakeGlossary:
@@ -202,10 +219,8 @@ def test_maybe_write_weekly_review(tmp_path, monkeypatch):
                 {"patterns": ["شلبي"], "replacement": "ChatGPT", "status": "pending", "hits": 5},
             ]
 
-    fixed_now = datetime.datetime(2026, 11, 23, 10, 0)  # أسبوع جديد
     rev_path = memory.maybe_write_weekly_review(
         glossary=FakeGlossary(),
-        guard_warnings=["FastAPI", "Redis"],
         memory_cfg=mem_cfg,
         now=fixed_now,
     )
@@ -214,13 +229,28 @@ def test_maybe_write_weekly_review(tmp_path, monkeypatch):
     assert os.path.exists(rev_path)
     content = open(rev_path, "r", encoding="utf-8").read()
 
-    # التحقق من المحتويات
+    # التحقق من المحتويات (الأسبوع W46 فقط)
     assert "# 📋 تقرير المراجعة الأسبوعي" in content
-    assert "#coding`: 2 تسجيل" in content
+    assert "#coding`: 2 تسجيل" in content   # 2 من W46 فقط (وليس 3 مع W45)
     assert "#family`: 1 تسجيل" in content
     assert "شلبي` ➔ `ChatGPT` (تكرار: 5)" in content
-    assert "FastAPI" in content
-    assert "Redis" in content
+    assert "Docker`: 2 مرات" in content
+    assert "FastAPI`: 1 مرات" in content
+    assert "OldWord" not in content         # مفلترة بنجاح
 
     # استدعاء ثانٍ في نفس الأسبوع يعيد None دون إعادة الكتابة (Idempotent)
     assert memory.maybe_write_weekly_review(glossary=FakeGlossary(), memory_cfg=mem_cfg, now=fixed_now) is None
+
+
+def test_owner_context_from_custom_memory_file(tmp_path, monkeypatch):
+    """التحقق من قراءة MEMORY_FILE المخصص عبر البيئة (نمط PIPELINE_FILE)."""
+    custom_memory = tmp_path / "custom_memory.md"
+    custom_memory.write_text("# ثوابت مخصصة\nالمالك: زيزو المعماري", encoding="utf-8")
+    monkeypatch.setattr(memory.Config, "MEMORY_FILE", str(custom_memory))
+    monkeypatch.setattr(Config, "MEMORY_FILE", str(custom_memory))
+
+    mem_cfg = {"enabled": True}
+    ctx = memory.get_owner_context(mem_cfg, force=True)
+    assert ctx is not None
+    assert "المالك: زيزو المعماري" in ctx
+

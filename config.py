@@ -171,6 +171,7 @@ class Config:
     SETTINGS_FILE = os.path.join(DATA_DIR, "settings.json")           # delivery_mode / role / header_target
     PIPELINE_FILE = os.environ.get("PIPELINE_FILE", "").strip() or os.path.join(DATA_DIR, "pipeline.json")           # المرحلة 2: خط التنظيم متعدد المحركات (بلا أسرار خام — مفاتيح البيئة بصيغة ${VAR})
     MEMORY_DIR = os.path.join(DATA_DIR, "memory")                     # المرحلة 2: MEMORY.md + daily/ + context/ + review/
+    MEMORY_FILE = os.environ.get("MEMORY_FILE", "").strip() or os.path.join(MEMORY_DIR, "MEMORY.md")                   # المرحلة 2: مسار ثوابت المالك (افتراضي أو مخصص عبر البيئة)
     DRAFTS_DIR = os.path.join(DATA_DIR, "drafts")                     # المرحلة 2: مسودات المراحل الوسيطة YYYY-MM-DD/<entry_id>.md
     DRAFTS_KEEP_DAYS = int(os.environ.get("DRAFTS_KEEP_DAYS", "30"))
     # البانر (06 §4): يُنسخ مع النص ليفهم الوكيل أنه تفريغ آلي

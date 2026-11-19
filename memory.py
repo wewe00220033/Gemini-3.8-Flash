@@ -52,7 +52,7 @@ def get_owner_context(memory_cfg: Optional[dict] = None, force: bool = False) ->
         return None
 
     mem_dir = getattr(Config, "MEMORY_DIR", os.path.join(Config.DATA_DIR, "memory"))
-    path = os.path.join(mem_dir, "MEMORY.md")
+    path = getattr(Config, "MEMORY_FILE", "") or os.path.join(mem_dir, "MEMORY.md")
 
     with _lock:
         now_mono = time.monotonic()
@@ -186,11 +186,44 @@ def append_daily(entry_id: str, topic: str, golden_preview: str, timestamp: Opti
             logger.warning("فشل الكتابة في daily/%s.md: %s", date_str, e)
 
 
+def append_guard_warning(word: str, timestamp: Optional[float] = None, memory_cfg: Optional[dict] = None):
+    """
+    يسجل تنبيهاً حتمياً للألفاظ المستحدثة في فهرس daily/YYYY-MM-DD.md (T8-fix — DEC-P2-03):
+    ⚠️ · guard · <word>
+    """
+    cfg = memory_cfg or {}
+    if not cfg.get("enabled", False):
+        return
+
+    w_clean = str(word or "").strip()
+    if not w_clean:
+        return
+
+    mem_dir = getattr(Config, "MEMORY_DIR", os.path.join(Config.DATA_DIR, "memory"))
+    daily_dir = os.path.join(mem_dir, "daily")
+    try:
+        os.makedirs(daily_dir, exist_ok=True)
+    except OSError:
+        pass
+
+    now = datetime.datetime.fromtimestamp(timestamp) if timestamp else datetime.datetime.now()
+    date_str = now.strftime("%Y-%m-%d")
+    daily_file = os.path.join(daily_dir, f"{date_str}.md")
+    line = f"⚠️ · guard · {w_clean}\n"
+
+    with _lock:
+        try:
+            with open(daily_file, "a", encoding="utf-8") as f:
+                f.write(line)
+        except OSError as e:
+            logger.warning("فشل تسجيل تحذير الحارس في daily/%s.md: %s", date_str, e)
+
+
 def update_topic_context(topic: str, golden_text: str, memory_cfg: Optional[dict] = None):
     """
-    يحدّث السياق المتحرك context/<topic>.md (Rolling FIFO — T8):
+    يحدّث السياق المتحرك context/<topic>.md (Rolling FIFO — T8/T8-fix):
     - يقتطع ملخصاً بطول (context_max_chars // context_per_topic_n).
-    - يحتفظ بآخر n مقتطفات، ويكتبها بتنسيق نظيف.
+    - يحتفظ بآخر n مقتطفات، ويسقط سطوراً كاملة من البداية عند تجاوز السقف دون بتر الكلمات.
     """
     cfg = memory_cfg or {}
     if not cfg.get("enabled", False):
@@ -227,9 +260,17 @@ def update_topic_context(topic: str, golden_text: str, memory_cfg: Optional[dict
 
         existing.append(f"- {snippet}")
         kept = existing[-n:]
+
+        # إسقاط سطور كاملة من البداية حتى لا تتجاوز الحروف السقف المحدد (T8-fix ثغرة 3)
+        while kept and sum(len(x) + 1 for x in kept) > max_chars:
+            if len(kept) == 1:
+                # لو كان السطر الوحيد المتبقي أطول من السقف، يُقَص عند أقرب كلمة
+                first_clipped = kept[0][:max_chars]
+                kept[0] = first_clipped.rsplit(" ", 1)[0] if " " in first_clipped else first_clipped
+                break
+            kept.pop(0)
+
         content = "\n".join(kept)
-        if len(content) > max_chars:
-            content = content[-max_chars:].strip()
 
         try:
             with open(ctx_file, "w", encoding="utf-8") as f:
@@ -245,12 +286,13 @@ def maybe_write_weekly_review(
     now: Optional[datetime.datetime] = None,
 ) -> Optional[str]:
     """
-    يولّد تقرير المراجعة الأسبوعي review/YYYY-WW.md للأسبوع السابق (T8).
-    - يعمل سلبياً مرة واحدة عند أول فويس في أسبوع جديد.
+    يولّد تقرير المراجعة الأسبوعي review/YYYY-WW.md للأسبوع السابق فقط (T8/T8-fix).
+    - يعمل سلبياً مرة واحدة عند أول فويس في أسبوع جديد (إذا غاب فويس لأسبوعين يلخص الأسبوع المباشر السابق).
+    - يفلتر ملفات daily الصادرة في الأسبوع المنصرم فقط لمنع تضخم الإحصائيات التراكمية.
     - المصادر (حتمية بلا LLM):
-      1. إحصائيات #topic من سجلات daily الأسبوع المنصرم.
-      2. مدخلات القاموس المعلقة (status == 'pending').
-      3. الألفاظ التي نبّه عليها الحارس الحتمي.
+      1. إحصائيات #topic من سجلات daily الخاصة بالأسبوع المنصرم حصراً.
+      2. تكرارات تنبيهات الحارس الحتمي المسجلة في daily على مدار الأسبوع.
+      3. مدخلات القاموس المعلقة (status == 'pending').
     """
     cfg = memory_cfg or {}
     if not cfg.get("enabled", False):
@@ -273,22 +315,39 @@ def maybe_write_weekly_review(
         if os.path.exists(rev_path):
             return None  # تم إنشاؤه مسبقاً لهذا الأسبوع
 
-        # 1. إحصائيات المواضيع من ملفات daily
+        # 1. إحصائيات المواضيع وتنبيهات الحارس من ملفات daily الخاصة بالأسبوع السابق فقط (T8-fix ثغرة 1 و 2)
         topic_counts: Dict[str, int] = {}
+        guard_counts: Dict[str, int] = {}
         daily_dir = os.path.join(mem_dir, "daily")
         if os.path.exists(daily_dir):
             try:
-                for fname in os.listdir(daily_dir):
-                    if fname.endswith(".md"):
-                        fpath = os.path.join(daily_dir, fname)
-                        with open(fpath, "r", encoding="utf-8", errors="ignore") as f:
-                            for ln in f:
-                                parts = ln.split("·")
-                                if len(parts) >= 2:
-                                    t_part = parts[1].strip()
-                                    if t_part.startswith("#"):
-                                        t_name = t_part[1:].strip()
-                                        topic_counts[t_name] = topic_counts.get(t_name, 0) + 1
+                for fname in sorted(os.listdir(daily_dir)):
+                    m = re.match(r"^(\d{4}-\d{2}-\d{2})\.md$", fname)
+                    if not m:
+                        continue
+                    try:
+                        f_date = datetime.date.fromisoformat(m.group(1))
+                        if f_date.strftime("%Y-W%W") != prev_week_str:
+                            continue
+                    except ValueError:
+                        continue
+
+                    fpath = os.path.join(daily_dir, fname)
+                    with open(fpath, "r", encoding="utf-8", errors="ignore") as f:
+                        for ln in f:
+                            ln_strip = ln.strip()
+                            if ln_strip.startswith("⚠️ · guard ·"):
+                                g_word = ln_strip.split("·")[-1].strip()
+                                if g_word:
+                                    guard_counts[g_word] = guard_counts.get(g_word, 0) + 1
+                                continue
+
+                            parts = ln.split("·")
+                            if len(parts) >= 2:
+                                t_part = parts[1].strip()
+                                if t_part.startswith("#"):
+                                    t_name = t_part[1:].strip()
+                                    topic_counts[t_name] = topic_counts.get(t_name, 0) + 1
             except Exception as e_scan:
                 logger.warning("خطأ في فحص مجلد daily للتقرير الأسبوعي: %s", e_scan)
 
@@ -312,7 +371,7 @@ def maybe_write_weekly_review(
             for top, cnt in sorted(topic_counts.items(), key=lambda x: -x[1]):
                 lines.append(f"- `#{top}`: {cnt} تسجيل")
         else:
-            lines.append("- لا توجد تسجيلات مرصودة.")
+            lines.append("- لا توجد تسجيلات مرصودة للأسبوع المنصرم.")
 
         lines.extend([
             "",
@@ -331,7 +390,10 @@ def maybe_write_weekly_review(
             "",
             "## ⚠️ تنبيهات الحارس الحتمي للألفاظ المستحدثة:",
         ])
-        if guard_warnings:
+        if guard_counts:
+            for w, cnt in sorted(guard_counts.items(), key=lambda x: -x[1]):
+                lines.append(f"- `{w}`: {cnt} مرات")
+        elif guard_warnings:
             for w in sorted(set(guard_warnings)):
                 lines.append(f"- `{w}`")
         else:
