@@ -127,10 +127,10 @@ class Config:
     #   read_timeout = min(MAX, BASE + PER_MB × حجم_الملف_بالميجا)
     #   مثال: 770KB → ~21 ث ؛ 5MB → ~55 ث ؛ 20MB → 90 ث (السقف)
     # ------------------------------------------------------------------
-    GEMINI_CONNECT_TIMEOUT = 10          # فتح الاتصال — لو فشل = مشكلة شبكة من السيرفر
-    GEMINI_READ_TIMEOUT_BASE = 15
-    GEMINI_READ_TIMEOUT_PER_MB = 8
-    GEMINI_READ_TIMEOUT_MAX = 90         # (توافق) = سقف الملفات الصغيرة
+    GEMINI_CONNECT_TIMEOUT = int(os.environ.get("GEMINI_CONNECT_TIMEOUT", "10"))          # فتح الاتصال — لو فشل = مشكلة شبكة من السيرفر
+    GEMINI_READ_TIMEOUT_BASE = int(os.environ.get("GEMINI_READ_TIMEOUT_BASE", "30"))
+    GEMINI_READ_TIMEOUT_PER_MB = int(os.environ.get("GEMINI_READ_TIMEOUT_PER_MB", "8"))
+    GEMINI_READ_TIMEOUT_MAX = int(os.environ.get("GEMINI_READ_TIMEOUT_MAX", "90"))         # (توافق) = سقف الملفات الصغيرة
     # سقفان حسب الحجم (04 §2.5b): صغير ≤ 8MB → 90ث (اكتشاف تعليق سريع)؛ كبير > 8MB → 180ث (15MB يحتاج 135ث فعلاً)
     GEMINI_READ_TIMEOUT_MAX_SMALL = int(os.environ.get("GEMINI_READ_TIMEOUT_MAX_SMALL", "90"))
     GEMINI_READ_TIMEOUT_MAX_LARGE = int(os.environ.get("GEMINI_READ_TIMEOUT_MAX_LARGE", "180"))

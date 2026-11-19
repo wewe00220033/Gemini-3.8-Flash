@@ -1113,6 +1113,8 @@ def _deliver_synthesizer(raw, polished, role_id, gl, l2, session_name, sender, a
         speakers_cfg = cfg.get("speakers") or {}
         speakers_enabled = bool(speakers_cfg.get("enabled", False))
         spk_tag_regex = str(speakers_cfg.get("tag_regex") or r"^🗣️(\d+):")
+        guards_cfg = cfg.get("guards") or {}
+        dedupe_threshold = float(guards_cfg.get("dedupe_ratio", 0.98) or 0.98)
 
         max_parallel = int(display.get("max_parallel", 4))
         live_cap = int(display.get("live_cap_utf16", 3400))
@@ -1164,10 +1166,13 @@ def _deliver_synthesizer(raw, polished, role_id, gl, l2, session_name, sender, a
             st_calls_to_run = []
             st_injected_calls = []
 
-            # 1. فحص إمكانية حقن المسودة المسبقة في المرحلة الأولى لتفادي إعادة النداء
+            # 1. فحص إمكانية حقن المسودة المسبقة في المرحلة الأولى لتفادي إعادة النداء (لمرة واحدة فقط)
+            precomputed_injected = False
             for c in stage.get("calls") or []:
-                if (stage_idx == 0 and c.get("provider") == precomputed_prov and
+                if (stage_idx == 0 and not precomputed_injected and
+                        c.get("provider") == precomputed_prov and
                         polished and not c.get("only_if_previous_failed")):
+                    precomputed_injected = True
                     inj_lbl = c.get("label") or precomp_lbl
                     injected_res = pipeline_runner.CallResult(
                         call_id=str(c.get("id") or f"{c.get('provider')}_{c.get('repeat_index', 1)}"),
@@ -1328,6 +1333,13 @@ def _deliver_synthesizer(raw, polished, role_id, gl, l2, session_name, sender, a
                         out_text = clean_out
                         if gl:
                             out_text, _ = gl.apply(out_text, target="polished")
+
+                        # فحص صمام منع تكرار المسودات (dedupe_ratio) لاستبعاد المسودات المتطابقة من العرض والمراحل اللاحقة (T9-fix2)
+                        existing_stage_texts = [vc.text for vc in valid_stage_calls if vc.text]
+                        if dedupe_threshold > 0 and guards.is_duplicate_draft(out_text, existing_stage_texts, threshold=dedupe_threshold):
+                            logger.warning("ℹ️ dedupe_guard: استبعاد مسودة مكررة [%s] (تشابه >= %.2f)", c_lbl, dedupe_threshold)
+                            continue
+
                         call = pipeline_runner.CallResult(
                             call_id=call.call_id,
                             provider=call.provider,
@@ -1929,6 +1941,13 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
     mode = settings.delivery_mode()
     role_id = settings.effective_role()
     raw, gl = prepare_texts(raw_text, glossary)
+    try:
+        import pipeline_config
+        _p_cfg = pipeline_config.get()
+        _spk_cfg = (_p_cfg.get("speakers") or {}) if isinstance(_p_cfg, dict) else {}
+        speakers_enabled = bool(_spk_cfg.get("enabled", False))
+    except Exception:
+        speakers_enabled = False
     if session_name is None:
         session_name = _safe_session_name()
     session_id = _safe_session_id() if session_name else None
@@ -2031,10 +2050,12 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
         t0_flow = time.monotonic()
         t0_gemini = t0_flow
         try:
+            kwargs = {}
             if l2 and _accepts_context_summary(polish_fn):
-                polished, reason = polish_fn(raw, role_id, gl, context_summary=l2)
-            else:
-                polished, reason = polish_fn(raw, role_id, gl)
+                kwargs["context_summary"] = l2
+            if _accepts_speakers_enabled(polish_fn):
+                kwargs["speakers_enabled"] = speakers_enabled
+            polished, reason = polish_fn(raw, role_id, gl, **kwargs)
         except Exception as e:  # pragma: no cover - دفاع: التنظيم لا يكسر الخام أبداً
             polished, reason = None, f"{type(e).__name__}: {e}"
         gemini_elapsed = time.monotonic() - t0_gemini
@@ -2169,6 +2190,16 @@ def _accepts_context_summary(fn):
         import inspect
         params = inspect.signature(fn).parameters
         return "context_summary" in params or any(p.kind == p.VAR_KEYWORD for p in params.values())
+    except (TypeError, ValueError):
+        return False
+
+
+def _accepts_speakers_enabled(fn):
+    """هل تقبل دالة التنظيم وسيط speakers_enabled؟ (T9-fix2 — DEC-P2-01)."""
+    try:
+        import inspect
+        params = inspect.signature(fn).parameters
+        return "speakers_enabled" in params or any(p.kind == p.VAR_KEYWORD for p in params.values())
     except (TypeError, ValueError):
         return False
 

@@ -9,6 +9,8 @@ test_speakers_t9.py — اختبارات فصل المتكلمين وحوكمة 
 """
 
 import json
+import threading
+import time
 
 from config import Config
 import prompts
@@ -148,4 +150,261 @@ def test_prepare_texts_strips_single_speaker_before_glossary_and_archive(tmp_pat
     # تجريد تام للوسم من الخام
     assert "🗣️1:" not in raw_out
     assert "هذا تسجيل مونولوج لشخص واحد فقط." in raw_out
+
+
+def test_gemini_read_timeout_base_env():
+    """التحقق من أن مهلة GEMINI_READ_TIMEOUT_BASE تساوي 30 افتراضياً وتقبل الضبط من البيئة (T9-fix2)."""
+    import subprocess
+    import sys
+    assert Config.GEMINI_READ_TIMEOUT_BASE == 30
+
+    cmd = (
+        "import os; os.environ['GEMINI_READ_TIMEOUT_BASE'] = '45'; "
+        "from config import Config; "
+        "assert Config.GEMINI_READ_TIMEOUT_BASE == 45"
+    )
+    res = subprocess.run([sys.executable, "-c", cmd], capture_output=True, text=True)
+    assert res.returncode == 0, f"Subprocess failed: {res.stderr}"
+
+
+def test_forbid_new_speaker_tags_catches_legacy_tags():
+    """التحقق من أن forbid_new_speaker_tags يرصد الوسوم التقليدية المستحدثة مثل المتكلم 1: (T9-fix2)."""
+    raw = "مرحباً يا فندم، التسجيل الصوتي بدون أي وسوم."
+    # حالة إضافة المتكلم 1: في الذهبية دون وجوده في الخام
+    golden_with_legacy = "المتكلم 1: مرحباً يا فندم، التسجيل الصوتي بدون أي وسوم."
+    warns = guards.forbid_new_speaker_tags(golden_with_legacy, raw)
+    assert len(warns) == 1
+    assert "المتكلم 1:" in warns[0]
+
+    # حالة إضافة Speaker 2:
+    golden_speaker = "Speaker 2: مرحبا."
+    warns_spk = guards.forbid_new_speaker_tags(golden_speaker, raw)
+    assert any("Speaker 2:" in w for w in warns_spk)
+
+    # حالة وجود الوسم أصلاً في الخام -> لا تحذير
+    raw_with_legacy = "المتكلم 1: مرحباً يا فندم."
+    assert guards.forbid_new_speaker_tags(golden_with_legacy, raw_with_legacy) == []
+
+
+def test_strip_single_speaker_legacy_tags():
+    """التحقق من تجريد الوسوم التقليدية إذا كانت لمتحدث واحد فقط (T9-fix2)."""
+    mono_legacy = "المتكلم 1: السلام عليكم.\nالمتكلم 1: هذا نص تجريبي."
+    stripped = guards.strip_single_speaker(mono_legacy)
+    assert "المتكلم 1:" not in stripped
+    assert "السلام عليكم." in stripped
+
+    # حوار بمتحدثين تقليديين -> لا تجريد
+    dial_legacy = "المتكلم 1: أهلاً.\nالمتكلم 2: مرحباً بك."
+    assert guards.strip_single_speaker(dial_legacy) == dial_legacy
+
+
+def test_text_similarity_and_is_duplicate_draft():
+    """التحقق من صمام منع تكرار المسودات text_similarity_ratio و is_duplicate_draft (T9-fix2)."""
+    t1 = "هذا نص تجريبي لتنظيم الصوت بدقة عالية."
+    t2 = "هذا نص تجريبي لتنظيم الصوت بدقة عالية."
+    t3 = "هذا نص تجريبي لتنظيم الصوت بدقة فائقة جداً ومختلف تماماً."
+
+    assert guards.text_similarity_ratio(t1, t2) == 1.0
+    assert guards.text_similarity_ratio("", "") == 0.0
+    assert guards.is_duplicate_draft(t1, [t2], threshold=0.98) is True
+    assert guards.is_duplicate_draft(t3, [t1], threshold=0.98) is False
+    assert guards.is_duplicate_draft(t1, [], threshold=0.98) is False
+
+
+def test_pipeline_example_json_proposers_explicit_calls():
+    """التحقق من أن قالب pipeline.example.json يحتوي على نداءين بحرارتين مختلفتين بدل repeat: 2 (T9-fix2)."""
+    import os
+    ex_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "pipeline.example.json")
+    with open(ex_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    proposers = next(s for s in data["stages"] if s["name"] == "proposers")
+    calls = proposers["calls"]
+    assert len(calls) == 3
+    assert calls[0]["provider"] == "flash_lite"
+    assert calls[0]["temperature"] == 0.2
+    assert calls[0]["label"] == "فلاش دقيق"
+    assert calls[1]["provider"] == "flash_lite"
+    assert calls[1]["temperature"] == 0.7
+    assert calls[1]["label"] == "فلاش موسّع"
+    assert calls[2]["provider"] == "shelby"
+    assert "repeat" not in calls[0]
+
+
+def test_text_assist_polish_respects_speakers_config(monkeypatch):
+    """التحقق من أن text_assist.polish يستقبل speakers_enabled ويمرره لبرومبت التنظيم (T9-fix2)."""
+    import importlib
+    import text_assist
+    real_polish = importlib.reload(text_assist).polish
+    monkeypatch.setattr(text_assist, "polish", real_polish)
+
+    captured_args = {}
+    orig_compose = prompts.compose_prompt
+
+    def mock_compose(*args, **kwargs):
+        captured_args["speakers_enabled"] = kwargs.get("speakers_enabled")
+        return orig_compose(*args, **kwargs)
+
+    monkeypatch.setattr(prompts, "compose_prompt", mock_compose)
+    monkeypatch.setattr(text_assist.prompts, "compose_prompt", mock_compose)
+
+    # محاكاة رد سريع من المزود المحلي
+    monkeypatch.setattr(text_assist, "_call_local_provider", lambda s, u: ("نص منظم ممتاز جداً", None))
+    monkeypatch.setattr(Config, "LOCAL_POLISH_CMD", "dummy_command")
+    monkeypatch.setattr(text_assist.Config, "LOCAL_POLISH_CMD", "dummy_command")
+
+    # تمرير صريح بـ True
+    text_assist.polish("نص خام طويل للتجربة والتأكد من نجاح الاستدعاء.", speakers_enabled=True)
+    assert captured_args.get("speakers_enabled") is True
+
+    # تمرير صريح بـ False
+    text_assist.polish("نص خام آخر للتجربة والتأكد من نجاح الاستدعاء.", speakers_enabled=False)
+    assert captured_args.get("speakers_enabled") is False
+
+
+def test_deliver_passes_speakers_enabled_to_polish_fn(tmp_path, monkeypatch):
+    """التحقق من أن delivery.deliver يقرأ speakers_enabled من pipeline_config ويمرره لدالة التنظيم (T9-fix2)."""
+    p_file = tmp_path / "custom_pipeline.json"
+    doc = {
+        "version": 1,
+        "speakers": {"enabled": True, "tag_regex": "^🗣️(\\d+):", "strip_if_single": True}
+    }
+    p_file.write_text(json.dumps(doc), encoding="utf-8")
+    monkeypatch.setattr(pipeline_config.Config, "PIPELINE_FILE", str(p_file))
+    monkeypatch.setattr(Config, "PIPELINE_FILE", str(p_file))
+    pipeline_config.reset_cache()
+
+    captured = {}
+
+    def mock_polish(raw, role_id=None, glossary=None, **kwargs):
+        captured["speakers_enabled"] = kwargs.get("speakers_enabled")
+        return "نص منظم تجريبي", None
+
+    class DummySender:
+        def __init__(self):
+            self._mid = 1
+        def send_text(self, text, *a, **k):
+            self._mid += 1
+            return {"message_id": self._mid}
+        def send_action(self, *a, **k):
+            pass
+
+    sender = DummySender()
+    delivery.deliver(
+        raw_text="نص خام للتجربة",
+        model="gemini-3.6-flash",
+        key_name="test_key",
+        info={"elapsed": 1.0},
+        sender=sender,
+        polish_fn=mock_polish,
+        archive_entry=False,
+    )
+    assert captured.get("speakers_enabled") is True
+
+
+def test_delivery_dedupe_guard_filters_duplicate_draft(monkeypatch, tmp_path):
+    """التحقق من أن delivery._bg_run_pipeline يستبعد المسودات المتطابقة عبر dedupe_ratio (T9-fix2)."""
+    import pipeline_runner
+    from pipeline_runner import CallResult, StageResult
+
+    pipe_file = tmp_path / "pipeline.json"
+    pipe_file.write_text('{"version": 1}', encoding="utf-8")
+    monkeypatch.setattr(Config, "PIPELINE_FILE", str(pipe_file))
+    monkeypatch.setattr(pipeline_config.Config, "PIPELINE_FILE", str(pipe_file))
+    pipeline_config.reset_cache()
+
+    custom_cfg = {
+        "display": {"max_parallel": 2, "live_cap_utf16": 3400, "style": "single_live"},
+        "providers": {"prov_a": {}, "prov_b": {}},
+        "stages": [
+            {
+                "name": "proposers",
+                "enabled": True,
+                "calls": [
+                    {"provider": "prov_a", "label": "فلاش 1"},
+                    {"provider": "prov_a", "label": "فلاش 2"},
+                ],
+            },
+            {
+                "name": "final",
+                "enabled": True,
+                "prompt": "synthesis",
+                "inputs": ["raw", "proposers"],
+                "calls": [{"provider": "prov_b", "label": "شلبي"}],
+            },
+        ],
+        "guards": {"dedupe_ratio": 0.98, "forbid_new_speaker_tags": True},
+        "speakers": {"enabled": False},
+    }
+    monkeypatch.setattr(pipeline_config, "get", lambda: custom_cfg)
+
+    inputs_seen_in_final = []
+
+    def mock_run_stage(stage_name, stage_config, inputs, **kwargs):
+        if stage_name == "proposers":
+            # إرجاع مسودتين متطابقتين بالحرف
+            return StageResult(
+                stage_name=stage_name,
+                status="ok",
+                calls=[
+                    CallResult(call_id="c1", provider="prov_a", model="m", status="ok", text="نص منظم مطابق تماماً", label="فلاش 1", elapsed_s=1.0),
+                    CallResult(call_id="c2", provider="prov_a", model="m", status="ok", text="نص منظم مطابق تماماً", label="فلاش 2", elapsed_s=1.0),
+                ],
+                final_output="نص منظم مطابق تماماً",
+            )
+        elif stage_name == "final":
+            inputs_seen_in_final.extend(inputs.get("drafts") or [])
+            return StageResult(
+                stage_name=stage_name,
+                status="ok",
+                calls=[
+                    CallResult(call_id="c3", provider="prov_b", model="m", status="ok", text="النسخة النهائية المسبوكة", label="شلبي", elapsed_s=1.5),
+                ],
+                final_output="النسخة النهائية المسبوكة",
+            )
+
+    monkeypatch.setattr(pipeline_runner, "run_stage", mock_run_stage)
+
+    class DummySender:
+        def __init__(self):
+            self.sent = []
+            self.edited = []
+            self.sent_messages = []
+            self._mid = 10
+        def send_text(self, text, reply_to_id=None, parse_mode=None, **kw):
+            self._mid += 1
+            return {"message_id": self._mid}
+        def edit_text(self, text, message_id, **kw):
+            self.edited.append((message_id, text))
+            return {"message_id": message_id}
+
+    sender = DummySender()
+    res_lock = threading.Lock()
+    result = {"title": "اختبار عام", "raw": "نص أصلي"}
+    finalized = []
+
+    th = delivery._deliver_synthesizer(
+        raw="نص أصلي",
+        polished="مسودة مسبقة",
+        role_id="general",
+        gl=None,
+        l2=None,
+        session_name="sess",
+        sender=sender,
+        anchor=1,
+        local_polish_fn=None,
+        t0_flow=time.monotonic(),
+        gemini_elapsed=0.5,
+        res_lock=res_lock,
+        result=result,
+        _bg_finalize=lambda app, arch, **kw: finalized.append(app),
+    )
+    th.join(timeout=3.0)
+
+    # التحقق الحتمي: المسودة الثانية المكررة تم استبعادها، ووصلت مسودة واحدة فقط لمرحلة final
+    labels_in_final = [lbl for lbl, txt in inputs_seen_in_final]
+    assert "فلاش 1" in labels_in_final
+    assert "فلاش 2" not in labels_in_final
+
+
 

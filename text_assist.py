@@ -455,13 +455,13 @@ def inject_system_context(system_prompt, context_summary=None, owner_context=Non
     return sys_text
 
 
-def polish_gemini(raw_text, role_id=None, glossary=None, context_summary=None, owner_context=None):
+def polish_gemini(raw_text, role_id=None, glossary=None, context_summary=None, owner_context=None, speakers_enabled=False):
     """تنظيم نصي مباشر عبر Gemini Flash-Lite (السحابي فقط) مع تطبيق القاموس."""
     assert_not_forbidden_assist_model()
     if is_effective_empty(raw_text):
         return None, "نص فارغ"
     role_id = role_id or Config.DEFAULT_ROLE
-    system_text = prompts.compose_prompt("polish", role_id)
+    system_text = prompts.compose_prompt("polish", role_id, speakers_enabled=bool(speakers_enabled))
     system_text = inject_system_context(system_text, context_summary=context_summary, owner_context=owner_context, mode="polish")
     text, reason = generate(system_text, prompts.wrap_transcript(raw_text))
     if text is None:
@@ -471,14 +471,14 @@ def polish_gemini(raw_text, role_id=None, glossary=None, context_summary=None, o
     return text.strip(), None
 
 
-def polish_local(raw_text, role_id=None, glossary=None, context_summary=None, owner_context=None):
+def polish_local(raw_text, role_id=None, glossary=None, context_summary=None, owner_context=None, speakers_enabled=False):
     """تنظيم نصي مباشر عبر المزود المحلي المستقل (LOCAL_POLISH_CMD) مع تطبيق القاموس."""
     if is_effective_empty(raw_text):
         return None, "نص فارغ"
     if not getattr(Config, "LOCAL_POLISH_CMD", ""):
         return None, "لا يوجد مزود محلي مهيأ"
     role_id = role_id or Config.DEFAULT_ROLE
-    system_text = prompts.compose_prompt("polish", role_id)
+    system_text = prompts.compose_prompt("polish", role_id, speakers_enabled=bool(speakers_enabled))
     system_text = inject_system_context(system_text, context_summary=context_summary, owner_context=owner_context, mode="polish")
     text, reason = _call_local_provider(system_text, prompts.wrap_transcript(raw_text))
     if text:
@@ -501,7 +501,7 @@ def polish_local(raw_text, role_id=None, glossary=None, context_summary=None, ow
     return None, reason
 
 
-def polish(raw_text, role_id=None, glossary=None, context_summary=None, owner_context=None):
+def polish(raw_text, role_id=None, glossary=None, context_summary=None, owner_context=None, speakers_enabled=False):
     """
     يحوّل الخام إلى منظم (طبقة B). يرجع (polished, None) أو (None, reason). لا يلمس الخام ولا الصوت.
     القاموس (scope polished) يُطبَّق على الناتج.
@@ -512,7 +512,7 @@ def polish(raw_text, role_id=None, glossary=None, context_summary=None, owner_co
     if is_effective_empty(raw_text):
         return None, "نص فارغ"
     role_id = role_id or Config.DEFAULT_ROLE
-    system_text = prompts.compose_prompt("polish", role_id)
+    system_text = prompts.compose_prompt("polish", role_id, speakers_enabled=bool(speakers_enabled))
     system_text = inject_system_context(system_text, context_summary=context_summary, owner_context=owner_context, mode="polish")
 
     text = None

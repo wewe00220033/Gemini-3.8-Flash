@@ -58,7 +58,8 @@
       "inputs": ["raw"],
       "min_success": 1,
       "calls": [
-        { "provider": "flash_lite", "label": "فلاش", "repeat": 2 },
+        { "provider": "flash_lite", "label": "فلاش دقيق", "temperature": 0.2 },
+        { "provider": "flash_lite", "label": "فلاش موسّع", "temperature": 0.7 },
         { "provider": "shelby",     "label": "شلبي" }
       ]
     },

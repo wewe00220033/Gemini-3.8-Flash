@@ -379,11 +379,11 @@ def test_blocked_response_falls_to_next_model_then_clear_message(engine, monkeyp
 
 # ---------- المهلة الديناميكية ----------
 @pytest.mark.parametrize("size_bytes,expected", [
-    (0, 15), (770 * 1024, 21), (5 * 1024 * 1024, 55),
-    (8 * 1024 * 1024, 79),                 # على الحد: صغير → 15+64=79 < 90
-    (9 * 1024 * 1024, 87),                 # > 8MB: كبير لكن المعادلة أقل من 180
-    (15 * 1024 * 1024, 135),               # 22 U3: كان يُقصّ إلى 90 → timeout زائف
-    (20 * 1024 * 1024, 175), (100 * 1024 * 1024, 180),   # سقف الكبير 180
+    (0, 30), (770 * 1024, 36), (5 * 1024 * 1024, 70),
+    (8 * 1024 * 1024, 90),                 # على الحد: صغير → min(90, 30+64) = 90
+    (9 * 1024 * 1024, 102),                # > 8MB: كبير لكن المعادلة أقل من 180 (30+72=102)
+    (15 * 1024 * 1024, 150),               # 22 U3: كبير (30+120=150)
+    (20 * 1024 * 1024, 180), (100 * 1024 * 1024, 180),   # سقف الكبير 180 (30+160=190 > 180)
 ])
 def test_dynamic_read_timeout(engine, size_bytes, expected):
     assert engine.dynamic_read_timeout(size_bytes) == expected
@@ -393,7 +393,7 @@ def test_request_uses_connect_and_dynamic_read_timeout(engine, monkeypatch):
     engine.key_manager.add_key(VALID_A, "A")
     calls = _install_post(monkeypatch, engine, lambda c: ok_text("ok"))
     engine.transcribe_audio_bytes(b"x" * (770 * 1024))
-    assert calls[0]["timeout"] == (engine.Config.GEMINI_CONNECT_TIMEOUT, 21)
+    assert calls[0]["timeout"] == (engine.Config.GEMINI_CONNECT_TIMEOUT, 36)
 
 
 # ---------- thinkingConfig: فقط للموديل المذكور ----------
@@ -432,10 +432,10 @@ def test_disabled_model_never_called(engine, monkeypatch):
 def test_dynamic_read_timeout_with_duration(engine):
     """ملف 6.5MB مدته ساعة (4126ث) ينبغي أن يُمنح سقف المهلة الطويلة (180ث) وليس 67ث فقط."""
     size_6_5mb = int(6.5 * 1024 * 1024)
-    # بدون مدة (سلوك قديم محفوظ 100%):
-    assert engine.dynamic_read_timeout(size_6_5mb) == 67
+    # بدون مدة (سلوك قديم محفوظ 100% — BASE 30 + 8*6.5 = 82):
+    assert engine.dynamic_read_timeout(size_6_5mb) == 82
     # مع مدة قصيرة (30ث): لا يؤثر على الحجم الصغير
-    assert engine.dynamic_read_timeout(size_6_5mb, duration_sec=30) == 67
+    assert engine.dynamic_read_timeout(size_6_5mb, duration_sec=30) == 82
     # مع مدة تتجاوز 30 دقيقة: يُمنح سقف الملفات الكبيرة
     assert engine.dynamic_read_timeout(size_6_5mb, duration_sec=1800) >= 180
     assert engine.dynamic_read_timeout(size_6_5mb, duration_sec=4126) >= 180
