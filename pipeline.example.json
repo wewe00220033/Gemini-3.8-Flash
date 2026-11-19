@@ -3,7 +3,7 @@
   "version": 1,
   "display": {
     "mode": "single_live",
-    "show_stages": ["final"],
+    "show_stages": ["proposers", "polishers", "final"],
     "show_md_button": false,
     "max_chunks_per_output": 0,
     "edit_interval_s": 1.5,
@@ -58,17 +58,19 @@
       "inputs": ["raw"],
       "min_success": 1,
       "calls": [
-        { "provider": "flash_lite", "label": "فلاش" },
+        { "provider": "flash_lite", "label": "فلاش", "repeat": 2 },
         { "provider": "shelby",     "label": "شلبي" }
       ]
     },
     {
       "name": "polishers",
-      "enabled": false,
+      "enabled": true,
       "prompt": "polish_multi",
       "inputs": ["raw", "proposers"],
       "min_success": 1,
-      "calls": []
+      "calls": [
+        { "provider": "shelby", "label": "تنقيح شلبي" }
+      ]
     },
     {
       "name": "final",

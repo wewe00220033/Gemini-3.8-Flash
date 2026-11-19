@@ -76,7 +76,8 @@ def test_real_pipeline_example_loads_and_strips_underscore_examples(fresh_env, m
     assert "_example_groq" not in cfg["providers"]
     assert "_example_ollama" not in cfg["providers"]
     assert cfg["providers"]["shelby"]["_unresolved"] == []
-    assert pipeline_config.pipeline_deadline_sec(cfg) == 420.0
+    # T6c (DEC-P2-08/09): تم تفعيل polishers بشلبي (180ث) فأصبح المجموع (180 + 180 + 220 + 20 هامش) = 600.0ث
+    assert pipeline_config.pipeline_deadline_sec(cfg) == 600.0
 
 
 def test_env_expansion_only_in_providers_and_unresolved_tracking(fresh_env, monkeypatch, caplog):

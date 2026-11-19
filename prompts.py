@@ -281,12 +281,12 @@ SYNTHESIZER_SYSTEM_PROMPT = (
 )
 
 
-def compose_synthesis_prompt(raw_text, gemini_draft=None, shelby_draft=None, role_id="general", roles=None, max_chars=None):
+def compose_synthesis_prompt(raw_text, gemini_draft=None, shelby_draft=None, role_id="general", roles=None, max_chars=None, drafts=None):
     """
     يركب برومبت السبك الثلاثي شاملاً الدستور التحريري الـ 12 قسماً بالكامل (_POLISH_COMMON)
     وتوجيهات الدور، مع تحديد سلطة الحكم الأعلى بوضوح.
-    يدعم العمل مع مسودتين، مسودة واحدة، أو بدون مسودات (السبك من الخام مباشرة).
-    يفرض سقف الحروف SYNTH_PROMPT_MAX_CHARS (28000) مع حماية أصل التفريغ ودستور النظام.
+    يدعم العمل مع قائمة مسودات drafts: list[(label, text)] (T6c — DEC-P2-08/09)
+    أو عبر مسودتي gemini_draft و shelby_draft للتوافق العكسي التام 100%.
     """
     roles = roles if roles is not None else all_roles()
     role = roles.get(role_id) or roles.get("general") or DEFAULT_ROLES["general"]
@@ -301,8 +301,48 @@ def compose_synthesis_prompt(raw_text, gemini_draft=None, shelby_draft=None, rol
     )
 
     max_chars = max_chars or getattr(Config, "SYNTH_PROMPT_MAX_CHARS", 28000)
-
     raw = str(raw_text or "").strip()
+    raw_header = "=== 🎙️ أصل التفريغ الصوتي الخام ===\n"
+    wrapped = wrap_transcript(raw)
+
+    # 1. المسار الديناميكي الجديد عند تمرير قائمة مسودات (T6c)
+    if drafts is not None:
+        valid_drafts = []
+        for item in drafts:
+            if isinstance(item, tuple) and len(item) >= 2 and item[1]:
+                valid_drafts.append((str(item[0]), str(item[1]).strip()))
+            elif isinstance(item, str) and item.strip():
+                valid_drafts.append((f"مسودة {len(valid_drafts)+1}", item.strip()))
+
+        n = len(valid_drafts)
+        if n >= 2:
+            tail = f"المطلوب: لديك {n} مسودات لنفس النص الخام. أنتج نسخة واحدة (النسخة الذهبية المسبوكة). ممنوع إضافة أي معلومة غير موجودة في الخام. عند التعارض بين المسودات، الخام هو الحَكَم الأعلى."
+        elif n == 1:
+            tail = "المطلوب: لديك مسودة مقترحة لنفس النص الخام. أنتج نسخة واحدة (النسخة الذهبية المسبوكة). ممنوع إضافة أي معلومة غير موجودة في الخام. عند التعارض بين المسودة والخام، الخام هو الحَكَم الأعلى."
+        else:
+            tail = "المطلوب: نظّم أصل التفريغ الصوتي الخام وفق القواعد التحريرية المرفقة لإنتاج النسخة المنظمة النهائية مباشرة."
+
+        fixed_overhead = len(sys_text) + len(raw_header) + len(wrapped) + len(tail) + 32
+        avail_for_drafts = max(0, max_chars - fixed_overhead)
+        trunc_marker = "\n[...تم اقتطاع باقي المسودة للسقف الحجمي...]"
+
+        draft_blocks = []
+        if n > 0 and avail_for_drafts > 0:
+            per_draft_budget = avail_for_drafts // n
+            for i, (lbl, txt) in enumerate(valid_drafts, 1):
+                header = f"=== 💡 اقتراح مسودة {i} ({lbl}) ===\n" if n > 1 else f"=== 💡 اقتراح مسودة ({lbl}) ===\n"
+                txt_budget = max(0, per_draft_budget - len(header))
+                if len(txt) > txt_budget and txt_budget > len(trunc_marker):
+                    txt = txt[:txt_budget - len(trunc_marker)].rstrip() + trunc_marker
+                draft_blocks.append(f"{header}{txt}")
+
+        parts = [f"{raw_header}{wrapped}"]
+        parts.extend(draft_blocks)
+        parts.append(tail)
+        user_content = "\n\n".join(parts)
+        return sys_text, user_content
+
+    # 2. المسار القديم الحرفي للتوافق التام 100% (إذا لم يُمرَّر drafts)
     g_draft = str(gemini_draft or "").strip() if gemini_draft else ""
     s_draft = str(shelby_draft or "").strip() if shelby_draft else ""
 
@@ -381,6 +421,66 @@ def compose_synthesis_prompt(raw_text, gemini_draft=None, shelby_draft=None, rol
         parts.append(f"{g_header}{g_draft}")
     if has_s and s_draft:
         parts.append(f"{s_header}{s_draft}")
+    parts.append(tail)
+
+    user_content = "\n\n".join(parts)
+    return sys_text, user_content
+
+
+def compose_polish_multi_prompt(raw_text, drafts, role_id="general", roles=None, max_chars=None):
+    """
+    يركب برومبت مرحلة polishers (المُجمّع/المُنقّح الوسيط — T6c DEC-P2-08/09):
+    يستفيد من مسودات المقترحين لتحسين الصياغة وإنتاج مسودة واحدة محسنة وموحدة.
+    """
+    roles = roles if roles is not None else all_roles()
+    role = roles.get(role_id) or roles.get("general") or DEFAULT_ROLES["general"]
+    role_name = role.get("name", role_id)
+    role_b = (role.get("layer_b") or DEFAULT_ROLES["general"]["layer_b"]).strip()
+
+    sys_text = (
+        f"{SYNTHESIZER_SYSTEM_PROMPT}\n\n"
+        f"المجال والدور التحريري: {role_name}\n"
+        f"{role_b}\n\n"
+        f"{_POLISH_COMMON}"
+    )
+
+    max_chars = max_chars or getattr(Config, "SYNTH_PROMPT_MAX_CHARS", 28000)
+    raw = str(raw_text or "").strip()
+    raw_header = "=== 🎙️ أصل التفريغ الصوتي الخام ===\n"
+    wrapped = wrap_transcript(raw)
+
+    valid_drafts = []
+    if drafts:
+        for item in drafts:
+            if isinstance(item, tuple) and len(item) >= 2 and item[1]:
+                valid_drafts.append((str(item[0]), str(item[1]).strip()))
+            elif isinstance(item, str) and item.strip():
+                valid_drafts.append((f"مسودة {len(valid_drafts)+1}", item.strip()))
+
+    n = len(valid_drafts)
+    if n > 1:
+        tail = f"المطلوب: لديك {n} مسودات لنفس النص الخام. حسّن النص بالاستفادة من المسودات، وأخرج مسودة واحدة محسّنة."
+    elif n == 1:
+        tail = "المطلوب: حسّن النص الخام بالاستفادة من المسودة المقترحة، وأخرج مسودة واحدة محسّنة."
+    else:
+        tail = "المطلوب: نظّم أصل التفريغ الصوتي الخام وفق القواعد التحريرية المرفقة لإنتاج مسودة منظمة."
+
+    fixed_overhead = len(sys_text) + len(raw_header) + len(wrapped) + len(tail) + 32
+    avail_for_drafts = max(0, max_chars - fixed_overhead)
+    trunc_marker = "\n[...تم اقتطاع باقي المسودة للسقف الحجمي...]"
+
+    draft_blocks = []
+    if n > 0 and avail_for_drafts > 0:
+        per_draft_budget = avail_for_drafts // n
+        for i, (lbl, txt) in enumerate(valid_drafts, 1):
+            header = f"=== 💡 مسودة مقترحة {i} ({lbl}) ===\n" if n > 1 else f"=== 💡 مسودة مقترحة ({lbl}) ===\n"
+            txt_budget = max(0, per_draft_budget - len(header))
+            if len(txt) > txt_budget and txt_budget > len(trunc_marker):
+                txt = txt[:txt_budget - len(trunc_marker)].rstrip() + trunc_marker
+            draft_blocks.append(f"{header}{txt}")
+
+    parts = [f"{raw_header}{wrapped}"]
+    parts.extend(draft_blocks)
     parts.append(tail)
 
     user_content = "\n\n".join(parts)

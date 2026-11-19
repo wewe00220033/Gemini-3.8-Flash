@@ -752,16 +752,41 @@ def synthesizer_final_message_html(golden_text, gemini_text=None, shelby_text=No
             blocks.append(f"<blockquote expandable>🦙 <b>[مسودة شلبي]:</b>\n{html.escape(shelby_text)}</blockquote>")
 
     if telemetry and isinstance(telemetry, dict):
-        t_gem = f"{telemetry.get('gemini', 0):.1f}ث"
-        t_shl = f"{telemetry.get('shelby', 0):.1f}ث"
-        t_syn = f"{telemetry.get('synth', 0):.1f}ث"
-        t_tot = f"{telemetry.get('total', 0):.1f}ث"
-        prov_label = ""
-        if provider == "shelby":
-            prov_label = " (🦙 شلبي)"
-        elif provider == "flash":
-            prov_label = " (⚡ فلاش)"
-        blocks.append(f"⚡ فلاش: {t_gem} | 🤖 شلبي: {t_shl} | 🏆 السبك: {t_syn}{prov_label} | ⏱️ إجمالي: {t_tot}")
+        stages_data = telemetry.get("stages")
+        if stages_data and isinstance(stages_data, dict):
+            stage_items = []
+            for st_name, calls_dict in stages_data.items():
+                if isinstance(calls_dict, dict):
+                    for lbl, sec in calls_dict.items():
+                        lbl_str = str(lbl).strip()
+                        if any(ord(c) >= 0x2600 for c in lbl_str):
+                            icon_lbl = lbl_str
+                        elif "فلاش" in lbl_str:
+                            icon_lbl = f"⚡ {lbl_str}"
+                        elif "شلبي" in lbl_str:
+                            icon_lbl = f"🦙 {lbl_str}"
+                        elif "سبك" in lbl_str:
+                            icon_lbl = f"🏆 {lbl_str}"
+                        else:
+                            icon_lbl = f"🤖 {lbl_str}"
+                        stage_items.append(f"{icon_lbl}: {sec:.1f}ث")
+            t_tot = f"{telemetry.get('total', 0):.1f}ث"
+            if stage_items:
+                blocks.append(f"{' | '.join(stage_items)} | ⏱️ إجمالي: {t_tot}")
+            else:
+                t_syn = f"{telemetry.get('synth', 0):.1f}ث"
+                blocks.append(f"🏆 السبك: {t_syn} | ⏱️ إجمالي: {t_tot}")
+        else:
+            t_gem = f"{telemetry.get('gemini', 0):.1f}ث"
+            t_shl = f"{telemetry.get('shelby', 0):.1f}ث"
+            t_syn = f"{telemetry.get('synth', 0):.1f}ث"
+            t_tot = f"{telemetry.get('total', 0):.1f}ث"
+            prov_label = ""
+            if provider == "shelby":
+                prov_label = " (🦙 شلبي)"
+            elif provider == "flash":
+                prov_label = " (⚡ فلاش)"
+            blocks.append(f"⚡ فلاش: {t_gem} | 🤖 شلبي: {t_shl} | 🏆 السبك: {t_syn}{prov_label} | ⏱️ إجمالي: {t_tot}")
 
     return "\n".join(blocks)
 
@@ -1051,82 +1076,162 @@ def _deliver_synthesizer(raw, polished, role_id, gl, l2, session_name, sender, a
         return full, polished
 
     def _bg_run_pipeline():
-        """مسار تشغيل الـ Pipeline عند وجود pipeline.json على القرص (T6b — DEC-P2-08/09)."""
+        """مسار تشغيل الـ Pipeline عند وجود pipeline.json على القرص (T6c — DEC-P2-08/09).
+        حلقة عامة تدور على كافة المراحل المفعلة (enabled_stages) دون أي أسماء ثابتة للمزودات أو المراحل."""
         import pipeline_config
         import pipeline_runner
         import text_assist
         import drafts
+        import guards
 
         cfg = pipeline_config.get()
         display = cfg.get("display") or {}
         providers = cfg.get("providers") or {}
         stages = cfg.get("stages") or []
-        stage_map = {s.get("name"): s for s in stages if s.get("enabled", True)}
+        enabled_stages = [s for s in stages if s.get("enabled", True)]
 
         max_parallel = int(display.get("max_parallel", 4))
         live_cap = int(display.get("live_cap_utf16", 3400))
         total_budget = pipeline_config.pipeline_deadline_sec(cfg)
         flow_deadline = t0_flow + total_budget
         min_exec = getattr(Config, "MIN_SHELBY_EXEC_SEC", 5.0)
+        display_style = str(display.get("mode") or display.get("style") or "single_live").strip()
+        show_stages_cfg = display.get("show_stages")
 
         all_drafts_to_save = []
+        precomp_lbl = str(result.get("polished_label") or "فلاش")
         if polished:
-            all_drafts_to_save.append(("فلاش", polished))
+            all_drafts_to_save.append((precomp_lbl, polished))
 
-        # 1. مرحلة المقترحين: proposers
-        prop_stage = stage_map.get("proposers")
-        proposer_calls_res = []
-        if prop_stage:
-            calls_to_run = []
-            for c in prop_stage.get("calls") or []:
-                if c.get("provider") == "flash_lite" and polished and not c.get("only_if_previous_failed"):
-                    proposer_calls_res.append(pipeline_runner.CallResult(
+        stage_outputs = {}          # stage_name -> list of CallResult
+        telemetry_stages = {}       # stage_name -> {label/provider: elapsed_s}
+        golden_call = None
+        golden_text = None
+
+        # آخر اسم مزود تم تنفيذه في polish المسبق للحقن الذكي في أول مرحلة (DEC-P2-08 تنبيه 2)
+        # fallback: "flash_lite" كآخر قيمة افتراضية موثقة متوافقة مع polish() القديمة
+        precomputed_prov = result.get("polished_provider") or "flash_lite"
+
+        for stage_idx, stage in enumerate(enabled_stages):
+            st_name = stage.get("name") or f"stage_{stage_idx}"
+            telemetry_stages[st_name] = {}
+            st_calls_to_run = []
+            st_injected_calls = []
+
+            # 1. فحص إمكانية حقن المسودة المسبقة في المرحلة الأولى لتفادي إعادة النداء
+            for c in stage.get("calls") or []:
+                if (stage_idx == 0 and c.get("provider") == precomputed_prov and
+                        polished and not c.get("only_if_previous_failed")):
+                    inj_lbl = c.get("label") or precomp_lbl
+                    injected_res = pipeline_runner.CallResult(
                         call_id=str(c.get("id") or f"{c.get('provider')}_{c.get('repeat_index', 1)}"),
-                        provider="flash_lite",
-                        model=str(c.get("model") or "gemini-3.5-flash-lite"),
+                        provider=c.get("provider"),
+                        model=str(c.get("model") or "precomputed"),
                         status="ok",
                         text=polished,
-                        label=c.get("label") or "فلاش",
+                        label=inj_lbl,
                         elapsed_s=gemini_elapsed,
-                    ))
+                    )
+                    st_injected_calls.append(injected_res)
+                    telemetry_stages[st_name][inj_lbl] = round(gemini_elapsed, 1)
                 else:
-                    calls_to_run.append(c)
+                    st_calls_to_run.append(c)
 
-            rem_p = max(1.0, flow_deadline - time.monotonic())
-            p_deadline = min(rem_p, pipeline_config.stage_deadline_sec("proposers", providers))
-            p_sys = prompts.compose_prompt("polish", role_id=role_id)
-            if l2:
-                p_sys += (
-                    "\n\nملخص الجلسة حتى الآن (للفهم فقط — لا تضفه ولا تعِد كتابته، نظم النص الجديد فقط):\n"
-                    + str(l2)[:Config.SESSION_SUMMARY_MAX_CHARS]
+            # تصفية النداءات الثقيلة (طابور GPU / CLI محلي) لو الوقت المتبقي أقل من حد التنفيذ
+            rem_time = max(1.0, flow_deadline - time.monotonic())
+            if rem_time < min_exec:
+                st_calls_to_run = [
+                    c for c in st_calls_to_run
+                    if not (providers.get(c.get("provider"), {}).get("queue") == "gpu" or
+                            providers.get(c.get("provider"), {}).get("type") == "local_cli")
+                ]
+
+            # تجهيز مدخلات المرحلة السابقة
+            collected_drafts = []
+            for prev_st in stage.get("inputs") or []:
+                if prev_st == "raw":
+                    continue
+                prev_calls = stage_outputs.get(prev_st) or []
+                for pc in prev_calls:
+                    if pc.status == "ok" and pc.text:
+                        collected_drafts.append((pc.label or pc.provider, pc.text))
+
+            # لو لم تُحدد inputs صراحة، نجمع من كافة المسودات السابقة الصالحة
+            if not collected_drafts and stage_idx > 0 and not stage.get("inputs"):
+                for s_calls in stage_outputs.values():
+                    for pc in s_calls:
+                        if pc.status == "ok" and pc.text:
+                            collected_drafts.append((pc.label or pc.provider, pc.text))
+
+            # تركيب البرومبت بحسب نوع المرحلة
+            p_type = stage.get("prompt") or ("synthesis" if stage_idx == len(enabled_stages) - 1 else "polish")
+            if p_type == "synthesis" or stage_idx == len(enabled_stages) - 1:
+                p_sys, p_usr = prompts.compose_synthesis_prompt(
+                    raw_text=raw,
+                    drafts=collected_drafts if collected_drafts else None,
+                    gemini_draft=polished if not collected_drafts else None,
+                    role_id=role_id,
                 )
-            prop_cfg_to_run = dict(prop_stage, calls=calls_to_run)
+                if l2:
+                    p_sys += (
+                        "\n\nملخص الجلسة حتى الآن (للفهم فقط — لا تضفه ولا تعِد كتابته، اسبك النص الجديد فقط):\n"
+                        + str(l2)[:Config.SESSION_SUMMARY_MAX_CHARS]
+                    )
+            elif p_type == "polish_multi" or (p_type == "polish" and collected_drafts):
+                p_sys, p_usr = prompts.compose_polish_multi_prompt(
+                    raw_text=raw,
+                    drafts=collected_drafts,
+                    role_id=role_id,
+                )
+                if l2:
+                    p_sys += (
+                        "\n\nملخص الجلسة حتى الآن (للفهم فقط — لا تضفه ولا تعِد كتابته):\n"
+                        + str(l2)[:Config.SESSION_SUMMARY_MAX_CHARS]
+                    )
+            else:
+                p_sys = prompts.compose_prompt("polish", role_id=role_id)
+                if l2:
+                    p_sys += (
+                        "\n\nملخص الجلسة حتى الآن (للفهم فقط — لا تضفه ولا تعِد كتابته، نظم النص الجديد فقط):\n"
+                        + str(l2)[:Config.SESSION_SUMMARY_MAX_CHARS]
+                    )
+                p_usr = raw
 
-            prop_stage_res = pipeline_runner.run_stage(
-                stage_name="proposers",
-                stage_config=prop_cfg_to_run,
-                inputs={"raw": raw},
+            st_deadline = min(rem_time, pipeline_config.stage_deadline_sec(st_name, providers))
+            st_cfg_to_run = dict(stage, calls=st_calls_to_run)
+
+            st_res = pipeline_runner.run_stage(
+                stage_name=st_name,
+                stage_config=st_cfg_to_run,
+                inputs={"raw": raw, "drafts": collected_drafts},
                 providers=providers,
-                deadline_s=p_deadline,
+                deadline_s=st_deadline,
                 system_prompt=p_sys,
-                user_prompt=raw,
+                user_prompt=p_usr,
                 cancel_event=_pipeline_cancel_event,
                 max_concurrent=max_parallel,
             )
-            proposer_calls_res.extend(prop_stage_res.calls)
 
-        # فحص نواتج المقترحين وحارس No-Op لشلبي
-        valid_proposers = []
-        for call in proposer_calls_res:
-            if call.status == "ok" and call.text:
-                if call.provider == "shelby":
+            current_stage_calls = list(st_injected_calls) + list(st_res.calls)
+            valid_stage_calls = []
+
+            for call in current_stage_calls:
+                c_lbl = call.label or call.provider
+                if call.status == "ok" and call.elapsed_s > 0:
+                    telemetry_stages[st_name][c_lbl] = round(call.elapsed_s, 1)
+
+                if call.status == "ok" and call.text:
+                    # فحص No-Op للمزودات
                     try:
                         is_noop = text_assist.is_shelby_noop(raw, call.text, role_id=role_id)
                     except TypeError:
                         is_noop = text_assist.is_shelby_noop(raw, call.text)
+                    except Exception:
+                        is_noop = False
+
                     if is_noop:
                         text_assist.note_shelby_noop()
-                        logger.warning("⚠️ Shelby proposer returned raw text unchanged (No-Op)")
+                        logger.warning("⚠️ المزود %s أعاد النص دون تنظيم فعلي (No-Op)", c_lbl)
                         call = pipeline_runner.CallResult(
                             call_id=call.call_id,
                             provider=call.provider,
@@ -1137,172 +1242,157 @@ def _deliver_synthesizer(raw, polished, role_id, gl, l2, session_name, sender, a
                             elapsed_s=call.elapsed_s,
                             error="No-Op (أعاد النص دون تنظيم فعلي)",
                         )
-                if call.status == "ok" and call.text:
-                    valid_proposers.append(call)
-                    all_drafts_to_save.append((call.label or call.provider, call.text))
+                    else:
+                        out_text = call.text.strip()
+                        if gl:
+                            out_text, _ = gl.apply(out_text, target="polished")
+                        call = pipeline_runner.CallResult(
+                            call_id=call.call_id,
+                            provider=call.provider,
+                            model=call.model,
+                            status="ok",
+                            text=out_text,
+                            label=call.label,
+                            elapsed_s=call.elapsed_s,
+                        )
+                        valid_stage_calls.append(call)
+                        all_drafts_to_save.append((c_lbl, out_text))
 
-        # تحديث العرض الحي بعد مرحلة المقترحين
-        if not use_short_above and valid_proposers:
-            live_blocks = [(c.label or c.provider, c.text) for c in valid_proposers]
-            interim_html = render_live_html(
-                blocks=live_blocks,
-                title=result.get("title"),
-                role_id=role_id,
-                session_name=session_name,
-                footer_status="⏳ <i>جاري توليد النسخة الذهبية المسبوكة...</i>",
-                live_cap=live_cap,
-                header_prefix="📝 النسخة المنظمة",
+            stage_outputs[st_name] = valid_stage_calls
+
+            # إرسال رسائل منفصلة صامتة لو وضع per_output مفعل
+            if display_style == "per_output":
+                for vc in valid_stage_calls:
+                    if vc.text and sender and hasattr(sender, "send_message"):
+                        try:
+                            sender.send_message(
+                                chat_id=anchor,
+                                text=f"📝 <b>[{html.escape(vc.label or vc.provider)}]:</b>\n{html.escape(vc.text)}",
+                                parse_mode="HTML",
+                                disable_notification=True,
+                            )
+                        except Exception as e_send:
+                            logger.warning("per_output send failed: %s", e_send)
+
+            # تحديث العرض الحي بعد انتهاء المرحلة إذا كانت ضمن show_stages
+            is_last_stage = (stage_idx == len(enabled_stages) - 1)
+            should_show_interim = (
+                not is_last_stage and
+                display_style != "per_output" and
+                not use_short_above and
+                (show_stages_cfg is None or st_name in show_stages_cfg)
             )
-            controller.update_interim(interim_html, force=False)
-        elif use_short_above:
-            controller.update_interim(
-                "⏳ <b>تم استلام المسودات المقترحة. جاري السبك الثلاثي...</b>",
-                force=False,
-            )
 
-        # 2. مرحلة السبك النهائي: final
-        final_stage = stage_map.get("final")
-        golden_text = None
-        synth_provider = "shelby"
-        synth_elapsed = 0.0
-
-        if final_stage and final_stage.get("enabled", True):
-            gemini_draft = next((c.text for c in valid_proposers if c.provider == "flash_lite"), polished)
-            shelby_draft = next((c.text for c in valid_proposers if c.provider == "shelby"), None)
-
-            sys_text, usr_content = prompts.compose_synthesis_prompt(
-                raw_text=raw,
-                gemini_draft=gemini_draft,
-                shelby_draft=shelby_draft,
-                role_id=role_id,
-            )
-            if l2:
-                sys_text += (
-                    "\n\nملخص الجلسة حتى الآن (للفهم فقط — لا تضفه ولا تعِد كتابته، اسبك النص الجديد فقط):\n"
-                    + str(l2)[:Config.SESSION_SUMMARY_MAX_CHARS]
+            if should_show_interim:
+                live_blocks = []
+                for s_show_name, s_show_calls in stage_outputs.items():
+                    if show_stages_cfg is None or s_show_name in show_stages_cfg:
+                        for sc in s_show_calls:
+                            if sc.text:
+                                live_blocks.append((sc.label or sc.provider, sc.text))
+                if live_blocks:
+                    interim_html = render_live_html(
+                        blocks=live_blocks,
+                        title=result.get("title"),
+                        role_id=role_id,
+                        session_name=session_name,
+                        footer_status="⏳ <i>جاري استكمال مراحل التنظيم والسبك...</i>",
+                        live_cap=live_cap,
+                        header_prefix="📝 النسخة المنظمة",
+                    )
+                    controller.update_interim(interim_html, force=False)
+            elif not is_last_stage and use_short_above:
+                controller.update_interim(
+                    f"⏳ <b>تم إنجاز مرحلة {html.escape(st_name)}. جاري المتابعة...</b>",
+                    force=False,
                 )
 
-            rem_f = max(1.0, flow_deadline - time.monotonic())
-            f_deadline = min(rem_f, pipeline_config.stage_deadline_sec("final", providers))
-
-            final_calls = list(final_stage.get("calls") or [])
-            if rem_f < min_exec:
-                final_calls = [c for c in final_calls if c.get("provider") != "shelby"]
-
-            final_cfg_to_run = dict(final_stage, calls=final_calls)
-            t0_synth = time.monotonic()
-            final_res = pipeline_runner.run_stage(
-                stage_name="final",
-                stage_config=final_cfg_to_run,
-                inputs={"raw": raw, "gemini_draft": gemini_draft, "shelby_draft": shelby_draft},
-                providers=providers,
-                deadline_s=f_deadline,
-                system_prompt=sys_text,
-                user_prompt=usr_content,
-                cancel_event=_pipeline_cancel_event,
-                max_concurrent=max_parallel,
-            )
-            synth_elapsed = time.monotonic() - t0_synth
-
-            with text_assist._lock:
-                text_assist._state["synth_calls"] = text_assist._state.get("synth_calls", 0) + 1
-
-            shelby_f = next((c for c in final_res.calls if c.provider == "shelby"), None)
-            flash_f = next((c for c in final_res.calls if c.provider in ("flash_lite", "flash")), None)
-
-            if shelby_f and shelby_f.status == "ok" and shelby_f.text:
-                try:
-                    is_noop = text_assist.is_shelby_noop(raw, shelby_f.text, role_id=role_id)
-                except TypeError:
-                    is_noop = text_assist.is_shelby_noop(raw, shelby_f.text)
-                if not is_noop:
-                    golden_text = shelby_f.text.strip()
-                    synth_provider = "shelby"
+            # إذا كانت هذه المرحلة الأخيرة، نحدد النسخة الذهبية
+            if is_last_stage:
+                for idx_c, vc in enumerate(valid_stage_calls):
+                    if vc.status == "ok" and vc.text:
+                        golden_call = vc
+                        golden_text = vc.text
+                        p_mapped = "flash" if vc.provider in ("flash_lite", "flash") else vc.provider
+                        with text_assist._lock:
+                            text_assist._state["synth_ok"] = text_assist._state.get("synth_ok", 0) + 1
+                            if idx_c > 0 or any(c.status == "failed" for c in current_stage_calls):
+                                text_assist._state["synth_fallback_calls"] = text_assist._state.get("synth_fallback_calls", 0) + 1
+                            text_assist._state["synth_last_provider"] = p_mapped
+                        break
+                if not golden_text:
                     with text_assist._lock:
-                        text_assist._state["synth_ok"] = text_assist._state.get("synth_ok", 0) + 1
-                        text_assist._state["synth_last_provider"] = "shelby"
-                else:
-                    text_assist.note_shelby_noop()
-                    logger.warning("⚠️ Shelby synthesis returned raw text unchanged (No-Op) — ارتداد لفلاش")
+                        text_assist._state["synth_fail"] = text_assist._state.get("synth_fail", 0) + 1
+                        text_assist._state["synth_last_error"] = str(st_res.error or "فشل السبك")
+                        text_assist._state["synth_last_provider"] = "none"
 
-            if not golden_text and flash_f and flash_f.status == "ok" and flash_f.text:
-                golden_text = flash_f.text.strip()
-                synth_provider = "flash"
-                with text_assist._lock:
-                    text_assist._state["synth_ok"] = text_assist._state.get("synth_ok", 0) + 1
-                    text_assist._state["synth_fallback_calls"] = text_assist._state.get("synth_fallback_calls", 0) + 1
-                    text_assist._state["synth_last_provider"] = "flash"
-
-            if not golden_text:
-                with text_assist._lock:
-                    text_assist._state["synth_fail"] = text_assist._state.get("synth_fail", 0) + 1
-                    text_assist._state["synth_last_error"] = str(final_res.error or "فشل السبك")
-                    text_assist._state["synth_last_provider"] = "none"
-
-        # تطبيق القاموس على النسخة الذهبية
-        if golden_text and gl:
-            golden_text, _ = gl.apply(golden_text, target="polished")
-
-        # التسليم والإغلاق
+        # فحص الحارس الحتمي للأرقام والكلمات اللاتينية (DEC-P2-08/09 تنبيه 1)
         if golden_text:
+            draft_texts = [txt for _, txt in all_drafts_to_save if txt]
+            subset_warns = guards.numbers_latin_subset_check(
+                golden_text=golden_text,
+                raw_text=raw,
+                drafts=draft_texts,
+                glossary=gl,
+            )
+            for w in subset_warns:
+                logger.warning('⚠️ guard: "%s" لم يرد في الخام أو المسودات', w)
+
+            # تطبيق القاموس النهائي للتأكيد
+            if gl:
+                golden_text, _ = gl.apply(golden_text, target="polished")
+
             all_drafts_to_save.append(("النسخة الذهبية", golden_text))
+            synth_prov = golden_call.provider if golden_call else "pipeline"
+            synth_el = golden_call.elapsed_s if golden_call else 0.0
             _bg_finalize(
                 golden_text,
                 f"[نسخة ذهبية مسبوكة]\n{golden_text}",
                 session_text=golden_text,
                 is_golden=True,
-                synth_elapsed=synth_elapsed,
+                synth_elapsed=synth_el,
             )
             wall_total = time.monotonic() - t0_flow
             telemetry = {
-                "gemini": gemini_elapsed,
-                "synth": synth_elapsed,
+                "stages": telemetry_stages,
+                "synth": synth_el,
                 "total": wall_total,
-                "synth_provider": synth_provider,
+                "synth_provider": synth_prov,
             }
-            gemini_text_arg = next((c.text for c in valid_proposers if c.provider == "flash_lite"), polished)
-            shelby_text_arg = next((c.text for c in valid_proposers if c.provider == "shelby"), None)
             sent_mids = controller.finalize(
                 golden_text,
                 is_golden=True,
                 telemetry=telemetry,
-                gemini_text=gemini_text_arg,
-                shelby_text=shelby_text_arg,
-                synth_provider=synth_provider,
+                synth_provider=synth_prov,
             )
             if sent_mids:
                 with res_lock:
                     result["polished_msg_id"] = sent_mids[0]
                     result["golden_mids"] = sent_mids
         else:
-            # مسار الإنقاذ بأفضل مسودة متوفرة
-            shelby_d = next((c.text for c in valid_proposers if c.provider == "shelby"), None)
-            gemini_d = next((c.text for c in valid_proposers if c.provider == "flash_lite"), polished)
-            fallback_txt = shelby_d or gemini_d or raw
+            # مسار الإنقاذ بأفضل مسودة متوفرة (fallback)
+            fallback_txt = None
+            for scs in reversed(list(stage_outputs.values())):
+                for sc in scs:
+                    if sc.status == "ok" and sc.text:
+                        fallback_txt = sc.text
+                        break
+                if fallback_txt:
+                    break
+            fallback_txt = fallback_txt or polished or raw
             _bg_finalize(fallback_txt, fallback_txt, session_text=fallback_txt, is_golden=False)
             controller.finalized = True
 
-            if shelby_d and gemini_d:
-                fallback_html = merged_compare_message_html(
-                    gemini_d, shelby_text=shelby_d, role_id=role_id, session_name=session_name
-                )
-                sent_mid = _replace_or_send(
-                    sender, mid, wait_anchor, fallback_html, f"{gemini_d}\n\n{shelby_d}",
-                    filename_prefix="fallback_compare",
-                    caption="📝 المقارنة المدمجة (بديل لفشل السبك)",
-                    head_html=_entry_head_html(result["title"], session_name),
-                )
-            else:
-                noop_html, noop_plain = _draft_fallback_view(
-                    "noop",
-                    "ℹ️ <i>تم اعتماد مسودة فلاش أعلاه (تعذر إكمال السبك)</i>",
-                )
-                sent_mid = _replace_or_send(
-                    sender, mid, wait_anchor, noop_html, noop_plain,
-                    filename_prefix="polished",
-                    caption="📝 النسخة المنظمة (اعتماد فلاش)",
-                    head_html=_entry_head_html(result["title"], session_name),
-                )
+            noop_html, noop_plain = _draft_fallback_view(
+                "noop",
+                "ℹ️ <i>تم اعتماد المسودة البديلة (تعذر إكمال السبك النهائي)</i>",
+            )
+            sent_mid = _replace_or_send(
+                sender, mid, wait_anchor, noop_html, noop_plain,
+                filename_prefix="polished",
+                caption="📝 النسخة المنظمة (اعتماد بديل)",
+                head_html=_entry_head_html(result["title"], session_name),
+            )
             if not use_short_above and sent_mid is not None:
                 with res_lock:
                     result["polished_msg_id"] = sent_mid
@@ -1834,6 +1924,7 @@ def deliver(raw_text, model, key_name, info, sender, reply_to_id=None, polish_fn
         except Exception as e:  # pragma: no cover - دفاع: التنظيم لا يكسر الخام أبداً
             polished, reason = None, f"{type(e).__name__}: {e}"
         gemini_elapsed = time.monotonic() - t0_gemini
+        result["polished_provider"] = "flash_lite"
         anchor = result["raw_msg_id"] or reply_to_id
         _dwrite_lock = threading.Lock()
         _dwrite_done = {"v": False}
