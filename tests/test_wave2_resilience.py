@@ -231,12 +231,22 @@ def test_b05_process_job_fast_and_slow_synthesizer_and_trace_consistency(monkeyp
     monkeypatch.setattr(text_assist, "polish_local", lambda r, ro, gl, **kw: ("مسودة شلبي مختلفة كلياً", None))
     monkeypatch.setattr(text_assist, "synthesize", lambda r, g, s, **kw: ("ذهبية سريعة", None))
 
+    orig_tracker = bot._make_delivery_tracker
+    def _fast_tracker(*a, **kw):
+        cb, fin = orig_tracker(*a, **kw)
+        def _fin_w(res):
+            delivery.wait_background_threads(timeout=2)
+            fin(res)
+        return cb, _fin_w
+    monkeypatch.setattr(bot, "_make_delivery_tracker", _fast_tracker)
+
     j_fast = vq.new_telegram_job("777", {"message_id": 10, "chat": {"id": 777},
                                          "voice": {"file_id": "FF1", "file_unique_id": "UF1"}},
                                  "FF1", "audio/ogg", "voice")
     j_fast.meta["token"] = "TOK"
     jobs.record(j_fast.job_id, "received", **j_fast.journal_fields())
     bot.process_job(j_fast)
+    monkeypatch.setattr(bot, "_make_delivery_tracker", orig_tracker)
     deadline = time.monotonic() + 3
     while delivery.active_background_threads() and time.monotonic() < deadline:
         time.sleep(0.02)

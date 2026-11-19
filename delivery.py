@@ -370,7 +370,6 @@ def _start_bg_thread(target):
     _track_bg_thread(t)
     try:
         t.start()
-        time.sleep(0.002)
     except Exception:
         _untrack_bg_thread(t)
         raise
@@ -1066,7 +1065,7 @@ def _deliver_synthesizer(raw, polished, role_id, gl, l2, session_name, sender, a
 
         max_parallel = int(display.get("max_parallel", 4))
         live_cap = int(display.get("live_cap_utf16", 3400))
-        total_budget = getattr(Config, "SYNTH_TOTAL_BUDGET_SEC", 420.0)
+        total_budget = pipeline_config.pipeline_deadline_sec(cfg)
         flow_deadline = t0_flow + total_budget
         min_exec = getattr(Config, "MIN_SHELBY_EXEC_SEC", 5.0)
 
@@ -1095,10 +1094,7 @@ def _deliver_synthesizer(raw, polished, role_id, gl, l2, session_name, sender, a
 
             rem_p = max(1.0, flow_deadline - time.monotonic())
             p_deadline = min(rem_p, pipeline_config.stage_deadline_sec("proposers", providers))
-            try:
-                p_sys = prompts.compose_prompt("B", role_id=role_id)
-            except Exception:
-                p_sys = ""
+            p_sys = prompts.compose_prompt("polish", role_id=role_id)
             if l2:
                 p_sys += (
                     "\n\nملخص الجلسة حتى الآن (للفهم فقط — لا تضفه ولا تعِد كتابته، نظم النص الجديد فقط):\n"

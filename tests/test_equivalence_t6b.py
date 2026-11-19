@@ -408,3 +408,88 @@ def test_pipeline_runner_graceful_shutdown(monkeypatch):
 
     # إعادة التصفير
     delivery.reset_pipeline_cancel()
+
+
+# =====================================================================
+# اختبار 6: قراءة PIPELINE_FILE من متغير البيئة (T6b-fix — DEC-P2-08)
+# =====================================================================
+
+def test_pipeline_file_env_var_support(monkeypatch, tmp_path):
+    """
+    التحقق من أن Config.PIPELINE_FILE يقرأ القيمة من os.environ عند ضبطها
+    (مما يتيح للمالك تفعيل خط التنظيم عبر لوحة الاستضافة بصفر أوامر).
+    """
+    custom_pipe = str(tmp_path / "custom_pipeline.example.json")
+    monkeypatch.setenv("PIPELINE_FILE", custom_pipe)
+
+    # التحقق من أن config.py يقرأ المتغير
+    import importlib
+    import config
+    importlib.reload(config)
+
+    assert config.Config.PIPELINE_FILE == custom_pipe
+
+
+# =====================================================================
+# اختبار 7: التأكد من تمرير system_prompt سليم بـ layer='polish' لنداءات proposers
+# =====================================================================
+
+def test_proposers_receives_valid_editorial_system_prompt(monkeypatch, tmp_path):
+    """
+    التحقق من أن مرحلة proposers تستدعي compose_prompt('polish', ...)
+    وتمرر system_prompt غير فارغ ويحتوي على معالم الدستور التحريري لـ pipeline_runner.
+    """
+    pipe_file = tmp_path / "pipeline.json"
+    pipe_file.write_text('{"version": 1}', encoding="utf-8")
+    monkeypatch.setattr(Config, "PIPELINE_FILE", str(pipe_file))
+    pipeline_config.reset_cache()
+
+    captured_system_prompts = []
+
+    def mock_run_stage(stage_name, stage_config, system_prompt="", **kwargs):
+        captured_system_prompts.append((stage_name, system_prompt))
+        return StageResult(stage_name=stage_name, status="ok", calls=[])
+
+    monkeypatch.setattr(pipeline_runner, "run_stage", mock_run_stage)
+
+    fake_cfg = {
+        "display": {"max_parallel": 2, "live_cap_utf16": 3400},
+        "providers": {"shelby": {}},
+        "stages": [
+            {
+                "name": "proposers",
+                "enabled": True,
+                "calls": [{"provider": "shelby", "label": "شلبي"}],
+            }
+        ],
+    }
+    monkeypatch.setattr(pipeline_config, "get", lambda: fake_cfg)
+
+    sender = DummySender()
+    res_lock = threading.Lock()
+    result = {"title": "فحص الدستور", "raw": "كلام"}
+
+    th = delivery._deliver_synthesizer(
+        raw="كلام",
+        polished="مسودة فلاش",
+        role_id="general",
+        gl=None,
+        l2="ملخص سابق",
+        session_name="s_prompt",
+        sender=sender,
+        anchor=1,
+        local_polish_fn=None,
+        t0_flow=time.monotonic(),
+        gemini_elapsed=1.0,
+        res_lock=res_lock,
+        result=result,
+        _bg_finalize=lambda *a, **k: None,
+    )
+    th.join(timeout=3.0)
+
+    assert len(captured_system_prompts) >= 1
+    st_name, sys_p = captured_system_prompts[0]
+    assert st_name == "proposers"
+    assert len(sys_p) > 200, "يجب ألا يكون system_prompt فارغاً"
+    assert "محرر نصوص" in sys_p or "العامية المصرية" in sys_p
+    assert "ملخص سابق" in sys_p

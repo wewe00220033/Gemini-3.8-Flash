@@ -169,7 +169,7 @@ class Config:
     GLOSSARY_FILE = os.path.join(DATA_DIR, "glossary.json")           # القاموس المخصص (بلا أسرار → يدخل /backup)
     ROLES_FILE = os.path.join(DATA_DIR, "roles.json")                 # الأدوار المخصصة (الافتراضية في الكود محمية)
     SETTINGS_FILE = os.path.join(DATA_DIR, "settings.json")           # delivery_mode / role / header_target
-    PIPELINE_FILE = os.path.join(DATA_DIR, "pipeline.json")           # المرحلة 2: خط التنظيم متعدد المحركات (بلا أسرار خام — مفاتيح البيئة بصيغة ${VAR})
+    PIPELINE_FILE = os.environ.get("PIPELINE_FILE", "").strip() or os.path.join(DATA_DIR, "pipeline.json")           # المرحلة 2: خط التنظيم متعدد المحركات (بلا أسرار خام — مفاتيح البيئة بصيغة ${VAR})
     MEMORY_DIR = os.path.join(DATA_DIR, "memory")                     # المرحلة 2: MEMORY.md + daily/ + context/ + review/
     DRAFTS_DIR = os.path.join(DATA_DIR, "drafts")                     # المرحلة 2: مسودات المراحل الوسيطة YYYY-MM-DD/<entry_id>.md
     DRAFTS_KEEP_DAYS = int(os.environ.get("DRAFTS_KEEP_DAYS", "30"))
