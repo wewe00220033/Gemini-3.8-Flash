@@ -27,6 +27,7 @@ import prompts
 import glossary as glossary_mod
 import sessions
 import logkit
+import guards
 
 logger = logging.getLogger("delivery")
 
@@ -414,8 +415,18 @@ def wait_background_threads(timeout=15.0):
 
 
 def prepare_texts(raw_text, glossary=None):
-    """يرجع (raw_after_glossary, polished_base_for_glossary_fn). القاموس scope=both/raw_only على الخام فقط."""
+    """يرجع (raw_after_glossary, polished_base_for_glossary_fn). القاموس scope=both/raw_only على الخام فقط.
+    مع تجريد وسوم المتكلم الواحد حتمياً قبل القاموس والأرشيف (T9 — DEC-P2-01)."""
     gl = glossary if glossary is not None else glossary_mod.get_glossary()
+    try:
+        import pipeline_config
+        cfg = pipeline_config.get()
+        speakers_cfg = (cfg.get("speakers") or {}) if isinstance(cfg, dict) else {}
+        if speakers_cfg.get("enabled", False) and speakers_cfg.get("strip_if_single", True):
+            tag_regex = speakers_cfg.get("tag_regex", r"^🗣️(\d+):")
+            raw_text = guards.strip_single_speaker(raw_text, tag_regex)
+    except Exception as e:
+        logger.warning("فشل strip_single_speaker في prepare_texts: %s", e)
     raw, _n = gl.apply(raw_text, target="raw")
     return raw, gl
 
@@ -1099,6 +1110,9 @@ def _deliver_synthesizer(raw, polished, role_id, gl, l2, session_name, sender, a
         mem_cfg = cfg.get("memory") or {}
         mem_enabled = bool(mem_cfg.get("enabled", False))
         allowed_topics = mem_cfg.get("topics") or memory.DEFAULT_TOPICS
+        speakers_cfg = cfg.get("speakers") or {}
+        speakers_enabled = bool(speakers_cfg.get("enabled", False))
+        spk_tag_regex = str(speakers_cfg.get("tag_regex") or r"^🗣️(\d+):")
 
         max_parallel = int(display.get("max_parallel", 4))
         live_cap = int(display.get("live_cap_utf16", 3400))
@@ -1211,6 +1225,7 @@ def _deliver_synthesizer(raw, polished, role_id, gl, l2, session_name, sender, a
                     drafts=collected_drafts if collected_drafts else None,
                     gemini_draft=polished if not collected_drafts else None,
                     role_id=role_id,
+                    speakers_enabled=speakers_enabled,
                 )
                 p_sys = text_assist.inject_system_context(
                     p_sys,
@@ -1224,6 +1239,7 @@ def _deliver_synthesizer(raw, polished, role_id, gl, l2, session_name, sender, a
                     raw_text=raw,
                     drafts=collected_drafts,
                     role_id=role_id,
+                    speakers_enabled=speakers_enabled,
                 )
                 p_sys = text_assist.inject_system_context(
                     p_sys,
@@ -1238,6 +1254,7 @@ def _deliver_synthesizer(raw, polished, role_id, gl, l2, session_name, sender, a
                     role_id=role_id,
                     memory_enabled=mem_enabled,
                     topics=allowed_topics,
+                    speakers_enabled=speakers_enabled,
                 )
                 p_sys = text_assist.inject_system_context(
                     p_sys,
@@ -1417,6 +1434,16 @@ def _deliver_synthesizer(raw, polished, role_id, gl, l2, session_name, sender, a
                     "⚠️ echo_guard: النسخة الذهبية تحتوي على صدى لسياق المالك بنسبة >= %.2f",
                     echo_ratio,
                 )
+
+            # فحص حوكمة وسوم المتكلمين في النسخة الذهبية (T9 — DEC-P2-01)
+            if speakers_enabled:
+                new_spk_tags = guards.forbid_new_speaker_tags(golden_text, raw, spk_tag_regex)
+                for nst in new_spk_tags:
+                    logger.warning('⚠️ speakers_guard: وسم متكلم "%s" في النسخة الذهبية لم يرد في الخام', nst)
+                    if mem_enabled:
+                        memory.append_guard_warning(f"speaker:{nst}", memory_cfg=mem_cfg)
+                if speakers_cfg.get("strip_if_single", True):
+                    golden_text = guards.strip_single_speaker(golden_text, spk_tag_regex)
 
             # تطبيق القاموس النهائي للتأكيد
             if gl:

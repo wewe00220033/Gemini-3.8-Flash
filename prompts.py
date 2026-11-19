@@ -103,19 +103,72 @@ DEFAULT_ROLES = {
 
 # ----------------------------------------------------------------------
 # طبقة A الأساسية (التفريغ) — Config.SYSTEM_PROMPT تبقى المصدر (ثابتة ومجرَّبة)
+# ودعم فصل المتكلمين الحتمي المشروط (T9 — DEC-P2-01)
 # ----------------------------------------------------------------------
+_SPEAKERS_LAYER_A_BLOCK = (
+    "قواعد تمييز المتكلمين في التفريغ:\n"
+    "إذا كان في التسجيل أكثر من متحدث واحد بوضوح من اختلاف نبرة الصوت:\n"
+    "- ابدأ دور كل متحدث بسطر جديد مسبوقاً بالوسم 🗣️1: ثم 🗣️2: وهكذا بالترتيب الذي ظهر به المتحدثون لأول مرة في التسجيل.\n"
+    "- لا تكرر الوسم طالما استمر نفس المتحدث في الكلام حتى يتكلم متحدث آخر.\n"
+    "- إذا كان في التسجيل متحدث واحد فقط طوال الوقت: لا تكتب أي وسم إطلاقاً في أي مكان من النص.\n\n"
+    "أمثلة استرشادية:\n"
+    "مثال (حوار ثنائي):\n"
+    "🗣️1: السلام عليكم، إيه الأخبار عندك؟\n"
+    "🗣️2: وعليكم السلام، كله تمام الحمد لله.\n\n"
+    "مثال (حوار ثلاثي):\n"
+    "🗣️1: الاجتماع هيبدأ دلوقتي.\n"
+    "🗣️2: أنا جاهز بالسلايدز.\n"
+    "🗣️3: وأنا بسجل الملاحظات.\n\n"
+    "مثال (متحدث واحد — مونولوج):\n"
+    "النهارده راجعنا كود البايثون وخلصنا التعديلات المطلوبة ومفيش أي مشاكل ظهرت في التيست.\n\n"
+    "انتهت قواعد المتكلمين."
+)
+
+
+def transcribe_system_prompt(speakers_cfg=None):
+    """
+    يرجع SYSTEM_PROMPT لطبقة A (T9 — DEC-P2-01).
+    - إذا كانت speakers معطلة أو غير ممررة: يرجع Config.SYSTEM_PROMPT حرفياً 100%.
+    - إذا كانت مفعلة: يلحق كتلة المتكلمين بعد الدستور الأساسي قبل حساب سقف extra_txt.
+    """
+    base = Config.SYSTEM_PROMPT
+    cfg = speakers_cfg or {}
+    if not cfg.get("enabled", False):
+        return base
+    return base + "\n\n" + _SPEAKERS_LAYER_A_BLOCK
+
+
+def get_polish_common(speakers_enabled=False):
+    """
+    يرجع الدستور التحريري الموحد الـ 12 قسماً مع جعل القاعدة 8 مشروطة بـ speakers_enabled (T9 — DEC-P2-01).
+    """
+    if not speakers_enabled:
+        return _POLISH_COMMON
+    rule_8_old = (
+        "8. 👥 المتكلمون والحوار: إذا تبيّن بوضوح وجود أكثر من متكلم، ميّزهم بـ المتكلم 1: و المتكلم 2: "
+        "(أو بأسمائهم إن ذُكرت صراحة في النص). إذا كان متكلماً واحداً لا تضف أي تسمية.\n"
+    )
+    rule_8_new = (
+        "8. 👥 المتكلمون والحوار: انسخ وسوم المتكلمين الواردة في النص الخام كما هي بالضبط؛ "
+        "ممنوع منعاً باتاً اختلاق أو إنشاء وسم متكلم جديد لم يرد في الخام، وممنوع حذف أي وسم متكلم موجود في الخام. "
+        "إذا كان النص خالياً من الوسوم، لا تضف أي وسم إطلاقاً.\n"
+    )
+    return _POLISH_COMMON.replace(rule_8_old, rule_8_new)
+
+
 _LAYER_B_BASE = (
     "أنت محرر نصوص تقني محترف وخبير في تدقيق وتنظيم تفريغات الصوت الآلية بالعامية المصرية (ASR Post-Editor). "
     "مهمتك تحويل التفريغ الخام إلى نص مقروء ومنظّم وعالي السلاسة، مع الحفاظ على جميع المعلومات والمعاني وترتيبها وصوت المتكلم دون تأليف أو تلخيص مخل."
 )
 
 
-def compose_prompt(layer, role_id="general", hints="", roles=None, memory_enabled=False, topics=None):
+def compose_prompt(layer, role_id="general", hints="", roles=None, memory_enabled=False, topics=None, speakers_cfg=None, speakers_enabled=False):
     """
     يركّب برومبت الطبقة المطلوبة (دالة نقية).
-      layer="transcribe": Config.SYSTEM_PROMPT + سطر الدور (إن وُجد) + تلميح القاموس (إن وُجد).
+      layer="transcribe": Config.SYSTEM_PROMPT (عبر transcribe_system_prompt) + سطر الدور (إن وُجد) + تلميح القاموس (إن وُجد).
       layer="polish":     القاعدة العامة + تعليمات الدور كاملة + القاعدة الذهبية (لا إضافة/لا حذف).
                           عند تفعيل memory_enabled يُطلب تصنيف الموضوع في آخر السطر (T8 — DEC-P2-03).
+                          عند تفعيل speakers_enabled تُنسخ وسوم المتكلمين من الخام بحظر الاستحداث (T9 — DEC-P2-01).
     """
     roles = roles if roles is not None else all_roles()
     role = roles.get(role_id) or roles.get("general") or DEFAULT_ROLES["general"]
@@ -129,10 +182,12 @@ def compose_prompt(layer, role_id="general", hints="", roles=None, memory_enable
         extra_txt = "\n".join(extra)
         if len(extra_txt) > Config.TRANSCRIBE_LAYER_A_MAX_CHARS:
             extra_txt = extra_txt[:Config.TRANSCRIBE_LAYER_A_MAX_CHARS].rsplit(" ", 1)[0]
-        return Config.SYSTEM_PROMPT + ("\n" + extra_txt if extra_txt else "")
+        base_sys = transcribe_system_prompt(speakers_cfg)
+        return base_sys + ("\n" + extra_txt if extra_txt else "")
     if layer == "polish":
         b = (role.get("layer_b") or DEFAULT_ROLES["general"]["layer_b"]).strip()
-        prompt = f"{_LAYER_B_BASE}\n\nالدور: {role.get('name', role_id)}.\n{b}\n\n{_POLISH_COMMON}"
+        common = get_polish_common(speakers_enabled)
+        prompt = f"{_LAYER_B_BASE}\n\nالدور: {role.get('name', role_id)}.\n{b}\n\n{common}"
         if memory_enabled:
             allowed = topics or ["coding", "family", "friends", "education", "religion", "notes"]
             opts = "|".join(allowed)
@@ -145,10 +200,10 @@ def compose_prompt(layer, role_id="general", hints="", roles=None, memory_enable
     raise ValueError(f"طبقة غير معروفة: {layer}")
 
 
-def layer_a_extra_len(role_id="general", hints="", roles=None):
+def layer_a_extra_len(role_id="general", hints="", roles=None, speakers_cfg=None):
     """طول الإضافات فوق SYSTEM_PROMPT في طبقة A (للاختبار الحارس 06 §8)."""
-    base = len(Config.SYSTEM_PROMPT)
-    return max(0, len(compose_prompt("transcribe", role_id, hints, roles)) - base)
+    base = len(transcribe_system_prompt(speakers_cfg))
+    return max(0, len(compose_prompt("transcribe", role_id, hints, roles, speakers_cfg=speakers_cfg)) - base)
 
 
 def _clip_lines(text, n):
@@ -291,23 +346,25 @@ SYNTHESIZER_SYSTEM_PROMPT = (
 )
 
 
-def compose_synthesis_prompt(raw_text, gemini_draft=None, shelby_draft=None, role_id="general", roles=None, max_chars=None, drafts=None):
+def compose_synthesis_prompt(raw_text, gemini_draft=None, shelby_draft=None, role_id="general", roles=None, max_chars=None, drafts=None, speakers_enabled=False):
     """
     يركب برومبت السبك الثلاثي شاملاً الدستور التحريري الـ 12 قسماً بالكامل (_POLISH_COMMON)
     وتوجيهات الدور، مع تحديد سلطة الحكم الأعلى بوضوح.
     يدعم العمل مع قائمة مسودات drafts: list[(label, text)] (T6c — DEC-P2-08/09)
     أو عبر مسودتي gemini_draft و shelby_draft للتوافق العكسي التام 100%.
+    ودعم حوكمة وسوم المتكلمين (T9 — DEC-P2-01).
     """
     roles = roles if roles is not None else all_roles()
     role = roles.get(role_id) or roles.get("general") or DEFAULT_ROLES["general"]
     role_name = role.get("name", role_id)
     role_b = (role.get("layer_b") or DEFAULT_ROLES["general"]["layer_b"]).strip()
+    common = get_polish_common(speakers_enabled)
 
     sys_text = (
         f"{SYNTHESIZER_SYSTEM_PROMPT}\n\n"
         f"المجال والدور التحريري: {role_name}\n"
         f"{role_b}\n\n"
-        f"{_POLISH_COMMON}\n\n"
+        f"{common}\n\n"
         f"تنبيه قاطع: لا تُخرج سطر #topic في ناتجك نهائياً."
     )
 
@@ -438,21 +495,23 @@ def compose_synthesis_prompt(raw_text, gemini_draft=None, shelby_draft=None, rol
     return sys_text, user_content
 
 
-def compose_polish_multi_prompt(raw_text, drafts, role_id="general", roles=None, max_chars=None):
+def compose_polish_multi_prompt(raw_text, drafts, role_id="general", roles=None, max_chars=None, speakers_enabled=False):
     """
     يركب برومبت مرحلة polishers (المُجمّع/المُنقّح الوسيط — T6c DEC-P2-08/09):
     يستفيد من مسودات المقترحين لتحسين الصياغة وإنتاج مسودة واحدة محسنة وموحدة.
+    ودعم حوكمة وسوم المتكلمين (T9 — DEC-P2-01).
     """
     roles = roles if roles is not None else all_roles()
     role = roles.get(role_id) or roles.get("general") or DEFAULT_ROLES["general"]
     role_name = role.get("name", role_id)
     role_b = (role.get("layer_b") or DEFAULT_ROLES["general"]["layer_b"]).strip()
+    common = get_polish_common(speakers_enabled)
 
     sys_text = (
         f"{SYNTHESIZER_SYSTEM_PROMPT}\n\n"
         f"المجال والدور التحريري: {role_name}\n"
         f"{role_b}\n\n"
-        f"{_POLISH_COMMON}\n\n"
+        f"{common}\n\n"
         f"تنبيه قاطع: لا تُخرج سطر #topic في ناتجك نهائياً."
     )
 

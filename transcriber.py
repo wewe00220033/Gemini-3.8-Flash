@@ -23,9 +23,12 @@ import threading
 import time
 import base64
 import requests
+import logging
 from config import Config
 from key_manager import key_manager
 from model_state import model_circuit
+
+logger = logging.getLogger("transcriber")
 
 
 # ======================================================================
@@ -474,11 +477,22 @@ def _is_echo(text, l1_prompt_text):
         return False
 
 
-def transcription_prompt():
+def transcription_prompt(speakers_cfg=None):
     """
     طبقة A (06 §1): Config.SYSTEM_PROMPT + سطر الدور الحالي + تلميح القاموس الإملائي (05 §5).
     بدون دور/قاموس = SYSTEM_PROMPT حرفياً (لا تغيير في السلوك المجرَّب). أي فشل → SYSTEM_PROMPT.
+    مع دعم فصل المتكلمين الحتمي في طبقة A عند تفعيله (T9 — DEC-P2-01).
     """
+    spk_cfg = speakers_cfg
+    if spk_cfg is None:
+        try:
+            import pipeline_config
+            cfg = pipeline_config.get()
+            spk_cfg = (cfg.get("speakers") or {}) if isinstance(cfg, dict) else {}
+        except Exception as e:
+            logger.warning("فشل قراءة إعدادات speakers في transcription_prompt: %s", e)
+            spk_cfg = {}
+
     try:
         import prompts
         import settings
@@ -491,7 +505,7 @@ def transcription_prompt():
                 hints = (hints + "\n" + th) if hints else th
         except Exception:
             pass
-        return prompts.compose_prompt("transcribe", settings.effective_role(), hints)
+        return prompts.compose_prompt("transcribe", settings.effective_role(), hints, speakers_cfg=spk_cfg)
     except Exception as e:  # pragma: no cover
         print(f"⚠️ مركّب البرومبت: {e} — استخدام SYSTEM_PROMPT الأساسي")
         return Config.SYSTEM_PROMPT

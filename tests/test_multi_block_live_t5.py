@@ -313,6 +313,7 @@ def test_pipeline_config_import_restriction():
     root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     exempt_modules = {
         "delivery.py",       # مصرح له بالاستيراد (DEC-P2-04/08)
+        "transcriber.py",    # مصرح له بالاستيراد لقراءة إعدادات المتكلمين (DEC-P2-01 T9)
         "pipeline_config.py",# هو الملف نفسه
         "pipeline_defaults.py",
         "conftest.py",

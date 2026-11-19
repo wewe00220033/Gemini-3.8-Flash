@@ -86,7 +86,7 @@
     }
   ],
   "guards": { "dedupe_ratio": 0.98, "noop_ratio": 0.98, "forbid_new_speaker_tags": true, "numbers_latin_subset_check": true },
-  "speakers": { "enabled": false, "tag_regex": "^🗣️(\\d+):", "strip_if_single": true },
+  "speakers": { "enabled": true, "tag_regex": "^🗣️(\\d+):", "strip_if_single": true },
   "memory": { "enabled": false, "inject_max_lines": 200, "inject_max_bytes": 25600, "topics": ["coding","family","friends","education","religion","notes"], "context_per_topic_n": 3, "context_max_chars": 800, "echo_ratio_strike": 0.60 },
   "hot_reload": { "enabled": true, "poll_interval_s": 5 }
 }

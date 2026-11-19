@@ -126,3 +126,61 @@ def is_context_echo(output_text: str, context_text: str, ratio: float) -> bool:
     """
     return context_echo_ratio(output_text, context_text) >= float(ratio)
 
+
+def strip_single_speaker(text: str, tag_regex: str = r"^🗣️(\d+):") -> str:
+    """
+    إذا كان عدد وسوم المتكلمين الفريدة في النص <= 1: يجرد جميع وسوم المتكلم من بدايات الأسطر (T9 — DEC-P2-01).
+    إذا كان النص متعدد المتكلمين (>= 2): يترك النص كما هو دون أي تغيير.
+    دالة نقية 100% بدون استيرادات خارجية.
+    """
+    if not text:
+        return text or ""
+    try:
+        pattern = re.compile(tag_regex, re.MULTILINE)
+    except re.error:
+        pattern = re.compile(r"^🗣️(\d+):", re.MULTILINE)
+
+    matches = pattern.findall(text)
+    if not matches:
+        return text
+
+    unique_speakers = set(matches)
+    if len(unique_speakers) <= 1:
+        # تجريد الوسم مع أي مسافات بعده من بداية كل سطر
+        strip_pattern = re.compile(rf"(?m){pattern.pattern}\s*")
+        return strip_pattern.sub("", text)
+
+    return text
+
+
+def forbid_new_speaker_tags(golden_text: str, raw_text: str, tag_regex: str = r"^🗣️(\d+):") -> List[str]:
+    """
+    يتحقق من أن وسوم المتكلمين في النسخة الذهبية مجموعة جزئية من وسوم الخام (T9 — DEC-P2-01).
+    يرجع قائمة بالوسوم الجديدة غير المصرح بها (إن وُجدت).
+    دالة نقية 100% بدون استيرادات خارجية.
+    """
+    if not golden_text or not raw_text:
+        return []
+
+    try:
+        pattern = re.compile(tag_regex, re.MULTILINE)
+    except re.error:
+        pattern = re.compile(r"^🗣️(\d+):", re.MULTILINE)
+
+    raw_tags = set(pattern.findall(raw_text))
+    golden_tags = set(pattern.findall(golden_text))
+
+    new_tags = golden_tags - raw_tags
+    if not new_tags:
+        return []
+
+    formatted = []
+    for t in sorted(new_tags):
+        s = str(t)
+        if s.startswith("🗣️"):
+            formatted.append(s)
+        else:
+            formatted.append(f"🗣️{s}:")
+    return formatted
+
+

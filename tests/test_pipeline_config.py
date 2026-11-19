@@ -239,9 +239,9 @@ def test_dynamic_deadlines_and_queue_waiters_scale_with_repeats_and_no_runtime_i
     # 5 نداءات على طابور gpu × BOT_WORKERS(2) + 2 = 12 (> 8 القديمة)
     assert pipeline_config.queue_max_waiters("gpu", cfg) == 12
 
-    # شرط قبول T3a/T4 (DEC-P2-04/DEC-P2-08): صفر استيراد لـ pipeline_config إلا في delivery.py فقط (المصرح له في T4)
+    # شرط قبول T3a/T4 (DEC-P2-04/DEC-P2-08): صفر استيراد لـ pipeline_config إلا في delivery.py و transcriber.py (DEC-P2-01 T9)
     for fn in os.listdir(ROOT):
-        if fn.endswith(".py") and fn not in ("pipeline_config.py", "pipeline_defaults.py", "delivery.py"):
+        if fn.endswith(".py") and fn not in ("pipeline_config.py", "pipeline_defaults.py", "delivery.py", "transcriber.py"):
             src = open(os.path.join(ROOT, fn), encoding="utf-8").read()
             assert "pipeline_config" not in src and "pipeline_defaults" not in src, f"{fn} يستورد T3a قبل أوانه"
 

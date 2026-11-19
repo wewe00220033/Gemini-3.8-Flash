@@ -184,9 +184,9 @@ def test_drafts_auto_save_on_finalize_and_uuid_fallback(fresh_env):
 
 
 def test_pipeline_config_import_restricted_to_delivery_only(fresh_env):
-    """شرط قبول T4 الصارم: لا استيراد لـ pipeline_config من أي ملف تشغيلي في الجذر سوى delivery.py فقط."""
+    """شرط قبول T4 الصارم: لا استيراد لـ pipeline_config من أي ملف تشغيلي في الجذر سوى delivery.py و transcriber.py (DEC-P2-01 T9)."""
     import_re = re.compile(r"^\s*(?:import\s+pipeline_config|from\s+pipeline_config\s+import)", re.MULTILINE)
     for fn in os.listdir(ROOT):
-        if fn.endswith(".py") and fn not in ("delivery.py", "pipeline_config.py"):
+        if fn.endswith(".py") and fn not in ("delivery.py", "pipeline_config.py", "transcriber.py"):
             src = open(os.path.join(ROOT, fn), encoding="utf-8").read()
             assert not import_re.search(src), f"{fn} يستورد pipeline_config قبل أوانه (المصرح له في T4 هو delivery.py فقط)"
