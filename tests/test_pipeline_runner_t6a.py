@@ -358,7 +358,7 @@ def test_pipeline_runner_isolated_import():
         elif isinstance(node, ast.ImportFrom):
             assert node.module not in strictly_forbidden, f"استيراد محظور في الـ runner: {node.module}"
 
-    # التأكد من أن صفر ملفات تشغيلية في الجذر تستورد pipeline_runner قبل T6b
+    # التأكد من أن الملفات التشغيلية التي تستورد pipeline_runner هي فقط delivery.py و text_assist.py (ربط T6b)
     importers = []
     for fn in os.listdir(root_dir):
         if not fn.endswith(".py") or fn.startswith("test_") or fn == "pipeline_runner.py":
@@ -368,4 +368,6 @@ def test_pipeline_runner_isolated_import():
             if "pipeline_runner" in content:
                 importers.append(fn)
 
-    assert not importers, f"ملفات تشغيلية غير متوقعة تستورد pipeline_runner قبل T6b: {importers}"
+    allowed_t6b = {"delivery.py"}
+    unexpected = [fn for fn in importers if fn not in allowed_t6b]
+    assert not unexpected, f"ملفات تشغيلية غير مصرح لها تستورد pipeline_runner: {unexpected}"

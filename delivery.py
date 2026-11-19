@@ -370,6 +370,7 @@ def _start_bg_thread(target):
     _track_bg_thread(t)
     try:
         t.start()
+        time.sleep(0.002)
     except Exception:
         _untrack_bg_thread(t)
         raise
@@ -382,8 +383,22 @@ def active_background_threads():
         return [t for t in list(_bg_threads) if t.is_alive()]
 
 
+_pipeline_cancel_event = threading.Event()
+
+
+def request_pipeline_cancel():
+    """يُفعل حدث الإلغاء لجميع مراحل الـ Pipeline الجارية أثناء الإغلاق الرشيق (T6b)."""
+    _pipeline_cancel_event.set()
+
+
+def reset_pipeline_cancel():
+    """للاختبارات: تصفير حدث الإلغاء للبدء من جديد."""
+    _pipeline_cancel_event.clear()
+
+
 def wait_background_threads(timeout=15.0):
     """ينتظر اكتمال خيوط التنظيم/السبك الخلفية حتى timeout ثانية (يرجع عدد المتبقي)."""
+    request_pipeline_cancel()
     deadline = time.monotonic() + max(0.0, float(timeout))
     while True:
         alive = active_background_threads()
@@ -1025,17 +1040,291 @@ def _deliver_synthesizer(raw, polished, role_id, gl, l2, session_name, sender, a
         mid = controller.start_live(init_html)
         result["polished_msg_id"] = mid
 
-    def _bg_synthesizer():
-        use_short_above = (draft_separated and draft_sent)
+    use_short_above = (draft_separated and draft_sent)
 
-        def _draft_fallback_view(status, short_html, err_detail=None):
-            if use_short_above:
-                return short_html, _html_to_plain(short_html)
-            full = synthesizer_interim_message_html(
-                polished, role_id=role_id, session_name=session_name,
-                title=result["title"], shelby_status=status, error_detail=err_detail
+    def _draft_fallback_view(status, short_html, err_detail=None):
+        if use_short_above:
+            return short_html, _html_to_plain(short_html)
+        full = synthesizer_interim_message_html(
+            polished, role_id=role_id, session_name=session_name,
+            title=result["title"], shelby_status=status, error_detail=err_detail
+        )
+        return full, polished
+
+    def _bg_run_pipeline():
+        """مسار تشغيل الـ Pipeline عند وجود pipeline.json على القرص (T6b — DEC-P2-08/09)."""
+        import pipeline_config
+        import pipeline_runner
+        import text_assist
+        import drafts
+
+        cfg = pipeline_config.get()
+        display = cfg.get("display") or {}
+        providers = cfg.get("providers") or {}
+        stages = cfg.get("stages") or []
+        stage_map = {s.get("name"): s for s in stages if s.get("enabled", True)}
+
+        max_parallel = int(display.get("max_parallel", 4))
+        live_cap = int(display.get("live_cap_utf16", 3400))
+        total_budget = getattr(Config, "SYNTH_TOTAL_BUDGET_SEC", 420.0)
+        flow_deadline = t0_flow + total_budget
+        min_exec = getattr(Config, "MIN_SHELBY_EXEC_SEC", 5.0)
+
+        all_drafts_to_save = []
+        if polished:
+            all_drafts_to_save.append(("فلاش", polished))
+
+        # 1. مرحلة المقترحين: proposers
+        prop_stage = stage_map.get("proposers")
+        proposer_calls_res = []
+        if prop_stage:
+            calls_to_run = []
+            for c in prop_stage.get("calls") or []:
+                if c.get("provider") == "flash_lite" and polished and not c.get("only_if_previous_failed"):
+                    proposer_calls_res.append(pipeline_runner.CallResult(
+                        call_id=str(c.get("id") or f"{c.get('provider')}_{c.get('repeat_index', 1)}"),
+                        provider="flash_lite",
+                        model=str(c.get("model") or "gemini-3.5-flash-lite"),
+                        status="ok",
+                        text=polished,
+                        label=c.get("label") or "فلاش",
+                        elapsed_s=gemini_elapsed,
+                    ))
+                else:
+                    calls_to_run.append(c)
+
+            rem_p = max(1.0, flow_deadline - time.monotonic())
+            p_deadline = min(rem_p, pipeline_config.stage_deadline_sec("proposers", providers))
+            try:
+                p_sys = prompts.compose_prompt("B", role_id=role_id)
+            except Exception:
+                p_sys = ""
+            if l2:
+                p_sys += (
+                    "\n\nملخص الجلسة حتى الآن (للفهم فقط — لا تضفه ولا تعِد كتابته، نظم النص الجديد فقط):\n"
+                    + str(l2)[:Config.SESSION_SUMMARY_MAX_CHARS]
+                )
+            prop_cfg_to_run = dict(prop_stage, calls=calls_to_run)
+
+            prop_stage_res = pipeline_runner.run_stage(
+                stage_name="proposers",
+                stage_config=prop_cfg_to_run,
+                inputs={"raw": raw},
+                providers=providers,
+                deadline_s=p_deadline,
+                system_prompt=p_sys,
+                user_prompt=raw,
+                cancel_event=_pipeline_cancel_event,
+                max_concurrent=max_parallel,
             )
-            return full, polished
+            proposer_calls_res.extend(prop_stage_res.calls)
+
+        # فحص نواتج المقترحين وحارس No-Op لشلبي
+        valid_proposers = []
+        for call in proposer_calls_res:
+            if call.status == "ok" and call.text:
+                if call.provider == "shelby":
+                    try:
+                        is_noop = text_assist.is_shelby_noop(raw, call.text, role_id=role_id)
+                    except TypeError:
+                        is_noop = text_assist.is_shelby_noop(raw, call.text)
+                    if is_noop:
+                        text_assist.note_shelby_noop()
+                        logger.warning("⚠️ Shelby proposer returned raw text unchanged (No-Op)")
+                        call = pipeline_runner.CallResult(
+                            call_id=call.call_id,
+                            provider=call.provider,
+                            model=call.model,
+                            status="failed",
+                            text=None,
+                            label=call.label,
+                            elapsed_s=call.elapsed_s,
+                            error="No-Op (أعاد النص دون تنظيم فعلي)",
+                        )
+                if call.status == "ok" and call.text:
+                    valid_proposers.append(call)
+                    all_drafts_to_save.append((call.label or call.provider, call.text))
+
+        # تحديث العرض الحي بعد مرحلة المقترحين
+        if not use_short_above and valid_proposers:
+            live_blocks = [(c.label or c.provider, c.text) for c in valid_proposers]
+            interim_html = render_live_html(
+                blocks=live_blocks,
+                title=result.get("title"),
+                role_id=role_id,
+                session_name=session_name,
+                footer_status="⏳ <i>جاري توليد النسخة الذهبية المسبوكة...</i>",
+                live_cap=live_cap,
+                header_prefix="📝 النسخة المنظمة",
+            )
+            controller.update_interim(interim_html, force=False)
+        elif use_short_above:
+            controller.update_interim(
+                "⏳ <b>تم استلام المسودات المقترحة. جاري السبك الثلاثي...</b>",
+                force=False,
+            )
+
+        # 2. مرحلة السبك النهائي: final
+        final_stage = stage_map.get("final")
+        golden_text = None
+        synth_provider = "shelby"
+        synth_elapsed = 0.0
+
+        if final_stage and final_stage.get("enabled", True):
+            gemini_draft = next((c.text for c in valid_proposers if c.provider == "flash_lite"), polished)
+            shelby_draft = next((c.text for c in valid_proposers if c.provider == "shelby"), None)
+
+            sys_text, usr_content = prompts.compose_synthesis_prompt(
+                raw_text=raw,
+                gemini_draft=gemini_draft,
+                shelby_draft=shelby_draft,
+                role_id=role_id,
+            )
+            if l2:
+                sys_text += (
+                    "\n\nملخص الجلسة حتى الآن (للفهم فقط — لا تضفه ولا تعِد كتابته، اسبك النص الجديد فقط):\n"
+                    + str(l2)[:Config.SESSION_SUMMARY_MAX_CHARS]
+                )
+
+            rem_f = max(1.0, flow_deadline - time.monotonic())
+            f_deadline = min(rem_f, pipeline_config.stage_deadline_sec("final", providers))
+
+            final_calls = list(final_stage.get("calls") or [])
+            if rem_f < min_exec:
+                final_calls = [c for c in final_calls if c.get("provider") != "shelby"]
+
+            final_cfg_to_run = dict(final_stage, calls=final_calls)
+            t0_synth = time.monotonic()
+            final_res = pipeline_runner.run_stage(
+                stage_name="final",
+                stage_config=final_cfg_to_run,
+                inputs={"raw": raw, "gemini_draft": gemini_draft, "shelby_draft": shelby_draft},
+                providers=providers,
+                deadline_s=f_deadline,
+                system_prompt=sys_text,
+                user_prompt=usr_content,
+                cancel_event=_pipeline_cancel_event,
+                max_concurrent=max_parallel,
+            )
+            synth_elapsed = time.monotonic() - t0_synth
+
+            with text_assist._lock:
+                text_assist._state["synth_calls"] = text_assist._state.get("synth_calls", 0) + 1
+
+            shelby_f = next((c for c in final_res.calls if c.provider == "shelby"), None)
+            flash_f = next((c for c in final_res.calls if c.provider in ("flash_lite", "flash")), None)
+
+            if shelby_f and shelby_f.status == "ok" and shelby_f.text:
+                try:
+                    is_noop = text_assist.is_shelby_noop(raw, shelby_f.text, role_id=role_id)
+                except TypeError:
+                    is_noop = text_assist.is_shelby_noop(raw, shelby_f.text)
+                if not is_noop:
+                    golden_text = shelby_f.text.strip()
+                    synth_provider = "shelby"
+                    with text_assist._lock:
+                        text_assist._state["synth_ok"] = text_assist._state.get("synth_ok", 0) + 1
+                        text_assist._state["synth_last_provider"] = "shelby"
+                else:
+                    text_assist.note_shelby_noop()
+                    logger.warning("⚠️ Shelby synthesis returned raw text unchanged (No-Op) — ارتداد لفلاش")
+
+            if not golden_text and flash_f and flash_f.status == "ok" and flash_f.text:
+                golden_text = flash_f.text.strip()
+                synth_provider = "flash"
+                with text_assist._lock:
+                    text_assist._state["synth_ok"] = text_assist._state.get("synth_ok", 0) + 1
+                    text_assist._state["synth_fallback_calls"] = text_assist._state.get("synth_fallback_calls", 0) + 1
+                    text_assist._state["synth_last_provider"] = "flash"
+
+            if not golden_text:
+                with text_assist._lock:
+                    text_assist._state["synth_fail"] = text_assist._state.get("synth_fail", 0) + 1
+                    text_assist._state["synth_last_error"] = str(final_res.error or "فشل السبك")
+                    text_assist._state["synth_last_provider"] = "none"
+
+        # تطبيق القاموس على النسخة الذهبية
+        if golden_text and gl:
+            golden_text, _ = gl.apply(golden_text, target="polished")
+
+        # التسليم والإغلاق
+        if golden_text:
+            all_drafts_to_save.append(("النسخة الذهبية", golden_text))
+            _bg_finalize(
+                golden_text,
+                f"[نسخة ذهبية مسبوكة]\n{golden_text}",
+                session_text=golden_text,
+                is_golden=True,
+                synth_elapsed=synth_elapsed,
+            )
+            wall_total = time.monotonic() - t0_flow
+            telemetry = {
+                "gemini": gemini_elapsed,
+                "synth": synth_elapsed,
+                "total": wall_total,
+                "synth_provider": synth_provider,
+            }
+            gemini_text_arg = next((c.text for c in valid_proposers if c.provider == "flash_lite"), polished)
+            shelby_text_arg = next((c.text for c in valid_proposers if c.provider == "shelby"), None)
+            sent_mids = controller.finalize(
+                golden_text,
+                is_golden=True,
+                telemetry=telemetry,
+                gemini_text=gemini_text_arg,
+                shelby_text=shelby_text_arg,
+                synth_provider=synth_provider,
+            )
+            if sent_mids:
+                with res_lock:
+                    result["polished_msg_id"] = sent_mids[0]
+                    result["golden_mids"] = sent_mids
+        else:
+            # مسار الإنقاذ بأفضل مسودة متوفرة
+            shelby_d = next((c.text for c in valid_proposers if c.provider == "shelby"), None)
+            gemini_d = next((c.text for c in valid_proposers if c.provider == "flash_lite"), polished)
+            fallback_txt = shelby_d or gemini_d or raw
+            _bg_finalize(fallback_txt, fallback_txt, session_text=fallback_txt, is_golden=False)
+            controller.finalized = True
+
+            if shelby_d and gemini_d:
+                fallback_html = merged_compare_message_html(
+                    gemini_d, shelby_text=shelby_d, role_id=role_id, session_name=session_name
+                )
+                sent_mid = _replace_or_send(
+                    sender, mid, wait_anchor, fallback_html, f"{gemini_d}\n\n{shelby_d}",
+                    filename_prefix="fallback_compare",
+                    caption="📝 المقارنة المدمجة (بديل لفشل السبك)",
+                    head_html=_entry_head_html(result["title"], session_name),
+                )
+            else:
+                noop_html, noop_plain = _draft_fallback_view(
+                    "noop",
+                    "ℹ️ <i>تم اعتماد مسودة فلاش أعلاه (تعذر إكمال السبك)</i>",
+                )
+                sent_mid = _replace_or_send(
+                    sender, mid, wait_anchor, noop_html, noop_plain,
+                    filename_prefix="polished",
+                    caption="📝 النسخة المنظمة (اعتماد فلاش)",
+                    head_html=_entry_head_html(result["title"], session_name),
+                )
+            if not use_short_above and sent_mid is not None:
+                with res_lock:
+                    result["polished_msg_id"] = sent_mid
+
+        # حفظ كافة المسودات في كاش .md (T4)
+        if all_drafts_to_save or golden_text:
+            try:
+                drafts.write(entry_id, final_text=golden_text, drafts=all_drafts_to_save)
+            except Exception as e:
+                logger.warning("drafts.write in pipeline delivery error: %s", e)
+
+    def _bg_synthesizer():
+        try:
+            import pipeline_config
+            if pipeline_config.has_disk_pipeline():
+                return _bg_run_pipeline()
+        except Exception as e:
+            logger.warning("Pipeline check fallback to legacy: %s", e)
 
         try:
             t0_shelby = time.monotonic()

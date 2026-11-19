@@ -37,6 +37,11 @@ class CallResult:
 
 @dataclass(frozen=True)
 class StageResult:
+    """
+    نتيجة تنفيذ مرحلة من مراحل الـ Pipeline.
+    ملاحظة: final_output يمثل أول نداء ناجح بحسب ترتيب التعريف (مناسب للمراحل ذات البديل الفردي مثل final).
+    للمراحل متعددة المخرجات (مثل proposers)، يجب استهلاك قائمة calls كاملة للنداءات الناجحة.
+    """
     stage_name: str
     status: str          # "ok" | "partial" | "failed"
     calls: List[CallResult]
@@ -250,6 +255,7 @@ def run_stage(
     system_prompt: str = "",
     user_prompt: str = "",
     default_retry_s: float = 3.0,
+    max_concurrent: Optional[int] = None,
 ) -> StageResult:
     """
     تشغيل مرحلة Pipeline معزولة كاملة (T6a — DEC-P2-05 / DEC-P2-08 / DEC-P2-09).
@@ -282,8 +288,9 @@ def run_stage(
         user_prompt = str(inputs.get("raw") or "")
 
     chains = _partition_chains(calls)
-    max_concurrent = int(stage_config.get("max_concurrent") or len(chains) or 1)
-    max_concurrent = max(1, min(max_concurrent, len(chains)))
+    if max_concurrent is None:
+        max_concurrent = int(stage_config.get("max_concurrent") or len(chains) or 1)
+    max_concurrent = max(1, min(int(max_concurrent), len(chains)))
 
     chain_results: List[Optional[List[CallResult]]] = [None] * len(chains)
 
