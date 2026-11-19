@@ -476,3 +476,116 @@ def test_real_glossary_confirmed_entries_accepted_by_guard(tmp_path):
         glossary=gl,
     )
     assert warns == []
+
+
+# 10. اختبار مراقبة الكونسول الحية ومنع تسريب نصوص المسودات (DEC-P2-10)
+def test_console_observability_on_progress_listener(capsys, monkeypatch, tmp_path):
+    pipe_file = tmp_path / "pipeline.json"
+    pipe_file.write_text('{"version": 1}', encoding="utf-8")
+    monkeypatch.setattr(Config, "PIPELINE_FILE", str(pipe_file))
+    pipeline_config.reset_cache()
+
+    custom_cfg = {
+        "display": {"mode": "single_live", "max_parallel": 2},
+        "providers": {"p_alpha": {}},
+        "stages": [
+            {
+                "name": "proposers",
+                "enabled": True,
+                "calls": [
+                    {"provider": "p_alpha", "label": "فلاش"},
+                    {"provider": "p_alpha", "label": "شلبي_فاشل"},
+                ],
+            },
+            {
+                "name": "final",
+                "enabled": True,
+                "calls": [
+                    {"provider": "p_alpha", "label": "سبك شلبي"},
+                ],
+            },
+        ],
+    }
+    monkeypatch.setattr(pipeline_config, "get", lambda: custom_cfg)
+
+    def fake_run_stage(stage_name, stage_config, inputs, on_progress=None, **kwargs):
+        if stage_name == "proposers":
+            res_ok = CallResult(
+                call_id="c_ok",
+                provider="p_alpha",
+                model="m",
+                status="ok",
+                text="secret_draft_text_not_leaked",
+                label="فلاش",
+                elapsed_s=2.3,
+            )
+            res_fail = CallResult(
+                call_id="c_fail",
+                provider="p_alpha",
+                model="m",
+                status="failed",
+                label="شلبي_فاشل",
+                elapsed_s=1.1,
+                error="خطأ اتصال API",
+            )
+            if on_progress:
+                on_progress("started", res_ok)
+                on_progress("ok", res_ok)
+                on_progress("started", res_fail)
+                on_progress("failed", res_fail)
+            return StageResult(stage_name="proposers", status="partial", calls=[res_ok, res_fail])
+        else:
+            res_final = CallResult(
+                call_id="c_final",
+                provider="p_alpha",
+                model="m",
+                status="ok",
+                text="golden_secret_text",
+                label="سبك شلبي",
+                elapsed_s=3.5,
+            )
+            if on_progress:
+                on_progress("started", res_final)
+                on_progress("ok", res_final)
+            return StageResult(stage_name="final", status="ok", calls=[res_final], final_output="golden_secret_text")
+
+    monkeypatch.setattr(pipeline_runner, "run_stage", fake_run_stage)
+
+    sender = DummySender()
+    res_lock = threading.Lock()
+    result = {"title": "فحص المراقبة الحية", "raw": "خام"}
+
+    th = delivery._deliver_synthesizer(
+        raw="خام",
+        polished="مسودة سريعة",
+        role_id="general",
+        gl=None,
+        l2=None,
+        session_name="sess",
+        sender=sender,
+        anchor=1,
+        local_polish_fn=None,
+        t0_flow=time.monotonic(),
+        gemini_elapsed=1.0,
+        res_lock=res_lock,
+        result=result,
+        _bg_finalize=lambda app, arch, **kw: None,
+    )
+    th.join(timeout=3.0)
+
+    captured = capsys.readouterr()
+    stdout = captured.out
+
+    # التحقق من وجود أسطر المراقبة الحية والأيقونات المناسبة
+    assert "🚀 مرحلة [proposers]" in stdout
+    assert "⏳ [⚡ فلاش] بدأ..." in stdout
+    assert "✅ [⚡ فلاش] 2.3ث" in stdout
+    assert "❌ [🦙 شلبي_فاشل] 1.1ث — خطأ اتصال API" in stdout
+    assert "🏁 مرحلة [proposers]: partial" in stdout
+    assert "🚀 مرحلة [final]" in stdout
+    assert "🦙 سبك شلبي" in stdout
+    assert "🏁 مرحلة [final]: ok" in stdout
+
+    # التحقق الحازم من عدم تسريب نصوص المسودات إطلاقاً في الـ stdout
+    assert "secret_draft_text_not_leaked" not in stdout
+    assert "golden_secret_text" not in stdout

@@ -705,6 +705,21 @@ def synthesizer_interim_message_html(gemini_text, shelby_text=None, role_id=None
     )
 
 
+def _format_icon_label(label: str, provider: str = "") -> str:
+    """تنسيق وسم النداء أو المزود بالأيقونة التعبيرية المناسبة (DEC-P2-08/10)."""
+    lbl = str(label or provider or "").strip()
+    if any(ord(c) >= 0x2600 for c in lbl):
+        return lbl
+    p_lower = str(provider or "").lower()
+    if "فلاش" in lbl or "flash" in p_lower:
+        return f"⚡ {lbl}"
+    if "شلبي" in lbl or "shelby" in p_lower:
+        return f"🦙 {lbl}"
+    if "سبك" in lbl or "synth" in p_lower:
+        return f"🏆 {lbl}"
+    return f"🤖 {lbl}"
+
+
 def synthesizer_final_message_html(golden_text, gemini_text=None, shelby_text=None,
                                    role_id=None, session_name=None, title=None, telemetry=None,
                                    include_drafts=False, synth_provider=None):
@@ -758,17 +773,7 @@ def synthesizer_final_message_html(golden_text, gemini_text=None, shelby_text=No
             for st_name, calls_dict in stages_data.items():
                 if isinstance(calls_dict, dict):
                     for lbl, sec in calls_dict.items():
-                        lbl_str = str(lbl).strip()
-                        if any(ord(c) >= 0x2600 for c in lbl_str):
-                            icon_lbl = lbl_str
-                        elif "فلاش" in lbl_str:
-                            icon_lbl = f"⚡ {lbl_str}"
-                        elif "شلبي" in lbl_str:
-                            icon_lbl = f"🦙 {lbl_str}"
-                        elif "سبك" in lbl_str:
-                            icon_lbl = f"🏆 {lbl_str}"
-                        else:
-                            icon_lbl = f"🤖 {lbl_str}"
+                        icon_lbl = _format_icon_label(lbl)
                         stage_items.append(f"{icon_lbl}: {sec:.1f}ث")
             t_tot = f"{telemetry.get('total', 0):.1f}ث"
             if stage_items:
@@ -1083,6 +1088,7 @@ def _deliver_synthesizer(raw, polished, role_id, gl, l2, session_name, sender, a
         import text_assist
         import drafts
         import guards
+        import logkit
 
         cfg = pipeline_config.get()
         display = cfg.get("display") or {}
@@ -1112,6 +1118,25 @@ def _deliver_synthesizer(raw, polished, role_id, gl, l2, session_name, sender, a
         # fallback: "flash_lite" كآخر قيمة افتراضية موثقة متوافقة مع polish() القديمة
         precomputed_prov = result.get("polished_provider") or "flash_lite"
 
+        def _console_progress(event, call):
+            """مستمع كونسول حي يطبع نبضات المحركات أولاً بأول على الشاشة (DEC-P2-10)."""
+            icon_lbl = _format_icon_label(call.label or call.provider, call.provider)
+            if event == "started":
+                msg = f"⏳ [{icon_lbl}] بدأ..."
+            elif event == "ok":
+                msg = f"✅ [{icon_lbl}] {call.elapsed_s:.1f}ث"
+            elif event == "failed":
+                err_clean = logkit.redact(call.error or "خطأ غير محدد")
+                msg = f"❌ [{icon_lbl}] {call.elapsed_s:.1f}ث — {err_clean}"
+            elif event == "skipped":
+                err_clean = logkit.redact(call.error or "نجح المزود ذو الأولوية")
+                msg = f"⏭️ [{icon_lbl}] تخطٍّ: {err_clean}"
+            else:
+                msg = f"ℹ️ [{icon_lbl}] {event}"
+
+            print(msg, flush=True)
+            logger.info(msg)
+
         for stage_idx, stage in enumerate(enabled_stages):
             st_name = stage.get("name") or f"stage_{stage_idx}"
             telemetry_stages[st_name] = {}
@@ -1134,6 +1159,10 @@ def _deliver_synthesizer(raw, polished, role_id, gl, l2, session_name, sender, a
                     )
                     st_injected_calls.append(injected_res)
                     telemetry_stages[st_name][inj_lbl] = round(gemini_elapsed, 1)
+                    inj_icon_lbl = _format_icon_label(inj_lbl, c.get("provider", ""))
+                    msg_inj = f"✅ [{inj_icon_lbl}] {gemini_elapsed:.1f}ث (مسودة مسبقة)"
+                    print(msg_inj, flush=True)
+                    logger.info(msg_inj)
                 else:
                     st_calls_to_run.append(c)
 
@@ -1200,6 +1229,10 @@ def _deliver_synthesizer(raw, polished, role_id, gl, l2, session_name, sender, a
             st_deadline = min(rem_time, pipeline_config.stage_deadline_sec(st_name, providers))
             st_cfg_to_run = dict(stage, calls=st_calls_to_run)
 
+            stage_start_msg = f"🚀 مرحلة [{st_name}] ({len(st_calls_to_run)} نداء)..."
+            print(stage_start_msg, flush=True)
+            logger.info(stage_start_msg)
+
             st_res = pipeline_runner.run_stage(
                 stage_name=st_name,
                 stage_config=st_cfg_to_run,
@@ -1210,7 +1243,12 @@ def _deliver_synthesizer(raw, polished, role_id, gl, l2, session_name, sender, a
                 user_prompt=p_usr,
                 cancel_event=_pipeline_cancel_event,
                 max_concurrent=max_parallel,
+                on_progress=_console_progress,
             )
+
+            stage_end_msg = f"🏁 مرحلة [{st_name}]: {st_res.status} في {st_res.elapsed_s:.1f}ث"
+            print(stage_end_msg, flush=True)
+            logger.info(stage_end_msg)
 
             current_stage_calls = list(st_injected_calls) + list(st_res.calls)
             valid_stage_calls = []
