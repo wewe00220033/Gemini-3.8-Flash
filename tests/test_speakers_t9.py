@@ -50,7 +50,7 @@ def test_layer_a_extra_len_not_ballooning():
 
 
 def test_get_polish_common_conditional_rule_8():
-    """التحقق من مشروطية القاعدة 8 في الدستور التحريري الموحد."""
+    """التحقق من مشروطية القاعدة 8 في الدستور التحريري الموحد وصمامات T9-fix."""
     # عند التعطيل: القاعدة القديمة بالحرف
     common_disabled = prompts.get_polish_common(speakers_enabled=False)
     assert common_disabled == prompts._POLISH_COMMON
@@ -59,8 +59,17 @@ def test_get_polish_common_conditional_rule_8():
     # عند التفعيل: القاعدة الجديدة الحاكمة لحظر الاستحداث
     common_enabled = prompts.get_polish_common(speakers_enabled=True)
     assert common_enabled != prompts._POLISH_COMMON
+    assert prompts.get_polish_common(True) != prompts.get_polish_common(False)
     assert "انسخ وسوم المتكلمين الواردة في النص الخام كما هي بالضبط" in common_enabled
     assert "ممنوع منعاً باتاً اختلاق أو إنشاء وسم متكلم جديد" in common_enabled
+    # صمام T9-fix: القاعدة الجديدة لا تذكر رمز وسم محدد بل توجّه بالنسخ العام من الخام
+    assert "🗣️" not in common_enabled
+
+
+def test_rule_8_old_in_polish_common_contract():
+    """التحقق من عقد صمام أمان T9-fix: وجود نص _RULE_8_OLD في _POLISH_COMMON وصحة الاستبدال."""
+    assert prompts._RULE_8_OLD in prompts._POLISH_COMMON
+    assert prompts._RULE_8_SPEAKERS not in prompts._POLISH_COMMON
 
 
 def test_strip_single_speaker_monologue_and_dialogue():
