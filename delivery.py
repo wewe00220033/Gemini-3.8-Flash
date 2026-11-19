@@ -1089,12 +1089,16 @@ def _deliver_synthesizer(raw, polished, role_id, gl, l2, session_name, sender, a
         import drafts
         import guards
         import logkit
+        import memory
 
         cfg = pipeline_config.get()
         display = cfg.get("display") or {}
         providers = cfg.get("providers") or {}
         stages = cfg.get("stages") or []
         enabled_stages = [s for s in stages if s.get("enabled", True)]
+        mem_cfg = cfg.get("memory") or {}
+        mem_enabled = bool(mem_cfg.get("enabled", False))
+        allowed_topics = mem_cfg.get("topics") or memory.DEFAULT_TOPICS
 
         max_parallel = int(display.get("max_parallel", 4))
         live_cap = int(display.get("live_cap_utf16", 3400))
@@ -1103,8 +1107,9 @@ def _deliver_synthesizer(raw, polished, role_id, gl, l2, session_name, sender, a
         min_exec = getattr(Config, "MIN_SHELBY_EXEC_SEC", 5.0)
         display_style = str(display.get("mode") or display.get("style") or "single_live").strip()
         show_stages_cfg = display.get("show_stages")
-        owner_ctx = None  # جاهز للمرحلة T8 (DEC-P2-03)
-        max_owner_chars = int((cfg.get("memory") or {}).get("inject_max_bytes") or 25600)
+        owner_ctx = memory.get_owner_context(mem_cfg) if mem_enabled else None
+        max_owner_chars = int(mem_cfg.get("inject_max_bytes", 25600) or 25600)
+        discovered_topic = "notes"
 
         all_drafts_to_save = []
         precomp_lbl = str(result.get("polished_label") or "فلاش")
@@ -1194,6 +1199,10 @@ def _deliver_synthesizer(raw, polished, role_id, gl, l2, session_name, sender, a
                         if pc.status == "ok" and pc.text:
                             collected_drafts.append((pc.label or pc.provider, pc.text))
 
+            # حساب سياق الموضوع للمراحل اللاحقة (polishers/final) بعد اكتشافه في proposers (T8 تصحيح 3)
+            topic_ctx = memory.get_topic_context(discovered_topic, mem_cfg) if (mem_enabled and stage_idx > 0) else None
+            eff_summary = f"{topic_ctx}\n{l2}".strip() if (topic_ctx and l2) else (topic_ctx or l2)
+
             # تركيب البرومبت بحسب نوع المرحلة
             p_type = stage.get("prompt") or ("synthesis" if stage_idx == len(enabled_stages) - 1 else "polish")
             if p_type == "synthesis" or stage_idx == len(enabled_stages) - 1:
@@ -1205,7 +1214,7 @@ def _deliver_synthesizer(raw, polished, role_id, gl, l2, session_name, sender, a
                 )
                 p_sys = text_assist.inject_system_context(
                     p_sys,
-                    context_summary=l2,
+                    context_summary=eff_summary,
                     owner_context=owner_ctx,
                     mode="synthesis",
                     max_owner_chars=max_owner_chars,
@@ -1218,16 +1227,21 @@ def _deliver_synthesizer(raw, polished, role_id, gl, l2, session_name, sender, a
                 )
                 p_sys = text_assist.inject_system_context(
                     p_sys,
-                    context_summary=l2,
+                    context_summary=eff_summary,
                     owner_context=owner_ctx,
                     mode="polish",
                     max_owner_chars=max_owner_chars,
                 )
             else:
-                p_sys = prompts.compose_prompt("polish", role_id=role_id)
+                p_sys = prompts.compose_prompt(
+                    "polish",
+                    role_id=role_id,
+                    memory_enabled=mem_enabled,
+                    topics=allowed_topics,
+                )
                 p_sys = text_assist.inject_system_context(
                     p_sys,
-                    context_summary=l2,
+                    context_summary=eff_summary,
                     owner_context=owner_ctx,
                     mode="polish",
                     max_owner_chars=max_owner_chars,
@@ -1290,6 +1304,11 @@ def _deliver_synthesizer(raw, polished, role_id, gl, l2, session_name, sender, a
                         )
                     else:
                         out_text = call.text.strip()
+                        # تجريد وسم #topic قبل تطبيق القاموس وقبل المسودات والحراس (T8 تصحيح 1 و 2)
+                        clean_out, found_top = memory.extract_and_strip_topic(out_text, allowed_topics)
+                        if stage_idx == 0 and discovered_topic == "notes" and found_top != "notes":
+                            discovered_topic = found_top
+                        out_text = clean_out
                         if gl:
                             out_text, _ = gl.apply(out_text, target="polished")
                         call = pipeline_runner.CallResult(
@@ -1374,6 +1393,11 @@ def _deliver_synthesizer(raw, polished, role_id, gl, l2, session_name, sender, a
 
         # فحص الحارس الحتمي للأرقام والكلمات اللاتينية (DEC-P2-08/09 تنبيه 1)
         if golden_text:
+            # تجريد وسم #topic من النسخة الذهبية قبل الحارس والقاموس (T8 تصحيح 2)
+            golden_text, top_g = memory.extract_and_strip_topic(golden_text, allowed_topics)
+            if top_g != "notes" and discovered_topic == "notes":
+                discovered_topic = top_g
+
             draft_texts = [txt for _, txt in all_drafts_to_save if txt]
             subset_warns = guards.numbers_latin_subset_check(
                 golden_text=golden_text,
@@ -1384,16 +1408,24 @@ def _deliver_synthesizer(raw, polished, role_id, gl, l2, session_name, sender, a
             for w in subset_warns:
                 logger.warning('⚠️ guard: "%s" لم يرد في الخام أو المسودات', w)
 
-            # فحص صدى سياق المالك في النسخة الذهبية (T7 — DEC-P2-03/08)
-            if owner_ctx and guards.is_context_echo(golden_text, owner_ctx):
+            # فحص صدى سياق المالك في النسخة الذهبية (T7/T8 — DEC-P2-03/08)
+            echo_ratio = float((cfg.get("memory") or {}).get("echo_ratio_strike") or getattr(Config, "CONTEXT_ECHO_RATIO", 0.60))
+            if owner_ctx and guards.is_context_echo(golden_text, owner_ctx, ratio=echo_ratio):
                 logger.warning(
                     "⚠️ echo_guard: النسخة الذهبية تحتوي على صدى لسياق المالك بنسبة >= %.2f",
-                    getattr(Config, "CONTEXT_ECHO_RATIO", 0.60),
+                    echo_ratio,
                 )
 
             # تطبيق القاموس النهائي للتأكيد
             if gl:
                 golden_text, _ = gl.apply(golden_text, target="polished")
+
+            # تسجيل الذاكرة السلبية: daily + context/<topic>.md + review/ (T8 — DEC-P2-03/04)
+            if mem_enabled:
+                v_entry_id = str(result.get("entry_id") or result.get("request_id") or "voice")
+                memory.append_daily(v_entry_id, discovered_topic, golden_text, memory_cfg=mem_cfg)
+                memory.update_topic_context(discovered_topic, golden_text, memory_cfg=mem_cfg)
+                memory.maybe_write_weekly_review(glossary=gl, guard_warnings=subset_warns, memory_cfg=mem_cfg)
 
             all_drafts_to_save.append(("النسخة الذهبية", golden_text))
             synth_prov = golden_call.provider if golden_call else "pipeline"

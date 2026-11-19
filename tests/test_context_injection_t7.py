@@ -132,18 +132,18 @@ def test_guards_echo_ratio_and_detection():
     # صدى كامل بنسبة 100%
     echo_text = "هذا سياق المالك المرجعي المليء بالتفاصيل الخاصة بالمشروع والتصميم المعماري المتين"
     assert guards.context_echo_ratio(echo_text, context) == 1.0
-    assert guards.is_context_echo(echo_text, context) is True
+    assert guards.is_context_echo(echo_text, context, ratio=0.60) is True
     assert sessions.is_context_echo(echo_text, context) is True
 
     # كلام جديد غير مرتبط
     different_text = "اليوم ذهبنا إلى حديقة الحيوان ورأينا الفيل والزرافة والأسد يأكلون بشهية"
     assert guards.context_echo_ratio(different_text, context) < 0.20
-    assert guards.is_context_echo(different_text, context) is False
+    assert guards.is_context_echo(different_text, context, ratio=0.60) is False
     assert sessions.is_context_echo(different_text, context) is False
 
     # نص قصير جداً (< 6 كلمات) لا يُعتبر صدى لتفادي الإنذارات الكاذبة
     short_echo = "سياق المالك المرجعي"
-    assert guards.is_context_echo(short_echo, context) is False
+    assert guards.is_context_echo(short_echo, context, ratio=0.60) is False
 
     # سياق فارغ
-    assert guards.is_context_echo(echo_text, "") is False
+    assert guards.is_context_echo(echo_text, "", ratio=0.60) is False

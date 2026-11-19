@@ -110,11 +110,12 @@ _LAYER_B_BASE = (
 )
 
 
-def compose_prompt(layer, role_id="general", hints="", roles=None):
+def compose_prompt(layer, role_id="general", hints="", roles=None, memory_enabled=False, topics=None):
     """
     يركّب برومبت الطبقة المطلوبة (دالة نقية).
       layer="transcribe": Config.SYSTEM_PROMPT + سطر الدور (إن وُجد) + تلميح القاموس (إن وُجد).
       layer="polish":     القاعدة العامة + تعليمات الدور كاملة + القاعدة الذهبية (لا إضافة/لا حذف).
+                          عند تفعيل memory_enabled يُطلب تصنيف الموضوع في آخر السطر (T8 — DEC-P2-03).
     """
     roles = roles if roles is not None else all_roles()
     role = roles.get(role_id) or roles.get("general") or DEFAULT_ROLES["general"]
@@ -131,7 +132,16 @@ def compose_prompt(layer, role_id="general", hints="", roles=None):
         return Config.SYSTEM_PROMPT + ("\n" + extra_txt if extra_txt else "")
     if layer == "polish":
         b = (role.get("layer_b") or DEFAULT_ROLES["general"]["layer_b"]).strip()
-        return f"{_LAYER_B_BASE}\n\nالدور: {role.get('name', role_id)}.\n{b}\n\n{_POLISH_COMMON}"
+        prompt = f"{_LAYER_B_BASE}\n\nالدور: {role.get('name', role_id)}.\n{b}\n\n{_POLISH_COMMON}"
+        if memory_enabled:
+            allowed = topics or ["coding", "family", "friends", "education", "religion", "notes"]
+            opts = "|".join(allowed)
+            prompt += (
+                f"\n\nتصنيف الموضوع:\n"
+                f"في نهاية ناتجك تماماً، أضف سطراً مستقلاً واحداً فقط بصيغة: #topic: <topic> "
+                f"حيث <topic> كلمة واحدة حصراً من القائمة: ({opts})."
+            )
+        return prompt
     raise ValueError(f"طبقة غير معروفة: {layer}")
 
 
@@ -297,7 +307,8 @@ def compose_synthesis_prompt(raw_text, gemini_draft=None, shelby_draft=None, rol
         f"{SYNTHESIZER_SYSTEM_PROMPT}\n\n"
         f"المجال والدور التحريري: {role_name}\n"
         f"{role_b}\n\n"
-        f"{_POLISH_COMMON}"
+        f"{_POLISH_COMMON}\n\n"
+        f"تنبيه قاطع: لا تُخرج سطر #topic في ناتجك نهائياً."
     )
 
     max_chars = max_chars or getattr(Config, "SYNTH_PROMPT_MAX_CHARS", 28000)
@@ -441,7 +452,8 @@ def compose_polish_multi_prompt(raw_text, drafts, role_id="general", roles=None,
         f"{SYNTHESIZER_SYSTEM_PROMPT}\n\n"
         f"المجال والدور التحريري: {role_name}\n"
         f"{role_b}\n\n"
-        f"{_POLISH_COMMON}"
+        f"{_POLISH_COMMON}\n\n"
+        f"تنبيه قاطع: لا تُخرج سطر #topic في ناتجك نهائياً."
     )
 
     max_chars = max_chars or getattr(Config, "SYNTH_PROMPT_MAX_CHARS", 28000)

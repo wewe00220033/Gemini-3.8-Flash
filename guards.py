@@ -119,11 +119,10 @@ def context_echo_ratio(output_text: str, context_text: str) -> float:
     return hit / len(tris)
 
 
-def is_context_echo(output_text: str, context_text: str, ratio: Optional[float] = None) -> bool:
+def is_context_echo(output_text: str, context_text: str, ratio: float) -> bool:
     """
-    يفحص ما إذا كان الناتج يمثل صدى للسياق بنسبة تتجاوز العتبة (الافتراضي 0.60 من Config).
+    يفحص ما إذا كان الناتج يمثل صدى للسياق بنسبة تتجاوز العتبة ratio الممررة صراحة من المستدعي (DEC-P2-03/08).
+    دالة نقية 100% بلا استيرادات داخلية وبلا ثوابت جامدة.
     """
-    from config import Config
-    cutoff = Config.CONTEXT_ECHO_RATIO if ratio is None else ratio
-    return context_echo_ratio(output_text, context_text) >= cutoff
+    return context_echo_ratio(output_text, context_text) >= float(ratio)
 
