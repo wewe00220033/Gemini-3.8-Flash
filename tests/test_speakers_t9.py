@@ -502,18 +502,60 @@ def test_interactions_transport_build_payload(monkeypatch):
 
 
 def test_interactions_duration_cap_logic(monkeypatch):
-    """T9-A: التحقق من تطبيق سقف 1800 ثانية لـ transcribe عند تفعيل speakers."""
+    """T9-A/T9-A-fix: التحقق من تطبيق سقف 1800 ثانية لـ transcribe عبر effective_max_audio_duration_sec."""
+    # عند تفعيل speakers:
     monkeypatch.setattr(transcriber, "_is_speakers_enabled", lambda: True)
-    # محاكاة فحص السقف داخل الحلقة
-    max_dur = getattr(Config, "MODEL_MAX_AUDIO_DURATION_SEC", {}).get("gemini-3.5-transcribe")
-    assert max_dur == 2700
-    effective_dur = min(max_dur or 1800, 1800) if transcriber._is_speakers_enabled() else max_dur
-    assert effective_dur == 1800
+    assert transcriber.effective_max_audio_duration_sec("gemini-3.5-transcribe") == 1800
+    assert transcriber.effective_max_audio_duration_sec("gemini-3.6-flash") is None
 
-    # عند التعطيل
+    # عند تعطيل speakers:
     monkeypatch.setattr(transcriber, "_is_speakers_enabled", lambda: False)
-    effective_dur_disabled = min(max_dur or 1800, 1800) if transcriber._is_speakers_enabled() else max_dur
-    assert effective_dur_disabled == 2700
+    assert transcriber.effective_max_audio_duration_sec("gemini-3.5-transcribe") == 2700
+    assert transcriber.effective_max_audio_duration_sec("gemini-3.6-flash") is None
+
+
+def test_extract_text_interactions_multi_step_and_multi_content():
+    """T9-A-fix: التحقق من دمج عدة خطوات ومحتويات متعددة مع ترحيل إزاحة start_index و end_index بدقة (DEC-P2-01)."""
+    # محاكاة رد فيه خطوتين، وكل خطوة فيها مقطعين (إجمالي 4 مقاطع نصية و3 متحدثين)
+    data = {
+        "steps": [
+            {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "مرحباً يا فندم. ",
+                        "annotations": [{"start_index": 0, "end_index": 16, "speaker": "spk:0"}],
+                    },
+                    {
+                        "type": "text",
+                        "text": "أهلاً بحضرتك. ",
+                        "annotations": [{"start_index": 0, "end_index": 14, "speaker": "spk:1"}],
+                    },
+                ]
+            },
+            {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "معاكم الطرف الثالث. ",
+                        "annotations": [{"start_index": 0, "end_index": 20, "speaker": "spk:2"}],
+                    },
+                    {
+                        "type": "text",
+                        "text": "تمام كدة اتفقنا.",
+                        "annotations": [{"start_index": 0, "end_index": 16, "speaker": "spk:0"}],
+                    },
+                ]
+            },
+        ]
+    }
+    extracted = transcriber._extract_text_interactions(data)
+    # يجب أن يتم دمج الـ 4 مقاطع بالكامل بدون قطع أي حرف
+    # وترحيل الإزاحة بدقة: spk:0 يظهر كـ 🗣️1:، وspk:1 كـ 🗣️2:، وspk:2 كـ 🗣️3:
+    assert "🗣️1: مرحباً يا فندم." in extracted
+    assert "🗣️2: أهلاً بحضرتك." in extracted
+    assert "🗣️3: معاكم الطرف الثالث." in extracted
+    assert "🗣️1: تمام كدة اتفقنا." in extracted
 
 
 def test_attempt_interactions_mock_responses(monkeypatch):

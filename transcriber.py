@@ -175,9 +175,7 @@ def transcribe_audio_bytes_ex(audio_bytes, mime_type="audio/mp4", duration_sec=N
                 reasons[model] = f"مزدحم ({reason}) — يفتح بعد {_fmt_wait(left)}"
                 continue
 
-            max_dur = getattr(Config, "MODEL_MAX_AUDIO_DURATION_SEC", {}).get(model)
-            if model == "gemini-3.5-transcribe" and _is_speakers_enabled():
-                max_dur = min(max_dur or 1800, 1800)
+            max_dur = effective_max_audio_duration_sec(model)
             if duration_sec and max_dur and duration_sec > max_dur:
                 info["skipped"].append(f"{_short(model)}: مدة الصوت ({int(duration_sec)}ث) تتجاوز سقف الموديل ({max_dur}ث)")
                 reasons[model] = f"مدة الصوت تتجاوز سقف الموديل ({max_dur // 60} دقيقة)"
@@ -362,21 +360,58 @@ def _attempt(model, key_str, payload, timeout):
     return att
 
 
+def effective_max_audio_duration_sec(model, speakers_enabled=None):
+    """يرجع سقف مدة الصوت الفعلي للموديل مع مراعاة حالة تفعيل المتكلمين (T9-A/T9-A-fix — DEC-P2-01)."""
+    max_dur = getattr(Config, "MODEL_MAX_AUDIO_DURATION_SEC", {}).get(model)
+    spk_on = _is_speakers_enabled() if speakers_enabled is None else bool(speakers_enabled)
+    if model == "gemini-3.5-transcribe" and spk_on:
+        return min(max_dur or 1800, 1800)
+    return max_dur
+
+
 def _extract_text_interactions(data):
-    """يستخرج النص من رد Interactions API ويحوّل الـ annotations إلى وسوم 🗣️N: لو وجدت (T9-A — DEC-P2-01)."""
+    """يستخرج النص ويدمج الـ steps والـ content المتعددة مع ترحيل إزاحة الـ annotations (T9-A-fix — DEC-P2-01)."""
     if not isinstance(data, dict):
         return ""
-    if "steps" in data:
-        try:
-            content = data["steps"][0]["content"][0]
-        except (KeyError, IndexError, TypeError):
+    steps = data.get("steps")
+    if isinstance(steps, list):
+        full_text_pieces = []
+        all_annotations = []
+        curr_offset = 0
+
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            contents = step.get("content")
+            if not isinstance(contents, list):
+                continue
+            for c in contents:
+                if not isinstance(c, dict):
+                    continue
+                piece = c.get("text")
+                if piece is None:
+                    continue
+                piece_str = str(piece)
+                anns = c.get("annotations") or []
+                if isinstance(anns, list):
+                    for a in anns:
+                        if isinstance(a, dict):
+                            a_copy = dict(a)
+                            if "start_index" in a_copy:
+                                a_copy["start_index"] = int(a_copy["start_index"]) + curr_offset
+                            if "end_index" in a_copy:
+                                a_copy["end_index"] = int(a_copy["end_index"]) + curr_offset
+                            all_annotations.append(a_copy)
+                full_text_pieces.append(piece_str)
+                curr_offset += len(piece_str)
+
+        combined_text = "".join(full_text_pieces).strip()
+        if not combined_text:
             return ""
-        text = (content.get("text") or "").strip()
-        annotations = content.get("annotations") or []
-        if annotations:
+        if all_annotations:
             import guards
-            text = guards.annotations_to_tagged_text(text, annotations)
-        return text.strip()
+            combined_text = guards.annotations_to_tagged_text(combined_text, all_annotations)
+        return combined_text.strip()
     return _extract_text(data)
 
 

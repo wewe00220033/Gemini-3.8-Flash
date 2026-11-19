@@ -287,6 +287,8 @@ def annotations_to_tagged_text(text: str, annotations: list, tag_fmt: str = "ðŸ—
             curr_pieces.append(segment_text)
         else:
             if curr_spk is not None:
+                if gap.strip():
+                    curr_pieces.append(gap)
                 blocks.append((curr_spk, "".join(curr_pieces).strip()))
             curr_spk = spk
             curr_pieces = []
