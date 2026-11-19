@@ -51,6 +51,22 @@ class Config:
         "gemini-3.5-transcribe",  # محرك جوجل التخصصي للصوت، الأسرع (3–4 ث) ويدعم فصل المتحدثين عبر Interactions (25 طلب/مشروع)
         "gemini-3.8-flash",       # معطّل (انظر DISABLED_MODELS) — 503/Timeout متكرر مع الصوت بتاريخ 2026-10-23
     ]
+
+    # المرحلة 3: إعادة ترتيب أولوية الموديلات من البيئة دون لمس القائمة (قرار المالك — PHASE2-CLOSE §ج-4)
+    # MODELS_ORDER=gemini-3.5-transcribe,gemini-3.6-flash → المذكورون أولاً بترتيبهم، ثم الباقي بترتيبه الأصلي
+    # (حلقة عادية بدل comprehension لأن Python لا يرى متغيرات الكلاس داخل comprehension)
+    _order_env = [m.strip() for m in os.environ.get("MODELS_ORDER", "").split(",") if m.strip()]
+    if _order_env:
+        _reordered = []
+        for _m in _order_env:
+            if _m in _ALL_MODELS and _m not in _reordered:
+                _reordered.append(_m)
+        for _m in _ALL_MODELS:
+            if _m not in _reordered:
+                _reordered.append(_m)
+        _ALL_MODELS = _reordered
+        del _reordered, _m
+    del _order_env
     # موديلات معطّلة مؤقتاً: لن تُجرَّب أبداً. لإعادة 3.8 احذفه من هنا فقط (سطر واحد).
     DISABLED_MODELS = {"gemini-3.8-flash"}
 
