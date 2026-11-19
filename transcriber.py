@@ -388,6 +388,8 @@ def _extract_text_interactions(data):
             for c in contents:
                 if not isinstance(c, dict):
                     continue
+                if c.get("type") not in ("text", None):
+                    continue
                 piece = c.get("text")
                 if piece is None:
                     continue
@@ -409,8 +411,12 @@ def _extract_text_interactions(data):
         if not combined_text:
             return ""
         if all_annotations:
+            spks = sorted(list(set(str(a.get("speaker")) for a in all_annotations if "speaker" in a)))
+            print(f"🎙️ [interactions] استخراج {len(all_annotations)} annotations | متحدثين: {spks}")
             import guards
             combined_text = guards.annotations_to_tagged_text(combined_text, all_annotations)
+        else:
+            print("🎙️ [interactions] صفر annotations متحدثين في الرد (مونولوج)")
         return combined_text.strip()
     return _extract_text(data)
 
