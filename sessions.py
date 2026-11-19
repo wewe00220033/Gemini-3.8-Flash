@@ -1110,19 +1110,10 @@ def set_context_enabled(enabled, session_id=None):
 def is_context_echo(output_text, l1_text, ratio=None):
     """
     كشف «صدى السياق» (10 §3): نسبة كلمات الناتج (متتابعات 3 كلمات) الموجودة حرفياً في L1 ≥ CONTEXT_ECHO_RATIO.
-    نصوص قصيرة جداً (< 6 كلمات) لا تُحتسب صدى (تجنّب إنذارات كاذبة).
+    محول توافقي يستدعي guards.is_context_echo (T7 — DEC-P2-03/08).
     """
-    ratio = Config.CONTEXT_ECHO_RATIO if ratio is None else ratio
-    if not output_text or not l1_text:
-        return False
-    norm = lambda t: re.sub(r"[^\w\s]", " ", t).split()  # noqa: E731
-    out_w, ctx_w = norm(output_text), norm(l1_text)
-    if len(out_w) < 6 or len(ctx_w) < 3:
-        return False
-    ctx_tri = {tuple(ctx_w[i:i + 3]) for i in range(len(ctx_w) - 2)}
-    tris = [tuple(out_w[i:i + 3]) for i in range(len(out_w) - 2)]
-    hit = sum(1 for t in tris if t in ctx_tri)
-    return (hit / len(tris)) >= ratio
+    import guards
+    return guards.is_context_echo(output_text, l1_text, ratio=ratio)
 
 
 def record_strike(reason, session_id=None):

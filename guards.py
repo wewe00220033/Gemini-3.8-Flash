@@ -99,3 +99,31 @@ def numbers_latin_subset_check(
 
     return unexpected
 
+
+def context_echo_ratio(output_text: str, context_text: str) -> float:
+    """
+    يحسب نسبة صدى السياق: نسبة ثلاثيات الكلمات (tri-grams) من الناتج الموجودة في السياق (DEC-P2-03/08).
+    نصوص قصيرة جداً (< 6 كلمات ناتج أو < 3 كلمات سياق) ترجع 0.0 لتجنب الإنذارات الكاذبة.
+    """
+    if not output_text or not context_text:
+        return 0.0
+    norm = lambda t: re.sub(r"[^\w\s]", " ", t).split()
+    out_w, ctx_w = norm(output_text), norm(context_text)
+    if len(out_w) < 6 or len(ctx_w) < 3:
+        return 0.0
+    ctx_tri = {tuple(ctx_w[i:i + 3]) for i in range(len(ctx_w) - 2)}
+    tris = [tuple(out_w[i:i + 3]) for i in range(len(out_w) - 2)]
+    if not tris:
+        return 0.0
+    hit = sum(1 for t in tris if t in ctx_tri)
+    return hit / len(tris)
+
+
+def is_context_echo(output_text: str, context_text: str, ratio: Optional[float] = None) -> bool:
+    """
+    يفحص ما إذا كان الناتج يمثل صدى للسياق بنسبة تتجاوز العتبة (الافتراضي 0.60 من Config).
+    """
+    from config import Config
+    cutoff = Config.CONTEXT_ECHO_RATIO if ratio is None else ratio
+    return context_echo_ratio(output_text, context_text) >= cutoff
+

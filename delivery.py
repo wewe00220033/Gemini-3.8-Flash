@@ -1103,6 +1103,8 @@ def _deliver_synthesizer(raw, polished, role_id, gl, l2, session_name, sender, a
         min_exec = getattr(Config, "MIN_SHELBY_EXEC_SEC", 5.0)
         display_style = str(display.get("mode") or display.get("style") or "single_live").strip()
         show_stages_cfg = display.get("show_stages")
+        owner_ctx = None  # جاهز للمرحلة T8 (DEC-P2-03)
+        max_owner_chars = int((cfg.get("memory") or {}).get("inject_max_bytes") or 25600)
 
         all_drafts_to_save = []
         precomp_lbl = str(result.get("polished_label") or "فلاش")
@@ -1201,29 +1203,35 @@ def _deliver_synthesizer(raw, polished, role_id, gl, l2, session_name, sender, a
                     gemini_draft=polished if not collected_drafts else None,
                     role_id=role_id,
                 )
-                if l2:
-                    p_sys += (
-                        "\n\nملخص الجلسة حتى الآن (للفهم فقط — لا تضفه ولا تعِد كتابته، اسبك النص الجديد فقط):\n"
-                        + str(l2)[:Config.SESSION_SUMMARY_MAX_CHARS]
-                    )
+                p_sys = text_assist.inject_system_context(
+                    p_sys,
+                    context_summary=l2,
+                    owner_context=owner_ctx,
+                    mode="synthesis",
+                    max_owner_chars=max_owner_chars,
+                )
             elif p_type == "polish_multi" or (p_type == "polish" and collected_drafts):
                 p_sys, p_usr = prompts.compose_polish_multi_prompt(
                     raw_text=raw,
                     drafts=collected_drafts,
                     role_id=role_id,
                 )
-                if l2:
-                    p_sys += (
-                        "\n\nملخص الجلسة حتى الآن (للفهم فقط — لا تضفه ولا تعِد كتابته):\n"
-                        + str(l2)[:Config.SESSION_SUMMARY_MAX_CHARS]
-                    )
+                p_sys = text_assist.inject_system_context(
+                    p_sys,
+                    context_summary=l2,
+                    owner_context=owner_ctx,
+                    mode="polish",
+                    max_owner_chars=max_owner_chars,
+                )
             else:
                 p_sys = prompts.compose_prompt("polish", role_id=role_id)
-                if l2:
-                    p_sys += (
-                        "\n\nملخص الجلسة حتى الآن (للفهم فقط — لا تضفه ولا تعِد كتابته، نظم النص الجديد فقط):\n"
-                        + str(l2)[:Config.SESSION_SUMMARY_MAX_CHARS]
-                    )
+                p_sys = text_assist.inject_system_context(
+                    p_sys,
+                    context_summary=l2,
+                    owner_context=owner_ctx,
+                    mode="polish",
+                    max_owner_chars=max_owner_chars,
+                )
                 p_usr = raw
 
             st_deadline = min(rem_time, pipeline_config.stage_deadline_sec(st_name, providers))
@@ -1375,6 +1383,13 @@ def _deliver_synthesizer(raw, polished, role_id, gl, l2, session_name, sender, a
             )
             for w in subset_warns:
                 logger.warning('⚠️ guard: "%s" لم يرد في الخام أو المسودات', w)
+
+            # فحص صدى سياق المالك في النسخة الذهبية (T7 — DEC-P2-03/08)
+            if owner_ctx and guards.is_context_echo(golden_text, owner_ctx):
+                logger.warning(
+                    "⚠️ echo_guard: النسخة الذهبية تحتوي على صدى لسياق المالك بنسبة >= %.2f",
+                    getattr(Config, "CONTEXT_ECHO_RATIO", 0.60),
+                )
 
             # تطبيق القاموس النهائي للتأكيد
             if gl:

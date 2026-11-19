@@ -424,16 +424,45 @@ def note_shelby_noop():
         _state["local_noop"] = _state.get("local_noop", 0) + 1
 
 
-def polish_gemini(raw_text, role_id=None, glossary=None, context_summary=None):
+def inject_system_context(system_prompt, context_summary=None, owner_context=None, mode="polish", max_owner_chars=None):
+    """
+    يحقن سياق الجلسة وسياق المالك المعزول <owner_context> في نص النظام (T7 — DEC-P2-03/08).
+    mode: "polish" (نظّم) أو "synthesis" (اسبك).
+    """
+    if mode not in ("polish", "synthesis"):
+        raise ValueError(f"Unknown mode: {mode!r}, must be 'polish' or 'synthesis'")
+
+    action = "نظّم" if mode == "polish" else "اسبك"
+    sys_text = str(system_prompt or "")
+
+    if context_summary:
+        limit = getattr(Config, "SESSION_SUMMARY_MAX_CHARS", 800)
+        sys_text += (
+            f"\n\nملخص الجلسة حتى الآن (للفهم فقط — لا تضفه ولا تعِد كتابته، {action} النص الجديد فقط):\n"
+            + str(context_summary)[:limit]
+        )
+
+    if owner_context:
+        owner_str = str(owner_context).strip()
+        if max_owner_chars is not None and max_owner_chars > 0:
+            owner_str = owner_str[:max_owner_chars]
+        sys_text += (
+            f"\n\n<owner_context>\n{owner_str}\n</owner_context>\n"
+            f"تنبيه سياق المالك: المعلومات الواردة في <owner_context> أعلاه هي لفهم الضمائر والمصطلحات والاهتمامات فقط؛ "
+            f"ويُحظر تماماً استدعاء أو إضافة أو دمج أي أحداث أو معلومات منها لم ترد صراحة في أصل التسجيل الصوتي الجديد."
+        )
+
+    return sys_text
+
+
+def polish_gemini(raw_text, role_id=None, glossary=None, context_summary=None, owner_context=None):
     """تنظيم نصي مباشر عبر Gemini Flash-Lite (السحابي فقط) مع تطبيق القاموس."""
     assert_not_forbidden_assist_model()
     if is_effective_empty(raw_text):
         return None, "نص فارغ"
     role_id = role_id or Config.DEFAULT_ROLE
     system_text = prompts.compose_prompt("polish", role_id)
-    if context_summary:
-        system_text += ("\n\nملخص الجلسة حتى الآن (للفهم فقط — لا تضفه ولا تعِد كتابته، نظّم النص الجديد فقط):\n"
-                        + str(context_summary)[:Config.SESSION_SUMMARY_MAX_CHARS])
+    system_text = inject_system_context(system_text, context_summary=context_summary, owner_context=owner_context, mode="polish")
     text, reason = generate(system_text, prompts.wrap_transcript(raw_text))
     if text is None:
         return None, logkit.redact(reason)
@@ -442,7 +471,7 @@ def polish_gemini(raw_text, role_id=None, glossary=None, context_summary=None):
     return text.strip(), None
 
 
-def polish_local(raw_text, role_id=None, glossary=None, context_summary=None):
+def polish_local(raw_text, role_id=None, glossary=None, context_summary=None, owner_context=None):
     """تنظيم نصي مباشر عبر المزود المحلي المستقل (LOCAL_POLISH_CMD) مع تطبيق القاموس."""
     if is_effective_empty(raw_text):
         return None, "نص فارغ"
@@ -450,9 +479,7 @@ def polish_local(raw_text, role_id=None, glossary=None, context_summary=None):
         return None, "لا يوجد مزود محلي مهيأ"
     role_id = role_id or Config.DEFAULT_ROLE
     system_text = prompts.compose_prompt("polish", role_id)
-    if context_summary:
-        system_text += ("\n\nملخص الجلسة حتى الآن (للفهم فقط — لا تضفه ولا تعِد كتابته، نظّم النص الجديد فقط):\n"
-                        + str(context_summary)[:Config.SESSION_SUMMARY_MAX_CHARS])
+    system_text = inject_system_context(system_text, context_summary=context_summary, owner_context=owner_context, mode="polish")
     text, reason = _call_local_provider(system_text, prompts.wrap_transcript(raw_text))
     if text:
         if is_shelby_noop(raw_text, text, role_id=role_id):
@@ -474,7 +501,7 @@ def polish_local(raw_text, role_id=None, glossary=None, context_summary=None):
     return None, reason
 
 
-def polish(raw_text, role_id=None, glossary=None, context_summary=None):
+def polish(raw_text, role_id=None, glossary=None, context_summary=None, owner_context=None):
     """
     يحوّل الخام إلى منظم (طبقة B). يرجع (polished, None) أو (None, reason). لا يلمس الخام ولا الصوت.
     القاموس (scope polished) يُطبَّق على الناتج.
@@ -486,9 +513,7 @@ def polish(raw_text, role_id=None, glossary=None, context_summary=None):
         return None, "نص فارغ"
     role_id = role_id or Config.DEFAULT_ROLE
     system_text = prompts.compose_prompt("polish", role_id)
-    if context_summary:
-        system_text += ("\n\nملخص الجلسة حتى الآن (للفهم فقط — لا تضفه ولا تعِد كتابته، نظّم النص الجديد فقط):\n"
-                        + str(context_summary)[:Config.SESSION_SUMMARY_MAX_CHARS])
+    system_text = inject_system_context(system_text, context_summary=context_summary, owner_context=owner_context, mode="polish")
 
     text = None
     reason = None
@@ -530,7 +555,7 @@ def get_last_synth_provider():
         return _state.get("synth_last_provider", "shelby")
 
 
-def synthesize(raw_text, gemini_draft=None, shelby_draft=None, role_id=None, glossary=None, context_summary=None, return_provider=False):
+def synthesize(raw_text, gemini_draft=None, shelby_draft=None, role_id=None, glossary=None, context_summary=None, return_provider=False, owner_context=None):
     """
     يستدعي الوكيل الثالث (السبّاك النهائي Master Synthesizer) لسبك مسودتي جيميني وشلبي
     في ناتج ذهبي موحد فائق القوة والدقة.
@@ -550,11 +575,7 @@ def synthesize(raw_text, gemini_draft=None, shelby_draft=None, role_id=None, glo
         shelby_draft=shelby_draft,
         role_id=role_id,
     )
-    if context_summary:
-        system_text += (
-            "\n\nملخص الجلسة حتى الآن (للفهم فقط — لا تضفه ولا تعِد كتابته، اسبك النص الجديد فقط):\n"
-            + str(context_summary)[:Config.SESSION_SUMMARY_MAX_CHARS]
-        )
+    system_text = inject_system_context(system_text, context_summary=context_summary, owner_context=owner_context, mode="synthesis")
 
     with _lock:
         _state["synth_calls"] = _state.get("synth_calls", 0) + 1
@@ -612,7 +633,7 @@ def synthesize(raw_text, gemini_draft=None, shelby_draft=None, role_id=None, glo
     return (None, reason, "none") if return_provider else (None, reason)
 
 
-def synthesize_ex(raw_text, gemini_draft=None, shelby_draft=None, role_id=None, glossary=None, context_summary=None, flow_start=None):
+def synthesize_ex(raw_text, gemini_draft=None, shelby_draft=None, role_id=None, glossary=None, context_summary=None, flow_start=None, owner_context=None):
     """
     آلة حالات السبك المحكمة (Master Synthesizer State Machine) بميزانية مطلقة 420ث:
       1. SYNTH_SHELBY2: محاولة السبك بمزود شلبي المحلي (timeout <= min(180, remaining)).
@@ -647,11 +668,12 @@ def synthesize_ex(raw_text, gemini_draft=None, shelby_draft=None, role_id=None, 
         shelby_draft=shelby_draft,
         role_id=role_id,
     )
-    if context_summary:
-        system_text += (
-            "\n\nملخص الجلسة حتى الآن (للفهم فقط — لا تضفه ولا تعِد كتابته، اسبك النص الجديد فقط):\n"
-            + str(context_summary)[:Config.SESSION_SUMMARY_MAX_CHARS]
-        )
+    system_text = inject_system_context(
+        system_text,
+        context_summary=context_summary,
+        owner_context=owner_context,
+        mode="synthesis",
+    )
 
     last_error = None
 
