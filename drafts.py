@@ -53,7 +53,8 @@ def write(entry_id, final_text=None, drafts=None, meta=None, date_str=None):
                 lines.append(f"\n### ⚡ {label}\n{str(txt or '').strip()}")
 
     body = "\n".join(lines) + "\n"
-    target_dir = os.path.join(getattr(Config, "DATA_DIR", "data"), "drafts", day_folder)
+    drafts_root = getattr(Config, "DRAFTS_DIR", os.path.join(getattr(Config, "DATA_DIR", "data"), "drafts"))
+    target_dir = os.path.join(drafts_root, day_folder)
     target_path = os.path.join(target_dir, f"{eid}.md")
 
     try:
@@ -83,7 +84,7 @@ def prune_old(keep_days=None):
     if days is None or days <= 0:
         return 0
 
-    drafts_root = os.path.join(getattr(Config, "DATA_DIR", "data"), "drafts")
+    drafts_root = getattr(Config, "DRAFTS_DIR", os.path.join(getattr(Config, "DATA_DIR", "data"), "drafts"))
     if not os.path.isdir(drafts_root):
         return 0
 

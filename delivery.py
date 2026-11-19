@@ -146,7 +146,6 @@ class LiveMessageController:
             except Exception as e:
                 msg = str(e).lower()
                 if "429" in msg or "retry after" in msg:
-                    import re
                     m = re.search(r"retry(?:\s+after)?\s+(\d+(?:\.\d+)?)", msg)
                     delay = float(m.group(1)) if m else 5.0
                     self._rate_limited_until = time.monotonic() + delay
@@ -174,17 +173,18 @@ class LiveMessageController:
             display_cfg = {}
         show_md_btn = bool(display_cfg.get("show_md_button", True))
         max_chunks = int(display_cfg.get("max_chunks_per_output", MAX_FINAL_CHUNKS))
+        silent_followups = bool(display_cfg.get("silent_followups", True))
+
+        # لو كان مؤقت التراجع نشطاً: انتظار لمرة واحدة بحد أقصى 10 ثوانٍ خارج القفل (DEC-P2-04/09)
+        now = time.monotonic()
+        if self._rate_limited_until > now:
+            rem = self._rate_limited_until - now
+            if rem > 0:
+                time.sleep(min(rem, 10.0))
 
         with self._writer_lock:
             self.finalized = True
             sent_mids = []
-
-            # لو كان مؤقت التراجع نشطاً: انتظار لمرة واحدة بحد أقصى 10 ثوانٍ
-            now = time.monotonic()
-            if self._rate_limited_until > now:
-                rem = self._rate_limited_until - now
-                if rem > 0:
-                    time.sleep(min(rem, 10.0))
 
             if is_golden:
                 full_html = synthesizer_final_message_html(
@@ -247,11 +247,9 @@ class LiveMessageController:
                 try:
                     return self.sender.edit_text(mid, text_body, parse_mode=parse_mode, reply_markup=markup, raise_429=True)
                 except RateLimitError as rle:
-                    time.sleep(min(rle.retry_after, 10.0))
-                    try:
-                        return self.sender.edit_text(mid, text_body, parse_mode=parse_mode, reply_markup=markup, raise_429=False)
-                    except Exception:
-                        return False
+                    self._rate_limited_until = time.monotonic() + rle.retry_after
+                    logger.warning("⚠️ تعذر تعديل الحية بسبب 429 تليجرام (تراجع %.1fث واللجوء للإرسال الجديد)", rle.retry_after)
+                    return False
                 except Exception:
                     return False
 
@@ -312,7 +310,13 @@ class LiveMessageController:
                     chunk_i = raw_chunks[i]
                     is_last = (i == total_chunks - 1)
                     markup = reply_markup if is_last else None
-                    sub_mid = self.sender.send_text(chunk_i, parent_anchor, "HTML", reply_markup=markup)
+                    sub_mid = self.sender.send_text(
+                        chunk_i,
+                        parent_anchor,
+                        "HTML",
+                        reply_markup=markup,
+                        disable_notification=silent_followups,
+                    )
                     if sub_mid:
                         sent_mids.append(sub_mid)
                         parent_anchor = sub_mid
@@ -482,70 +486,202 @@ def merged_compare_message_html(gemini_text, shelby_text=None, role_id=None, ses
     return "\n".join(blocks)
 
 
-def synthesizer_interim_message_html(gemini_text, shelby_text=None, role_id=None, session_name=None, title=None, shelby_status="waiting", error_detail=None):
+def send_output_message(sender, label, text, anchor, silent=True):
     """
-    الرسالة الحية أثناء تشغيل السبك:
-    - المرحلة 1 (انتظار شلبي): تعرض مسودة فلاش (جيميني) داخل <pre>، مع مؤشر انتظار شلبي.
-    - المرحلة 2 (وصول شلبي وبدء السبك): تعرض مسودة فلاش ومسودة شلبي معاً داخل <pre> لكل منهما مع صمام أمان لاقتطاع النص إن تجاوز 3400 UTF-16 لتفادي خطأ تليجرام 400.
+    إرسال مسودة مخرج منفصلة كرد مباشر على الفويس (نمط per_output - DEC-P2-04/09).
+    تُرسل داخل كتلة <pre> واحدة مع كتم الإشعار (silent=True) لتفادي إزعاج المستخدم.
+    """
+    if sender is None or text is None:
+        return None
+    header = f"⚡ <b>[{html.escape(str(label))}]:</b>" if label else ""
+    body = f"<pre>{html.escape(str(text))}</pre>"
+    msg = f"{header}\n{body}" if header else body
+    try:
+        return sender.send_text(msg, anchor, "HTML", disable_notification=silent)
+    except Exception as e:
+        logger.warning("⚠️ فشل إرسال مسودة per_output (%s): %s", label, e)
+        return None
+
+
+def _format_label(lbl):
+    """تنسيق شارة المسودة التمهيدية في الرسالة الحية بنمط موحد (DEC-P2-04/09)."""
+    if not lbl:
+        return None
+    s = str(lbl).strip()
+    if not s:
+        return None
+    if "<b" in s or s.endswith(":"):
+        return s
+    if any(ord(c) > 0x2000 for c in s):
+        return f"<b>[{html.escape(s)}]:</b>"
+    return f"⚡ <b>[{html.escape(s)}]:</b>"
+
+
+def render_live_html(blocks, title=None, role_id=None, session_name=None, footer_status=None, live_cap=3400, header_prefix=None):
+    """
+    توليد نص HTML للرسالة الحية التفاعلية مع دعم كتل متعددة ديناميكياً (T5 — DEC-P2-04/09).
+    - blocks: قائمة عناصر بصيغة (label, text) أو dict(label=..., text=...).
+    - title / role_id / session_name: ترويسة الرسالة.
+    - footer_status: سطر الحالة في أسفل الرسالة.
+    - live_cap: السقف الأقصى لطول الرسالة بوحدات UTF-16 (الافتراضي 3400).
+    - header_prefix: ترويسة مخصصة اختيارية (مثل '📝 المسودات الأولية (فلاش + شلبي)').
     """
     role = prompts.get_role(role_id) or {}
     role_name = role.get("name") or role_id or "عام"
     head_parts = []
     if title:
-        head_parts.append(f"🏷️ <b>{html.escape(title)}</b>")
+        head_parts.append(f"🏷️ <b>{html.escape(str(title))}</b>")
 
-    if shelby_text:
-        head_txt = f"<b>📝 المسودات الأولية (فلاش + شلبي)</b> · دور: {html.escape(str(role_name))}"
-        if session_name:
-            head_txt += f" · جلسة: «{html.escape(session_name)}»"
-        head_parts.append(head_txt)
+    parsed_blocks = []
+    for b in (blocks or []):
+        if isinstance(b, dict):
+            lbl = b.get("label")
+            txt = str(b.get("text") or "")
+        elif isinstance(b, (list, tuple)):
+            lbl = b[0] if len(b) > 0 else None
+            txt = str(b[1] if len(b) > 1 else "")
+        else:
+            lbl = None
+            txt = str(b or "")
+        parsed_blocks.append((lbl, txt))
 
-        body_gemini = gemini_text
-        body_shelby = shelby_text
+    if header_prefix:
+        prefix_txt = header_prefix
+    elif len(parsed_blocks) > 1:
+        prefix_txt = "📝 المسودات الأولية"
+    else:
+        prefix_txt = "📝 النسخة المنظمة"
 
-        # صمام أمان الحجم للحية الوسيطة (Interim Truncation Guard)
-        # تليجرام يقبل بحد أقصى 4096 حرف؛ نحافظ على المجموع ≤ 3400 UTF-16 لضمان سلامة التعديل
-        max_draft = 1600
-        if _utf16_len(body_gemini) + _utf16_len(body_shelby) > 3400:
-            if _utf16_len(body_gemini) > max_draft:
-                body_gemini = body_gemini[:max_draft] + "\n[...يظهر كاملاً في السبك النهائي...]"
-            if _utf16_len(body_shelby) > max_draft:
-                body_shelby = body_shelby[:max_draft] + "\n[...يظهر كاملاً في السبك النهائي...]"
-
-        blocks = [
-            "\n".join(head_parts),
-            "⚡ <b>[مسودة فلاش]:</b>",
-            f"<pre>{html.escape(body_gemini)}</pre>",
-            "🦙 <b>[مسودة شلبي]:</b>",
-            f"<pre>{html.escape(body_shelby)}</pre>",
-            "⏳ <b>جاري السبك الثلاثي لإنتاج النسخة الذهبية المعتمدة...</b>",
-        ]
-        return "\n".join(blocks)
-
-    head_txt = f"<b>📝 النسخة المنظمة</b> · دور: {html.escape(str(role_name))}"
+    head_line = f"<b>{prefix_txt}</b> · دور: {html.escape(str(role_name))}"
     if session_name:
-        head_txt += f" · جلسة: «{html.escape(session_name)}»"
-    head_parts.append(head_txt)
+        head_line += f" · جلسة: «{html.escape(str(session_name))}»"
+    head_parts.append(head_line)
+    header_str = "\n".join(head_parts)
 
-    body = gemini_text
+    footer_str = str(footer_status) if footer_status else ""
 
-    blocks = [
-        "\n".join(head_parts),
-        f"<pre>{html.escape(body)}</pre>",
-    ]
+    # مسار سريع إذا كان الحجم الإجمالي لا يتجاوز سقف العرض الحي (صفر اقتطاع وصفر تغيير)
+    full_pieces = [header_str]
+    for lbl, txt in parsed_blocks:
+        lbl_rendered = _format_label(lbl)
+        if lbl_rendered:
+            full_pieces.append(lbl_rendered)
+        full_pieces.append(f"<pre>{html.escape(txt)}</pre>")
+    if footer_str:
+        full_pieces.append(footer_str)
+    full_candidate = "\n".join(full_pieces)
+
+    if live_cap is None or live_cap <= 0 or _utf16_len(full_candidate) <= live_cap:
+        return full_candidate
+
+    # حساب الميزانية والاقتطاع الذكي إذا تجاوز السقف (تصحيحات المراجع 1/2/4)
+    import telegram_bot
+
+    tail = "\n[...يظهر كاملاً في السبك النهائي...]"
+    tail_len = _utf16_len(tail)
+    n_total = len(parsed_blocks)
+
+    fixed_overhead = _utf16_len(header_str) + 1 + (_utf16_len(footer_str) + 1 if footer_str else 0)
+
+    # حساب ميزانية كل كتلة: overhead_per_block = 11 (<pre></pre>) + tail_len + label_len + newlines
+    def _block_overhead(lbl):
+        lbl_r = _format_label(lbl)
+        return 11 + tail_len + (_utf16_len(lbl_r) + 1 if lbl_r else 0) + 1
+
+    total_overheads = fixed_overhead + sum(_block_overhead(lbl) for lbl, _ in parsed_blocks)
+    avail = live_cap - total_overheads
+    per_block_cap = avail // max(1, n_total)
+
+    shown_blocks = parsed_blocks
+    skip_note = None
+
+    # تصحيح 4: لو تجاوز عدد الكتل 2 وكانت حصة الكتلة < 200 UTF-16: نعرض أول بلوك وآخر بلوك فقط
+    if n_total > 2 and per_block_cap < 200:
+        shown_blocks = [parsed_blocks[0], parsed_blocks[-1]]
+        skipped_count = n_total - 2
+        skip_note = f"<i>...و {skipped_count} مسودات بينهما...</i>"
+        note_overhead = _utf16_len(skip_note) + 1
+        new_overheads = fixed_overhead + note_overhead + sum(_block_overhead(lbl) for lbl, _ in shown_blocks)
+        per_block_cap = max(100, (live_cap - new_overheads) // 2)
+
+    rendered_blocks = []
+    for lbl, raw_text in shown_blocks:
+        lbl_rendered = _format_label(lbl)
+        # تصحيح 1: الهروب أولاً html.escape ثم القص على النص المهرب ثم _safe_cut لحماية الكيانات
+        escaped = html.escape(raw_text)
+        if _utf16_len(escaped) > per_block_cap:
+            target_budget = max(50, per_block_cap - tail_len)
+            prefix_idx = telegram_bot._utf16_prefix_idx(escaped, target_budget)
+            safe_idx = telegram_bot._safe_cut(escaped, prefix_idx)
+            # تصحيح 2: ذيل الاقتطاع نص عادي بدون أي وسم <i> داخل <pre>
+            cut_escaped = escaped[:safe_idx] + tail
+        else:
+            cut_escaped = escaped
+
+        block_pieces = []
+        if lbl_rendered:
+            block_pieces.append(lbl_rendered)
+        block_pieces.append(f"<pre>{cut_escaped}</pre>")
+        rendered_blocks.append("\n".join(block_pieces))
+
+    out_pieces = [header_str]
+    if skip_note and len(rendered_blocks) == 2:
+        out_pieces.append(rendered_blocks[0])
+        # تصحيح 2: سطر الملاحظة <i> مستقل تماماً خارج أي <pre>
+        out_pieces.append(skip_note)
+        out_pieces.append(rendered_blocks[1])
+    else:
+        out_pieces.extend(rendered_blocks)
+
+    if footer_str:
+        out_pieces.append(footer_str)
+
+    return "\n".join(out_pieces)
+
+
+def synthesizer_interim_message_html(gemini_text, shelby_text=None, role_id=None, session_name=None, title=None, shelby_status="waiting", error_detail=None):
+    """
+    الرسالة الحية أثناء تشغيل السبك (غلاف توافقي يستدعي render_live_html - DEC-P2-04/09):
+    - المرحلة 1 (انتظار شلبي): تعرض مسودة فلاش (جيميني) داخل <pre>، مع مؤشر انتظار شلبي.
+    - المرحلة 2 (وصول شلبي وبدء السبك): تعرض مسودة فلاش ومسودة شلبي معاً داخل <pre> لكل منهما مع صمام أمان لاقتطاع النص إن تجاوز 3400 UTF-16 لتفادي خطأ تليجرام 400.
+    """
+    if shelby_text:
+        footer = "⏳ <b>جاري السبك الثلاثي لإنتاج النسخة الذهبية المعتمدة...</b>"
+        blocks = [
+            ("⚡ <b>[مسودة فلاش]:</b>", gemini_text),
+            ("🦙 <b>[مسودة شلبي]:</b>", shelby_text),
+        ]
+        return render_live_html(
+            blocks=blocks,
+            title=title,
+            role_id=role_id,
+            session_name=session_name,
+            footer_status=footer,
+            header_prefix="📝 المسودات الأولية (فلاش + شلبي)",
+        )
 
     t_label = _local_timeout_label()
+    footer = None
     if shelby_status == "waiting":
-        blocks.append(f"⏳ <i>جاري توليد النسخة الذهبية المسبوكة مع شلبي (مهلة {t_label})...</i>")
+        footer = f"⏳ <i>جاري توليد النسخة الذهبية المسبوكة مع شلبي (مهلة {t_label})...</i>"
     elif shelby_status == "timeout":
-        blocks.append(f"⚠️ <i>تم اعتماد مسودة جيميني (تجاوز شلبي المهلة المحددة {t_label})</i>")
+        footer = f"⚠️ <i>تم اعتماد مسودة جيميني (تجاوز شلبي المهلة المحددة {t_label})</i>"
     elif shelby_status == "error":
         err_msg = html.escape(str(error_detail or "خطأ غير معروف"))
-        blocks.append(f"⚠️ <i>تم اعتماد مسودة جيميني (تعذر شلبي: {err_msg})</i>")
+        footer = f"⚠️ <i>تم اعتماد مسودة جيميني (تعذر شلبي: {err_msg})</i>"
     elif shelby_status == "noop":
-        blocks.append("ℹ️ <i>تم اعتماد مسودة جيميني (أعاد شلبي النص دون تنظيم فعلي)</i>")
+        footer = "ℹ️ <i>تم اعتماد مسودة جيميني (أعاد شلبي النص دون تنظيم فعلي)</i>"
 
-    return "\n".join(blocks)
+    blocks = [(None, gemini_text)]
+    return render_live_html(
+        blocks=blocks,
+        title=title,
+        role_id=role_id,
+        session_name=session_name,
+        footer_status=footer,
+        live_cap=0,  # المرحلة 1 لا تقتطع لأن _deliver_synthesizer يفصل المسودة الطويلة لملف .md
+        header_prefix="📝 النسخة المنظمة",
+    )
 
 
 def synthesizer_final_message_html(golden_text, gemini_text=None, shelby_text=None,

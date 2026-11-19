@@ -355,11 +355,12 @@ def send_chat_action(token, chat_id, action="typing"):
         pass
 
 
-def send_html_get_id(token, chat_id, text, reply_to_id=None, reply_markup=None):
+def send_html_get_id(token, chat_id, text, reply_to_id=None, reply_markup=None, disable_notification=False, **kwargs):
     """يرسل HTML (مقسماً لو طويل) ويرجع message_id لأول قطعة (لربط المنظم بالخام) أو None. fallback نص خام.
 
     التقسيم عبر `_html_chunks` لا `_chunk_text`: الأخير يقطع الوسوم في منتصفها فتصل قطع
     بـ`<pre>` مفتوح أو مغلق بلا فتح، فيردّ تليجرام 400 ويُفقد التنسيق (كتلة النسخ بلمسة).
+    يدعم disable_notification لكتم الإشعارات عند إرسال المسودات والقطع المتتابعة (T5 — DEC-P2-04/09).
     """
     first_id = None
     limit = Config.TELEGRAM_MAX_MSG - 50
@@ -371,6 +372,8 @@ def send_html_get_id(token, chat_id, text, reply_to_id=None, reply_markup=None):
             payload["reply_to_message_id"] = reply_to_id
         if reply_markup is not None and i == total_chunks - 1:
             payload["reply_markup"] = reply_markup
+        if disable_notification:
+            payload["disable_notification"] = True
         try:
             resp = _tg_post(token, "sendMessage", payload)
             if getattr(resp, "status_code", None) == 429:
@@ -414,16 +417,18 @@ def _extract_retry_after(resp):
     return 1.0
 
 
-def edit_telegram_message(token, chat_id, message_id, text, parse_mode="HTML", reply_markup=None, retry_429=True, raise_429=False):
+def edit_telegram_message(token, chat_id, message_id, text, parse_mode="HTML", reply_markup=None, retry_429=True, raise_429=False, **kwargs):
     """
     تعديل رسالة نصية موجودة في تليجرام عبر editMessageText.
     - عند raise_429=True: يرفع RateLimitError(retry_after) فوراً دون نوم أو إعادة محاولة متزامنة (لمسارات المرحلة 2).
     - عند raise_429=False: سلوك قديم للتوافق؛ يعيد المحاولة مرة واحدة عند HTTP 429 وفق retry_after (بحد أقصى 10ث). لا يُستخدم في مسارات المرحلة 2.
     - لو فشل التنسيق (400) يحاول مجدداً بدون parse_mode (نص عادي) لضمان وصول التعديل دون ضياع.
+    - Telegram editMessageText لا يدعم disable_notification نهائياً؛ نتجاهله صراحة إذا تم تمريره (DEC-P2-04/09).
     يرجع True لو نجح التعديل، وFalse لو فشل.
     """
     if not message_id:
         return False
+    kwargs.pop("disable_notification", None)
     payload = {
         "chat_id": chat_id,
         "message_id": message_id,
@@ -523,7 +528,7 @@ def make_sender(token, chat_id, reaction_msg_id=None):
             return _send_document(token, chat_id, fn, data, mime, caption, reply_to)
 
     return delivery.Sender(
-        send_text=lambda text, reply_to, parse_mode=None, reply_markup=None: send_html_get_id(token, chat_id, text, reply_to, reply_markup=reply_markup),
+        send_text=lambda text, reply_to, parse_mode=None, reply_markup=None, **kwargs: send_html_get_id(token, chat_id, text, reply_to, reply_markup=reply_markup, **kwargs),
         send_document=_send_doc_compat,
         send_action=lambda action="typing": send_chat_action(token, chat_id, action),
         set_reaction=(lambda emoji: set_reaction(token, chat_id, reaction_msg_id, emoji)) if reaction_msg_id else None,

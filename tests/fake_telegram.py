@@ -59,7 +59,8 @@ class FakeTelegram:
                 raise item
             return item
         if "sendMessage" in url:
-            self.sent.append(json)
+            # DEC-P2-04/09: تسجيل حمولة sendMessage بما فيها disable_notification
+            self.sent.append(dict(json) if isinstance(json, dict) else json)
         return FakeResp(200, {"ok": True, "result": {"message_id": 1}})
 
     def install(self, tb, monkeypatch):
