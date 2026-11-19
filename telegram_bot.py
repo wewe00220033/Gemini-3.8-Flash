@@ -414,10 +414,11 @@ def _extract_retry_after(resp):
     return 1.0
 
 
-def edit_telegram_message(token, chat_id, message_id, text, parse_mode="HTML", reply_markup=None):
+def edit_telegram_message(token, chat_id, message_id, text, parse_mode="HTML", reply_markup=None, retry_429=True, raise_429=False):
     """
     تعديل رسالة نصية موجودة في تليجرام عبر editMessageText.
-    - يعيد المحاولة مرة واحدة عند HTTP 429 وفق retry_after (بحد أقصى 10ث).
+    - عند raise_429=True: يرفع RateLimitError(retry_after) فوراً دون نوم أو إعادة محاولة متزامنة (لمسارات المرحلة 2).
+    - عند raise_429=False: سلوك قديم للتوافق؛ يعيد المحاولة مرة واحدة عند HTTP 429 وفق retry_after (بحد أقصى 10ث). لا يُستخدم في مسارات المرحلة 2.
     - لو فشل التنسيق (400) يحاول مجدداً بدون parse_mode (نص عادي) لضمان وصول التعديل دون ضياع.
     يرجع True لو نجح التعديل، وFalse لو فشل.
     """
@@ -436,8 +437,12 @@ def edit_telegram_message(token, chat_id, message_id, text, parse_mode="HTML", r
         r = _tg_post(token, "editMessageText", payload, timeout=15)
         if r.status_code == 429:
             delay = min(10.0, max(0.5, _extract_retry_after(r)))
-            time.sleep(delay)
-            r = _tg_post(token, "editMessageText", payload, timeout=15)
+            if raise_429:
+                from delivery import RateLimitError
+                raise RateLimitError(retry_after=delay)
+            if retry_429:
+                time.sleep(delay)
+                r = _tg_post(token, "editMessageText", payload, timeout=15)
         if r.status_code == 200:
             return True
         if parse_mode and r.status_code == 400:
@@ -447,6 +452,8 @@ def edit_telegram_message(token, chat_id, message_id, text, parse_mode="HTML", r
             return r2.status_code == 200
         return False
     except Exception as e:
+        if raise_429 and e.__class__.__name__ == "RateLimitError":
+            raise
         print(f"⚠️ edit_telegram_message error: {e}")
         return False
 
@@ -520,7 +527,7 @@ def make_sender(token, chat_id, reaction_msg_id=None):
         send_document=_send_doc_compat,
         send_action=lambda action="typing": send_chat_action(token, chat_id, action),
         set_reaction=(lambda emoji: set_reaction(token, chat_id, reaction_msg_id, emoji)) if reaction_msg_id else None,
-        edit_text=lambda message_id, text, parse_mode="HTML", reply_markup=None: edit_telegram_message(token, chat_id, message_id, text, parse_mode, reply_markup=reply_markup),
+        edit_text=lambda message_id, text, parse_mode="HTML", reply_markup=None, **kwargs: edit_telegram_message(token, chat_id, message_id, text, parse_mode, reply_markup=reply_markup, **kwargs),
         delete_text=lambda message_id: delete_message(token, chat_id, message_id),
     )
 

@@ -28,8 +28,9 @@ def updates(*messages, start_id=100):
 
 
 class FakeTelegram:
-    def __init__(self, script=None, stop_event=None):
+    def __init__(self, script=None, stop_event=None, post_script=None):
         self.script = list(script or [])
+        self.post_script = list(post_script or [])
         self.stop_event = stop_event
         self.calls = []          # كل الطلبات
         self.sent = []           # sendMessage payloads
@@ -52,6 +53,11 @@ class FakeTelegram:
 
     def post(self, url, json=None, data=None, files=None, timeout=None, **kw):
         self.calls.append({"method": "POST", "url": url, "json": json, "data": data, "timeout": timeout})
+        if self.post_script:
+            item = self.post_script.pop(0)
+            if isinstance(item, BaseException):
+                raise item
+            return item
         if "sendMessage" in url:
             self.sent.append(json)
         return FakeResp(200, {"ok": True, "result": {"message_id": 1}})

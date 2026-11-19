@@ -102,3 +102,11 @@ def test_probe_writable(tmp_path):
     f.write_text("x", encoding="utf-8")
     ok3, detail3 = store.probe_writable(str(f / "sub"))
     assert ok3 is False and detail3
+
+
+def test_atomic_write_text_roundtrip(tmp_path):
+    """التحقق الصريح من store.atomic_write_text (المرحلة 2 — DEC-P2-04): كتابة ذرية وإنشاء تلقائي للمجلد ونظافة tmp."""
+    p = tmp_path / "sub" / "draft.md"
+    store.atomic_write_text(str(p), "# مسودة\nمحتوى تجريبي")
+    assert p.read_text(encoding="utf-8") == "# مسودة\nمحتوى تجريبي"
+    assert [f for f in os.listdir(p.parent) if f.startswith(".tmp-")] == []

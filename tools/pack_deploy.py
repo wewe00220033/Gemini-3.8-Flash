@@ -46,7 +46,7 @@ INCLUDE_EXTS = (".py", ".html", ".css", ".js", ".txt", ".md", ".json")
 # وحدات بايثون في الجذر — Allowlist حازمة تمنع تسريب أي سكريبت غير موثق صراحة
 KNOWN_ROOT_MODULES = (
     "archive.py", "assistant.py", "audit.py", "backup.py", "clock.py",
-    "config.py", "delivery.py", "engines.py", "engines_openai.py", "fsm.py", "glossary.py", "heartbeat.py",
+    "config.py", "delivery.py", "drafts.py", "engines.py", "engines_openai.py", "fsm.py", "glossary.py", "heartbeat.py",
     "hot_reload.py",
     "incidents.py", "interactions_client.py", "jobs.py", "key_manager.py",
     "logkit.py", "main.py", "md_cache.py", "model_state.py", "netsession.py",

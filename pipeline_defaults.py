@@ -45,8 +45,8 @@ PROVIDER_TYPE_DEFAULTS = {
 DEFAULT_DISPLAY = {
     "mode": "single_live",
     "show_stages": ["final"],
-    "show_md_button": False,
-    "max_chunks_per_output": 0,
+    "show_md_button": True,
+    "max_chunks_per_output": 8,
     "edit_interval_s": 1.5,
     "live_cap_utf16": 3400,
     "chunk_limit_utf16": 4000,

@@ -75,14 +75,22 @@ class Sender:
         self.delete_text = delete_text
 
 
+class RateLimitError(Exception):
+    """يُرفع عند استقبال HTTP 429 من تيليجرام مع زمن الانتظار الموصى به (T4 — DEC-P2-09)."""
+
+    def __init__(self, retry_after=5.0, message=None):
+        self.retry_after = max(0.5, float(retry_after or 5.0))
+        super().__init__(message or f"Telegram rate limit: retry after {self.retry_after:.1f}s")
+
+
 class LiveMessageController:
     """
     منسق الرسالة الحية الفردية (Single-Writer) لمسار السبك (Synthesizer).
     - يضمن رسالة تليجرام حية واحدة تُعدل في مكانها عبر قفل تسلسلي وحيد (_writer_lock).
     - يمنع أي تحديثات وسيطة بعد الاعتماد النهائي (finalized=True).
-    - يدير الشبكة الوسيطة بدون إعادة محاولة عمياء لـ 429 (retry_429=False).
+    - يدير الشبكة الوسيطة بدون إعادة محاولة عمياء لـ 429 (يلتقط RateLimitError ويكبح التحديثات الوسيطة).
     - يفرض فاصلاً زمنياً (1.5-2.0ث) بين طلبات editMessageText لمنع 429 Too Many Requests.
-    - يقسم المخرجات النهائية الطويلة (> 4000 UTF-16) حتى 8 قطع كتل <pre> متوازنة.
+    - يقسم المخرجات النهائية الطويلة (> 4000 UTF-16) وفق إعدادات display وحفظ المسودات آلياً.
     """
     def __init__(self, sender, anchor, title=None, session_name=None, role_id=None, min_edit_interval=1.5,
                  chat_id=None, user_id=None, entry_id=None):
@@ -99,6 +107,7 @@ class LiveMessageController:
         self.live_mid = None
         self.finalized = False
         self._last_edit_time = 0.0
+        self._rate_limited_until = 0.0
 
     def start_live(self, initial_html):
         """إرسال الرسالة الحية الأولى في الشات وحجز live_mid."""
@@ -119,32 +128,64 @@ class LiveMessageController:
             if self.finalized or self.live_mid is None:
                 return False
             now = time.monotonic()
+            if now < self._rate_limited_until:
+                return False
             if not force and (now - self._last_edit_time) < self.min_edit_interval:
                 return False
             if getattr(self.sender, "edit_text", None) is None:
                 return False
             try:
-                ok = self.sender.edit_text(self.live_mid, html_text, parse_mode="HTML")
+                ok = self.sender.edit_text(self.live_mid, html_text, parse_mode="HTML", raise_429=True)
                 if ok:
                     self._last_edit_time = time.monotonic()
-                return ok
+                return bool(ok)
+            except RateLimitError as e:
+                self._rate_limited_until = time.monotonic() + e.retry_after
+                logger.warning("⚠️ كبح التحديث الوسيط للحية بسبب 429 تليجرام (انتظار %.1fث)", e.retry_after)
+                return False
             except Exception as e:
-                logger.debug("⚠️ فشل التحديث الوسيط للحية: %s", e)
+                msg = str(e).lower()
+                if "429" in msg or "retry after" in msg:
+                    import re
+                    m = re.search(r"retry(?:\s+after)?\s+(\d+(?:\.\d+)?)", msg)
+                    delay = float(m.group(1)) if m else 5.0
+                    self._rate_limited_until = time.monotonic() + delay
+                    logger.warning("⚠️ كبح التحديث الوسيط للحية بعد استثناء 429 (انتظار %.1fث)", delay)
+                else:
+                    logger.debug("⚠️ فشل التحديث الوسيط للحية: %s", e)
                 return False
 
     def finalize(self, golden_text, is_golden=True, telemetry=None, reply_markup=None,
-                 gemini_text=None, shelby_text=None, synth_provider=None):
+                 gemini_text=None, shelby_text=None, synth_provider=None, drafts=None):
         """
         اعتماد وتسليم النتيجة النهائية:
         1. يقفل الحية نهائياً (finalized = True).
         2. لو <= 4000 UTF-16: يستبدل الرسالة الحية في مكانها (دون زر .md).
-        3. لو > 4000 UTF-16: يجزئ حتى 8 قطع كتل <pre> متوازنة؛ القطعة 0 تحل محل الحية،
-           والقطع 1..7 تُرسل كردود متتابعة تحتها، مع وضع الزر على القطعة الأخيرة فقط.
+        3. لو > 4000 UTF-16: يجزئ كتل <pre> متوازنة؛ القطعة 0 تحل محل الحية،
+           والقطع 1..N تُرسل كردود متتابعة تحتها، مع وضع الزر على القطعة الأخيرة فقط إذا كان show_md_button مفعلاً.
+        4. يحفظ المسودة كاملة على القرص تلقائياً بعد التسليم.
         يرجع قائمة بمعرفات الرسائل المرسلة: [mid_0, mid_1, ...].
         """
+        # قراءة إعدادات العرض خارج القفل لتفادي أي بطء في قراءة الإعدادات
+        try:
+            import pipeline_config
+            display_cfg = pipeline_config.get().get("display", {})
+        except Exception:
+            display_cfg = {}
+        show_md_btn = bool(display_cfg.get("show_md_button", True))
+        max_chunks = int(display_cfg.get("max_chunks_per_output", MAX_FINAL_CHUNKS))
+
         with self._writer_lock:
             self.finalized = True
             sent_mids = []
+
+            # لو كان مؤقت التراجع نشطاً: انتظار لمرة واحدة بحد أقصى 10 ثوانٍ
+            now = time.monotonic()
+            if self._rate_limited_until > now:
+                rem = self._rate_limited_until - now
+                if rem > 0:
+                    time.sleep(min(rem, 10.0))
+
             if is_golden:
                 full_html = synthesizer_final_message_html(
                     golden_text,
@@ -164,8 +205,8 @@ class LiveMessageController:
             limit = 4000
 
             # ربط كاش .md التفاعلي وزر التصدير الأزرق (المرحلة 4 - Contract 8)
-            # يظهر فقط للنتيجة المسبوكة الذهبية (> 4000 UTF-16) على القطعة الأخيرة
-            if is_golden and (parsed_utf16 > limit or raw_utf16 > limit) and reply_markup is None:
+            # يظهر فقط للنتيجة المسبوكة الذهبية (> 4000 UTF-16) على القطعة الأخيرة وعند show_md_btn=True
+            if is_golden and show_md_btn and (parsed_utf16 > limit or raw_utf16 > limit) and reply_markup is None:
                 try:
                     import md_cache
                     md_text = golden_text
@@ -202,80 +243,98 @@ class LiveMessageController:
             can_edit = self.live_mid is not None and getattr(self.sender, "edit_text", None) is not None
             can_delete = self.live_mid is not None and getattr(self.sender, "delete_text", None) is not None
 
+            def _try_edit_text(mid, text_body, parse_mode="HTML", markup=None):
+                try:
+                    return self.sender.edit_text(mid, text_body, parse_mode=parse_mode, reply_markup=markup, raise_429=True)
+                except RateLimitError as rle:
+                    time.sleep(min(rle.retry_after, 10.0))
+                    try:
+                        return self.sender.edit_text(mid, text_body, parse_mode=parse_mode, reply_markup=markup, raise_429=False)
+                    except Exception:
+                        return False
+                except Exception:
+                    return False
+
             if (parsed_utf16 <= limit and raw_utf16 <= limit) or html_chunks_fn is None:
                 if can_edit:
-                    ok = False
-                    try:
-                        ok = self.sender.edit_text(self.live_mid, full_html, parse_mode="HTML")
-                    except Exception:
-                        ok = False
+                    ok = _try_edit_text(self.live_mid, full_html, parse_mode="HTML")
                     if not ok:
                         plain_full = _html_to_plain(full_html)
                         if _utf16_len(plain_full) <= limit:
-                            try:
-                                ok = self.sender.edit_text(self.live_mid, plain_full, parse_mode=None)
-                            except Exception:
-                                ok = False
+                            ok = _try_edit_text(self.live_mid, plain_full, parse_mode=None)
                     if ok:
                         sent_mids.append(self.live_mid)
-                        return sent_mids
 
-                mid = self.sender.send_text(full_html, self.anchor, "HTML")
-                if mid:
-                    sent_mids.append(mid)
-                    if can_delete:
-                        try:
-                            self.sender.delete_text(self.live_mid)
-                        except Exception:
-                            pass
-                return sent_mids
+                if not sent_mids:
+                    mid = self.sender.send_text(full_html, self.anchor, "HTML")
+                    if mid:
+                        sent_mids.append(mid)
+                        if can_delete:
+                            try:
+                                self.sender.delete_text(self.live_mid)
+                            except Exception:
+                                pass
 
-            raw_chunks = list(html_chunks_fn(full_html, limit))
-            total_chunks = len(raw_chunks)
-            if total_chunks > MAX_FINAL_CHUNKS:
-                raw_chunks = raw_chunks[:MAX_FINAL_CHUNKS]
-                notice = "\n\n<i>[...تم إرسال أول 8 أجزاء فقط لاستيفاء الحد الأقصى للشات. يمكنك طلب الملف كاملاً...]</i>"
-                raw_chunks[-1] = raw_chunks[-1] + notice
-                total_chunks = MAX_FINAL_CHUNKS
-
-            chunk_0 = raw_chunks[0]
-            first_ok = False
-            first_markup = reply_markup if total_chunks == 1 else None
-            if can_edit:
-                try:
-                    first_ok = self.sender.edit_text(self.live_mid, chunk_0, parse_mode="HTML", reply_markup=first_markup)
-                except Exception:
-                    first_ok = False
-                if not first_ok:
-                    plain_0 = _html_to_plain(chunk_0)
-                    try:
-                        first_ok = self.sender.edit_text(self.live_mid, plain_0, parse_mode=None, reply_markup=first_markup)
-                    except Exception:
-                        first_ok = False
-                if first_ok:
-                    sent_mids.append(self.live_mid)
-
-            if not first_ok:
-                mid_0 = self.sender.send_text(chunk_0, self.anchor, "HTML", reply_markup=first_markup)
-                if mid_0:
-                    sent_mids.append(mid_0)
-                    if can_delete:
-                        try:
-                            self.sender.delete_text(self.live_mid)
-                        except Exception:
-                            pass
-                parent_anchor = mid_0 or self.anchor
             else:
-                parent_anchor = self.live_mid
+                raw_chunks = list(html_chunks_fn(full_html, limit))
+                total_chunks = len(raw_chunks)
+                if max_chunks > 0 and total_chunks > max_chunks:
+                    raw_chunks = raw_chunks[:max_chunks]
+                    notice = f"\n\n<i>[...تم إرسال أول {max_chunks} أجزاء فقط لاستيفاء الحد الأقصى للشات. يمكنك طلب الملف كاملاً...]</i>"
+                    raw_chunks[-1] = raw_chunks[-1] + notice
+                    total_chunks = max_chunks
 
-            for i in range(1, total_chunks):
-                chunk_i = raw_chunks[i]
-                is_last = (i == total_chunks - 1)
-                markup = reply_markup if is_last else None
-                sub_mid = self.sender.send_text(chunk_i, parent_anchor, "HTML", reply_markup=markup)
-                if sub_mid:
-                    sent_mids.append(sub_mid)
-                    parent_anchor = sub_mid
+                chunk_0 = raw_chunks[0]
+                first_ok = False
+                first_markup = reply_markup if total_chunks == 1 else None
+                if can_edit:
+                    first_ok = _try_edit_text(self.live_mid, chunk_0, parse_mode="HTML", markup=first_markup)
+                    if not first_ok:
+                        plain_0 = _html_to_plain(chunk_0)
+                        first_ok = _try_edit_text(self.live_mid, plain_0, parse_mode=None, markup=first_markup)
+                    if first_ok:
+                        sent_mids.append(self.live_mid)
+
+                if not first_ok:
+                    mid_0 = self.sender.send_text(chunk_0, self.anchor, "HTML", reply_markup=first_markup)
+                    if mid_0:
+                        sent_mids.append(mid_0)
+                        if can_delete:
+                            try:
+                                self.sender.delete_text(self.live_mid)
+                            except Exception:
+                                pass
+                    parent_anchor = mid_0 or self.anchor
+                else:
+                    parent_anchor = self.live_mid
+
+                for i in range(1, total_chunks):
+                    chunk_i = raw_chunks[i]
+                    is_last = (i == total_chunks - 1)
+                    markup = reply_markup if is_last else None
+                    sub_mid = self.sender.send_text(chunk_i, parent_anchor, "HTML", reply_markup=markup)
+                    if sub_mid:
+                        sent_mids.append(sub_mid)
+                        parent_anchor = sub_mid
+
+            # حفظ المسودات التلقائي على القرص بعد نجاح الإرسال والتسليم
+            try:
+                import drafts as drafts_mod
+                effective_drafts = drafts
+                if effective_drafts is None:
+                    effective_drafts = []
+                    if gemini_text:
+                        effective_drafts.append(("فلاش", gemini_text))
+                    if shelby_text:
+                        effective_drafts.append(("شلبي", shelby_text))
+                drafts_mod.write(
+                    entry_id=self.entry_id,
+                    final_text=golden_text if is_golden else None,
+                    drafts=effective_drafts,
+                    meta={"title": self.title, "session_name": self.session_name, "role_id": self.role_id}
+                )
+            except Exception as e:
+                logger.warning("⚠️ فشل حفظ المسودة التلقائية: %s", e)
 
             return sent_mids
 

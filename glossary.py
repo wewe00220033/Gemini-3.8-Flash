@@ -243,12 +243,9 @@ class Glossary:
             if state in ("throttled", "unchanged"):
                 return False
             if state == "missing":
-                doc = _default_doc()
-                self.doc = doc
-                self._present_default_ids = _present_default_ids_in(doc)
-                self._compile()
-                self._write(doc)
-                return True
+                if self._watcher.mark_bad(("missing", 0)):
+                    logger.warning("⚠️ ملف glossary.json غير موجود على القرص أثناء التحديث الحي — الإبقاء على النسخة الصالحة في الذاكرة")
+                return False
             try:
                 with open(self.path, "r", encoding="utf-8") as f:
                     doc = json.load(f)
