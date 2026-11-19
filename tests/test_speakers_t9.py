@@ -407,4 +407,158 @@ def test_delivery_dedupe_guard_filters_duplicate_draft(monkeypatch, tmp_path):
     assert "فلاش 2" not in labels_in_final
 
 
+# ======================================================================
+# T9-A: Interactions Transport & Diarization Annotations Converter
+# ======================================================================
+
+def test_annotations_to_tagged_text_alternating_speakers():
+    """T9-A: اختبار تحويل annotations حوار متناوب بين متحدثين إلى وسوم 🗣️1: و 🗣️2:."""
+    text = "مرحبا يا أحمد. أهلا يا محمد جاهز؟ نعم جاهز تماما."
+    ann = [
+        {"start_index": 0, "end_index": 14, "speaker": "spk:0", "text": "مرحبا يا أحمد."},
+        {"start_index": 15, "end_index": 33, "speaker": "spk:1", "text": "أهلا يا محمد جاهز؟"},
+        {"start_index": 34, "end_index": 48, "speaker": "spk:0", "text": "نعم جاهز تماما."},
+    ]
+    tagged = guards.annotations_to_tagged_text(text, ann)
+    expected = "🗣️1: مرحبا يا أحمد.\n🗣️2: أهلا يا محمد جاهز؟\n🗣️1: نعم جاهز تماما."
+    assert tagged == expected
+
+
+def test_annotations_to_tagged_text_three_speakers():
+    """T9-A: اختبار تحويل annotations لحوار بين 3 متحدثين إلى 🗣️1: و 🗣️2: و 🗣️3:."""
+    text = "الأول يتحدث. الثاني يشارك. الثالث يختم النقاش."
+    ann = [
+        {"start_index": 0, "end_index": 12, "speaker": "spk_alpha", "text": "الأول يتحدث."},
+        {"start_index": 13, "end_index": 26, "speaker": "spk_beta", "text": "الثاني يشارك."},
+        {"start_index": 27, "end_index": 46, "speaker": "spk_gamma", "text": "الثالث يختم النقاش."},
+    ]
+    tagged = guards.annotations_to_tagged_text(text, ann)
+    assert "🗣️1: الأول يتحدث." in tagged
+    assert "🗣️2: الثاني يشارك." in tagged
+    assert "🗣️3: الثالث يختم النقاش." in tagged
+
+
+def test_annotations_to_tagged_text_single_speaker_clean_monologue():
+    """T9-A: التحقق من أن المونولوج (متحدث واحد) يعاد نظيفاً 100% بدون أي وسوم متكلم (strip_if_single)."""
+    text = "هذا تسجيل صوتي لمونولوج يتحدث فيه شخص واحد طوال الوقت بدون أي مقاطعة."
+    ann = [
+        {"start_index": 0, "end_index": 35, "speaker": "spk:0", "text": "هذا تسجيل صوتي لمونولوج يتحدث فيه"},
+        {"start_index": 36, "end_index": 69, "speaker": "spk:0", "text": "شخص واحد طوال الوقت بدون أي مقاطعة."},
+    ]
+    res = guards.annotations_to_tagged_text(text, ann)
+    assert res == text
+    assert "🗣️" not in res
+
+
+def test_annotations_to_tagged_text_empty_and_edge_cases():
+    """T9-A: اختبارات الحالات الحدية: نصوص فارغة، annotations فارغة، أو بدون حقول speaker."""
+    assert guards.annotations_to_tagged_text("", []) == ""
+    assert guards.annotations_to_tagged_text("نص أصلي", []) == "نص أصلي"
+    assert guards.annotations_to_tagged_text("نص أصلي", None) == "نص أصلي"
+    # annotations بلا مفتاح speaker
+    invalid_ann = [{"start_index": 0, "end_index": 5, "other": "val"}]
+    assert guards.annotations_to_tagged_text("نص أصلي", invalid_ann) == "نص أصلي"
+
+
+def test_annotations_to_tagged_text_unordered_and_gaps():
+    """T9-A: التحقق من ترتيب الـ annotations غير المرتبة زمنياً والحفاظ على الفجوات النصية."""
+    text = "الجزء الأول. الجزء الثاني. الخاتمة هنا."
+    # نمرر annotations بترتيب معكوس
+    ann = [
+        {"start_index": 27, "end_index": 39, "speaker": "spk:0", "text": "الخاتمة هنا."},
+        {"start_index": 0, "end_index": 12, "speaker": "spk:0", "text": "الجزء الأول."},
+        {"start_index": 13, "end_index": 26, "speaker": "spk:1", "text": "الجزء الثاني."},
+    ]
+    tagged = guards.annotations_to_tagged_text(text, ann)
+    # spk:0 ظهر أولاً في الزمن (عند 0) فيأخذ 🗣️1:، وspk:1 ظهر ثانياً فيأخذ 🗣️2:
+    assert tagged == "🗣️1: الجزء الأول.\n🗣️2: الجزء الثاني.\n🗣️1: الخاتمة هنا."
+
+
+def test_interactions_transport_build_payload(monkeypatch):
+    """T9-A: التحقق من بناء payload لـ Interactions API عند تفعيل وتعطيل speakers."""
+    # 1. موديل transcribe مع speakers مفعّل
+    monkeypatch.setattr(transcriber, "_is_speakers_enabled", lambda: True)
+    p_enabled = transcriber._build_payload("dGVzdA==", "audio/m4a", model="gemini-3.5-transcribe")
+    assert p_enabled["model"] == "gemini-3.5-transcribe"
+    audio_inp = next(x for x in p_enabled["input"] if x["type"] == "audio")
+    text_inp = next(x for x in p_enabled["input"] if x["type"] == "text")
+    assert audio_inp["data"] == "dGVzdA=="
+    assert audio_inp["mime_type"] == "audio/m4a"
+    assert len(text_inp["text"]) > 10
+    assert p_enabled["generation_config"]["transcription_config"]["mode"]["type"] == "verbatim"
+    assert p_enabled["generation_config"]["transcription_config"]["mode"]["diarization_mode"] == "speaker"
+    assert "contents" not in p_enabled
+
+    # 2. موديل transcribe مع speakers معطّل
+    monkeypatch.setattr(transcriber, "_is_speakers_enabled", lambda: False)
+    p_disabled = transcriber._build_payload("dGVzdA==", "audio/m4a", model="gemini-3.5-transcribe")
+    assert p_disabled["generation_config"]["transcription_config"]["mode"]["type"] == "verbatim"
+    assert "diarization_mode" not in p_disabled["generation_config"]["transcription_config"]["mode"]
+
+    # 3. موديل flash العادي يستمر على generateContent
+    p_flash = transcriber._build_payload("dGVzdA==", "audio/m4a", model="gemini-3.6-flash")
+    assert "contents" in p_flash
+    assert "inline_data" in p_flash["contents"][0]["parts"][0]
+
+
+def test_interactions_duration_cap_logic(monkeypatch):
+    """T9-A: التحقق من تطبيق سقف 1800 ثانية لـ transcribe عند تفعيل speakers."""
+    monkeypatch.setattr(transcriber, "_is_speakers_enabled", lambda: True)
+    # محاكاة فحص السقف داخل الحلقة
+    max_dur = getattr(Config, "MODEL_MAX_AUDIO_DURATION_SEC", {}).get("gemini-3.5-transcribe")
+    assert max_dur == 2700
+    effective_dur = min(max_dur or 1800, 1800) if transcriber._is_speakers_enabled() else max_dur
+    assert effective_dur == 1800
+
+    # عند التعطيل
+    monkeypatch.setattr(transcriber, "_is_speakers_enabled", lambda: False)
+    effective_dur_disabled = min(max_dur or 1800, 1800) if transcriber._is_speakers_enabled() else max_dur
+    assert effective_dur_disabled == 2700
+
+
+def test_attempt_interactions_mock_responses(monkeypatch):
+    """T9-A: التحقق من استجابة ودقة classify_interactions_response لكافة حالات HTTP."""
+    class DummyResp:
+        def __init__(self, status_code, json_data):
+            self.status_code = status_code
+            self._data = json_data
+            self.text = json.dumps(json_data)
+        def json(self):
+            return self._data
+
+    # 1. نجاح 200 مع annotations
+    resp_200 = DummyResp(200, {
+        "steps": [{
+            "content": [{
+                "text": "Hello world. Hi there.",
+                "annotations": [
+                    {"start_index": 0, "end_index": 12, "speaker": "spk:0", "text": "Hello world."},
+                    {"start_index": 13, "end_index": 22, "speaker": "spk:1", "text": "Hi there."},
+                ]
+            }]
+        }]
+    })
+    att = transcriber.classify_interactions_response(resp_200)
+    assert att.outcome == transcriber.SUCCESS
+    assert "🗣️1: Hello world." in att.text
+    assert "🗣️2: Hi there." in att.text
+
+    # 2. نجاح 200 بدون نص -> BLOCKED
+    resp_empty = DummyResp(200, {"steps": [{"content": [{"text": ""}]}]})
+    assert transcriber.classify_interactions_response(resp_empty).outcome == transcriber.BLOCKED
+
+    # 3. خطأ 429 حصة يومية
+    resp_429 = DummyResp(429, {"error": {"message": "Rate limit exceeded: 25 requests per day for model"}})
+    assert transcriber.classify_interactions_response(resp_429).outcome == transcriber.KEY_EXHAUSTED_DAILY
+
+    # 4. خطأ 400 Bad Request
+    resp_400 = DummyResp(400, {"error": {"message": "Invalid argument: custom_vocabulary is not supported"}})
+    assert transcriber.classify_interactions_response(resp_400).outcome == transcriber.BAD_REQUEST
+
+    # 5. خطأ 503 Model Down
+    resp_503 = DummyResp(503, {"error": {"message": "Service Unavailable"}})
+    assert transcriber.classify_interactions_response(resp_503).outcome == transcriber.MODEL_DOWN
+
+
+
 

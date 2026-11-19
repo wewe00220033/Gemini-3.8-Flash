@@ -176,6 +176,8 @@ def transcribe_audio_bytes_ex(audio_bytes, mime_type="audio/mp4", duration_sec=N
                 continue
 
             max_dur = getattr(Config, "MODEL_MAX_AUDIO_DURATION_SEC", {}).get(model)
+            if model == "gemini-3.5-transcribe" and _is_speakers_enabled():
+                max_dur = min(max_dur or 1800, 1800)
             if duration_sec and max_dur and duration_sec > max_dur:
                 info["skipped"].append(f"{_short(model)}: مدة الصوت ({int(duration_sec)}ث) تتجاوز سقف الموديل ({max_dur}ث)")
                 reasons[model] = f"مدة الصوت تتجاوز سقف الموديل ({max_dur // 60} دقيقة)"
@@ -340,6 +342,9 @@ def _deferral(reasons, tried_any):
 # محاولة واحدة + التصنيف
 # ======================================================================
 def _attempt(model, key_str, payload, timeout):
+    transport = getattr(Config, "MODEL_TRANSPORT", {}).get(model, "generateContent")
+    if transport == "interactions":
+        return _attempt_interactions(model, key_str, payload, timeout)
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
     headers = {"x-goog-api-key": key_str, "Content-Type": "application/json"}
     t0 = time.time()
@@ -353,6 +358,81 @@ def _attempt(model, key_str, payload, timeout):
     except requests.exceptions.RequestException as e:
         return Attempt(NETWORK, detail=str(e)[:100], elapsed=time.time() - t0)
     att = classify_response(resp)
+    att.elapsed = time.time() - t0
+    return att
+
+
+def _extract_text_interactions(data):
+    """يستخرج النص من رد Interactions API ويحوّل الـ annotations إلى وسوم 🗣️N: لو وجدت (T9-A — DEC-P2-01)."""
+    if not isinstance(data, dict):
+        return ""
+    if "steps" in data:
+        try:
+            content = data["steps"][0]["content"][0]
+        except (KeyError, IndexError, TypeError):
+            return ""
+        text = (content.get("text") or "").strip()
+        annotations = content.get("annotations") or []
+        if annotations:
+            import guards
+            text = guards.annotations_to_tagged_text(text, annotations)
+        return text.strip()
+    return _extract_text(data)
+
+
+def classify_interactions_response(resp):
+    """يحوّل رد Interactions API إلى Attempt مصنف (بدون أي أثر جانبي) (T9-A)."""
+    status = getattr(resp, "status_code", 0)
+    body = _safe_json(resp)
+    err = (body.get("error") or {}) if isinstance(body, dict) else {}
+    msg = str(err.get("message") or "")
+    err_status = str(err.get("status") or "")
+    raw = f"{msg} {err_status}".lower()
+
+    if status == 200:
+        text = _extract_text_interactions(body)
+        if text:
+            return Attempt(SUCCESS, text=text, status=200)
+        return Attempt(BLOCKED, detail=_block_reason(body), status=200)
+
+    if status == 429:
+        retry_after = _parse_retry_delay(resp, body)
+        if _DAILY_RE.search(raw):
+            return Attempt(KEY_EXHAUSTED_DAILY, detail=msg[:150], retry_after=retry_after, status=429)
+        return Attempt(KEY_RATE_LIMITED, detail=msg[:150], retry_after=retry_after, status=429)
+
+    if status in (401, 403, 402):
+        return Attempt(KEY_INVALID, detail=msg[:150] or f"HTTP {status}", status=status)
+
+    if status == 400:
+        if any(h in raw for h in _KEY_HINTS):
+            return Attempt(KEY_INVALID, detail=msg[:150], status=400)
+        return Attempt(BAD_REQUEST, detail=msg[:150], status=400)
+
+    if status == 404:
+        return Attempt(MODEL_NOT_FOUND, detail=msg[:150], status=404)
+
+    if status >= 500 or status == 408:
+        return Attempt(MODEL_DOWN, detail=msg[:150] or f"HTTP {status}", status=status)
+
+    # أي كود تاني غير متوقع: نعامله كمشكلة طلب (لا نحرق مفاتيح)
+    return Attempt(BAD_REQUEST, detail=f"HTTP {status}: {msg[:120] or str(getattr(resp, 'text', ''))[:120]}", status=status)
+
+
+def _attempt_interactions(model, key_str, payload, timeout):
+    """محاولة استدعاء Interactions API لموديلات التخصص مثل gemini-3.5-transcribe (T9-A — DEC-P2-01)."""
+    url = "https://generativelanguage.googleapis.com/v1beta/interactions"
+    headers = {"x-goog-api-key": key_str, "Content-Type": "application/json"}
+    t0 = time.time()
+    try:
+        resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
+    except requests.exceptions.ReadTimeout:
+        return Attempt(MODEL_SLOW, detail="read timeout", elapsed=time.time() - t0)
+    except requests.exceptions.Timeout:
+        return Attempt(NETWORK, detail="connect timeout", elapsed=time.time() - t0)
+    except requests.exceptions.RequestException as e:
+        return Attempt(NETWORK, detail=str(e)[:100], elapsed=time.time() - t0)
+    att = classify_interactions_response(resp)
     att.elapsed = time.time() - t0
     return att
 
@@ -399,17 +479,49 @@ def classify_response(resp):
 # ======================================================================
 # بناء الطلب
 # ======================================================================
+def _is_speakers_enabled(speakers_cfg=None):
+    if speakers_cfg is not None:
+        return bool(speakers_cfg.get("enabled", False)) if isinstance(speakers_cfg, dict) else False
+    try:
+        import pipeline_config
+        cfg = pipeline_config.get()
+        spk = (cfg.get("speakers") or {}) if isinstance(cfg, dict) else {}
+        return bool(spk.get("enabled", False))
+    except Exception:
+        return False
+
+
 def _build_payload(b64_data, mime_type, model=None, context_text=""):
     """
     الوضع الافتراضي (المجرَّب): القواعد كجزء نصي بجانب الصوت.
     الوضع الاختياري (Config.USE_SYSTEM_INSTRUCTION): القواعد في system_instruction.
     thinkingConfig يُرسل فقط لو الموديل مذكور في Config.MODEL_THINKING_LEVEL (قرار المالك: فاضي).
     context_text (المرحلة 4، 10 §2): L1 سياق الجلسة — يُلحق بطبقة A عند وجوده فقط؛ "" = الوضع البسيط.
+    Interactions API (T9-A): إذا كان مسار النقل للموديل هو interactions، يُبنى البايلود المناسب له شاملاً القواعد والصوت وفصل المتحدثين.
     """
-    audio_part = {"inline_data": {"mime_type": mime_type, "data": b64_data}}
     prompt = transcription_prompt()
     if context_text:
         prompt = prompt + "\n\n" + context_text
+
+    transport = getattr(Config, "MODEL_TRANSPORT", {}).get(model, "generateContent")
+    if transport == "interactions":
+        mode_dict = {"type": "verbatim"}
+        if _is_speakers_enabled():
+            mode_dict["diarization_mode"] = "speaker"
+        return {
+            "model": model,
+            "input": [
+                {"type": "text", "text": prompt},
+                {"type": "audio", "data": b64_data, "mime_type": mime_type},
+            ],
+            "generation_config": {
+                "transcription_config": {
+                    "mode": mode_dict
+                }
+            }
+        }
+
+    audio_part = {"inline_data": {"mime_type": mime_type, "data": b64_data}}
     if Config.USE_SYSTEM_INSTRUCTION:
         payload = {
             "system_instruction": {"parts": [{"text": prompt}]},

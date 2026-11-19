@@ -48,11 +48,16 @@ class Config:
     # الترتيب = أولوية التجربة. القائمة الكاملة المسموح بها (بدون Lite نهائياً):
     _ALL_MODELS = [
         "gemini-3.6-flash",       # الأساسي — الأثبت في الاختبار الميداني (6–8 ث، 200 OK) (20 طلب/مشروع)
-        "gemini-3.5-transcribe",  # الاحتياطي — محرك جوجل التخصصي للصوت، الأسرع (3–4 ث) (25 طلب/مشروع)
+        "gemini-3.5-transcribe",  # محرك جوجل التخصصي للصوت، الأسرع (3–4 ث) ويدعم فصل المتحدثين عبر Interactions (25 طلب/مشروع)
         "gemini-3.8-flash",       # معطّل (انظر DISABLED_MODELS) — 503/Timeout متكرر مع الصوت بتاريخ 2026-10-23
     ]
     # موديلات معطّلة مؤقتاً: لن تُجرَّب أبداً. لإعادة 3.8 احذفه من هنا فقط (سطر واحد).
     DISABLED_MODELS = {"gemini-3.8-flash"}
+
+    # بروتوكول النقل للموديلات (generateContent الافتراضي، أو interactions للـ transcribe) (T9-A)
+    MODEL_TRANSPORT = {
+        "gemini-3.5-transcribe": "interactions",
+    }
 
     # (حلقة عادية بدل comprehension لأن Python لا يرى متغيرات الكلاس داخل comprehension)
     MODELS = []

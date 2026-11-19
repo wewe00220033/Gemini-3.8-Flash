@@ -253,7 +253,7 @@ def test_503_on_primary_opens_circuit_and_next_request_skips_it(engine, monkeypa
     # الطلب التالي: لا يلمس 3.6 أصلاً
     calls.clear()
     text, model, _, info = engine.transcribe_audio_bytes_ex(b"abc")
-    assert model == M2 and all(M2 in c["url"] for c in calls) and len(calls) == 1
+    assert model == M2 and all((M2 in c["url"] or c.get("json", {}).get("model") == M2) for c in calls) and len(calls) == 1
     assert info["skipped"] and "503" in info["skipped"][0]
 
 

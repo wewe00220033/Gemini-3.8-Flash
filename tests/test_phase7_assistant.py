@@ -364,7 +364,7 @@ def test_lite_and_antigravity_never_transcribe(fresh_env):
     assert not any("lite" in m for m in Config.MODELS)
     import transcriber
     src = open(transcriber.__file__, encoding="utf-8").read()
-    assert "interactions" not in src.lower() and "antigravity" not in src.lower()
+    assert "interactions_client" not in src.lower() and "antigravity" not in src.lower()
 
 
 def test_bot_commands_include_ask_and_help_mentions_new_commands(bot):

@@ -225,3 +225,90 @@ def is_duplicate_draft(text: str, existing_texts: Iterable[str], threshold: floa
     return False
 
 
+def annotations_to_tagged_text(text: str, annotations: list, tag_fmt: str = "🗣️{n}:") -> str:
+    """
+    يحوّل نص التفريغ وقائمة annotations المتحدثين (من Interactions API) إلى نص موسوم بـ 🗣️N: (T9-A — DEC-P2-01).
+    - يرتب annotations زمنياً حسب start_index.
+    - يرقم المتحدثين فريداً بحسب أسبقية أول ظهور (spk:0 -> 🗣️1:, spk:1 -> 🗣️2:).
+    - إذا كان إجمالي المتحدثين الفريدين <= 1: يعيد النص الأصلي مجرداً دون أي وسوم (حفاظاً على نقاء المونولوج strip_if_single).
+    - يدمج المقاطع المتتالية لنفس المتحدث تحت نفس الوسم، مع الحفاظ التام على الفجوات البينية.
+    دالة نقية 100% بدون أي استيرادات خارجية أو آثار جانبية.
+    """
+    if not text:
+        return ""
+    if not annotations:
+        return text
+
+    valid_ann = []
+    for a in annotations:
+        if isinstance(a, dict) and "speaker" in a and "start_index" in a and "end_index" in a:
+            valid_ann.append(a)
+
+    if not valid_ann:
+        return text
+
+    # ترتيب حسب start_index لضمان التسلسل الزمني حتى لو الرد جاء غير مرتب
+    valid_ann.sort(key=lambda x: int(x.get("start_index", 0)))
+
+    # حصر وترقيم المتحدثين الفريدين بترتيب أول ظهور
+    unique_speakers = []
+    speaker_map = {}
+    for a in valid_ann:
+        spk = str(a.get("speaker"))
+        if spk not in speaker_map:
+            unique_speakers.append(spk)
+            speaker_map[spk] = len(unique_speakers)  # 1-indexed
+
+    # لو كل المقاطع لمتحدث واحد فقط -> مونولوج -> نص نظيف تماماً بلا أي وسوم
+    if len(unique_speakers) <= 1:
+        return text
+
+    # تجميع المقاطع المتتالية لنفس المتحدث
+    blocks = []
+    curr_spk = None
+    curr_pieces = []
+    last_end = 0
+
+    for a in valid_ann:
+        s_idx = int(a.get("start_index", 0))
+        e_idx = int(a.get("end_index", 0))
+        spk = str(a.get("speaker"))
+
+        gap = ""
+        if s_idx > last_end:
+            gap = text[last_end:s_idx]
+
+        segment_text = text[s_idx:e_idx] if e_idx <= len(text) else (a.get("text") or "")
+        last_end = max(last_end, e_idx)
+
+        if spk == curr_spk:
+            if gap:
+                curr_pieces.append(gap)
+            curr_pieces.append(segment_text)
+        else:
+            if curr_spk is not None:
+                blocks.append((curr_spk, "".join(curr_pieces).strip()))
+            curr_spk = spk
+            curr_pieces = []
+            if gap and not blocks:
+                curr_pieces.append(gap)
+            curr_pieces.append(segment_text)
+
+    if curr_spk is not None and curr_pieces:
+        if last_end < len(text):
+            curr_pieces.append(text[last_end:])
+        blocks.append((curr_spk, "".join(curr_pieces).strip()))
+
+    lines = []
+    for spk, blk_text in blocks:
+        blk_text = blk_text.strip()
+        if not blk_text:
+            continue
+        spk_num = speaker_map[spk]
+        tag = tag_fmt.format(n=spk_num)
+        lines.append(f"{tag} {blk_text}")
+
+    return "\n".join(lines)
+
+
+

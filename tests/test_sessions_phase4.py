@@ -302,7 +302,13 @@ def _install_post(monkeypatch, engine, handler):
 
 
 def _prompt_of(call):
-    return call["json"]["contents"][0]["parts"][1]["text"]
+    j = call.get("json", {})
+    if "contents" in j:
+        return j["contents"][0]["parts"][1]["text"]
+    for inp in j.get("input", []):
+        if inp.get("type") == "text":
+            return inp.get("text", "")
+    return ""
 
 
 def _has_ctx(call):
