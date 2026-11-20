@@ -2,15 +2,15 @@
 
 > **منظومة هندسية متكاملة (DevOps Resilient Architecture) لتفريغ الصوت بدقة خيالية، تدعم العامية المصرية، تحافظ على المصطلحات التقنية بالإنجليزية، وتعمل كـ بوت تليجرام وواجهة ويب صوتية حقيقية وخادم محلي في نفس الوقت 24/7 وبصفر تكلفة!**
 
-[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
+[![Python 3.12](https://img.shields.io/badge/Python-3.12-blue.svg)](https://www.python.org/)
 [![Google Gemini API](https://img.shields.io/badge/Gemini-3.6%20Flash%20%E2%9E%94%203.5%20Transcribe-orange.svg)](https://aistudio.google.com/)
 [![Telegram Bot](https://img.shields.io/badge/Telegram-Bot%20Ready-blue.svg)](https://telegram.org/)
 [![Web UI](https://img.shields.io/badge/Web%20UI-Real%20Audio-green.svg)](http://localhost:8080)
 [![License: MIT](https://img.shields.io/badge/License-MIT-purple.svg)](LICENSE)
 
 **🌿 الفرع:** `A-test` · **🏷️ الإصدار:** `2.0.0-phase7.2`  
-**🔍 آخر تدقيق مستقل:** 2026-11-15 — `Arena-Ai-Agent/Claude-Fable/` خطة v2.4 مكتملة بالكامل (CF-0 → CF-5)؛ HEAD الكود `fbbd123`.  
-**🧪 الاختبارات/CI:** ✅ `669 passed, 1 skipped` (670 مجموعاً) محلياً على Windows/Python 3.12؛ GitHub Actions run `43680035996` عند `fbbd123` ناجح (Lint/Compile/Tests) — مصفوفة CI محصورة على Python 3.12 منذ `59b40cf`. تشمل الاختبارات المعمارية الثمانية للخطة 04 §3.1.  
+**🔍 آخر تدقيق مستقل:** 2026-11-20 — المرحلة الثانية (`زيزو/`) مغلقة بـ Tag `phase2-close`؛ الدفعة الأولى من المرحلة الثالثة (P3-01 → P3-03 + Field Stop 6) معتمدة بـ CI؛ آخر كوميت كود `b269272`. التفاصيل في `زيزو/PHASE2-CLOSE.md` و`PROGRESS.md` و`RESUME.md`. (خطة Claude-Fable v2.4 السابقة مكتملة CF-0 → CF-5 عند `fbbd123`.)  
+**🧪 الاختبارات/CI:** ✅ `799 passed, 1 skipped` (800 مجموعاً) محلياً؛ GitHub Actions run `44698130924` عند `39e1813` ناجح (Lint/Compile/Tests) — مصفوفة CI محصورة على Python 3.12 منذ `59b40cf`. تشمل الاختبارات المعمارية الثمانية للخطة 04 §3.1 واختبارات المرحلتين الثانية والثالثة.  
 
 ---
 
@@ -20,8 +20,9 @@
    - يفهم نبرة الصوت والعامية المصرية بدون اختلاق أو تخمين زائف.
    - يكتب المصطلحات البرمجية والتقنية بأحرفها الإنجليزية القياسية (`GitHub, AI, Python, Gist, IP, API, DevOps, Docker`).
 2. **الموديلات المعتمدة (بدون Lite نهائياً):**
-   - 🥇 **`gemini-3.6-flash` (الأساسي):** الأثبت في الاختبار الميداني — رد في 6–8 ث بدقة كاملة في العامية (20 طلب/مشروع/يوم).
-   - 🥈 **`gemini-3.5-transcribe` (الاحتياطي):** محرك جوجل التخصصي للصوت، الأسرع (3–4 ث) (25 طلب/مشروع/يوم).
+   - 🥇 **`gemini-3.6-flash` (الافتراضي الأول في الكود):** الأثبت في الاختبار الميداني — رد في 6–8 ث بدقة كاملة في العامية (20 طلب/مشروع/يوم).
+   - 🥈 **`gemini-3.5-transcribe` (الافتراضي الثاني في الكود):** محرك جوجل التخصصي للصوت، الأسرع (3–4 ث) ويدعم فصل المتحدثين عبر Interactions (25 طلب/مشروع/يوم).
+   - 🔀 **ترتيب الأولوية من البيئة بلا لمس الكود (`MODELS_ORDER` — المرحلة 3 / P3-01):** الترتيب الافتراضي في الكود يبقى كما هو للتوافق مع الاختبارات القائمة، ويُعاد ترتيبه فورياً من لوحة الاستضافة: `MODELS_ORDER=gemini-3.5-transcribe,gemini-3.6-flash` يقدّم `3.5-transcribe` أولاً (المذكورون أولاً بترتيبهم، ثم الباقي بترتيبه الأصلي؛ الأسماء غير المعروفة تُتجاهل، و`DISABLED_MODELS` تُطبَّق دائماً بعده). مثبت ميدانياً (Field Stop 6): نزول زمن التفريغ الكلي من ~37.5 ث إلى 7.8 ث وصفر `MODEL_SLOW`.
    - ⏸️ **`gemini-3.8-flash` معطّل** منذ 2026-10-23 (503 / Timeout متكرر مع الصوت — حادثة 01). موجود في `Config.DISABLED_MODELS`؛ لإعادته احذفه من هناك بسطر واحد.
    - 🚫 **موديل Lite مستبعد نهائياً** لضمان أعلى جودة.
 3. **Failover v2 فوري وذكي (المرحلة 2 — بعد حادثة 01):**
