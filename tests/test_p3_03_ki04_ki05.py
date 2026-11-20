@@ -70,13 +70,95 @@ def test_inject_system_context_max_owner_chars_none_preserves_full_context_ki_05
     assert "<owner_context>" in res
 
 
-def test_delivery_source_has_no_raw_max_owner_chars_limit_ki_05():
-    """KI-05 (P3-03): التأكد من إزالة max_owner_chars المربوط بالبايت في delivery واستبداله بـ None."""
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    delivery_path = os.path.join(root, "delivery.py")
-    with open(delivery_path, "r", encoding="utf-8") as f:
-        src = f.read()
+def test_delivery_pipeline_passes_max_owner_chars_none_behaviorally_ki_05(monkeypatch, tmp_path):
+    """KI-05 (A4 — DEC-P3-01): اختبار سلوكي يحل محل الاختبار النصي السابق.
+    يشغّل delivery._deliver_synthesizer بخط إنتاج وهمي (Stubs) مع memory.enabled=True وسياق مالك حقيقي
+    على القرص، ويلتقط كل نداء فعلي لـ text_assist.inject_system_context ويتحقق أن:
+      1) max_owner_chars الممرَّر هو None في كل مرحلة (لا قص مزدوج بالحروف في delivery)،
+      2) سياق المالك وصل كاملاً كما قصّته memory.get_owner_context بالبايت (المصدر الوحيد للقص).
+    """
+    import threading
+    import time
+    from config import Config
+    import memory
+    import pipeline_config
+    import pipeline_runner
+    from pipeline_runner import CallResult, StageResult
 
-    # التأكد من عدم استخدام inject_max_bytes كحروف max_owner_chars في delivery
-    assert 'max_owner_chars = int(mem_cfg.get("inject_max_bytes"' not in src
-    assert "max_owner_chars=None" in src
+    # 1) سياق مالك حقيقي على القرص (يُقرأ عبر memory.get_owner_context بالبايت)
+    mem_dir = tmp_path / "memory"
+    mem_dir.mkdir()
+    owner_md = "# ثوابت المالك\nالاسم: زيزو — مهندس برمجيات متخصص في بايثون وهندسة النظم.\n" * 3
+    (mem_dir / "MEMORY.md").write_text(owner_md, encoding="utf-8")
+    monkeypatch.setattr(Config, "MEMORY_DIR", str(mem_dir))
+    monkeypatch.setattr(Config, "MEMORY_FILE", str(mem_dir / "MEMORY.md"))
+    monkeypatch.setattr(memory.Config, "MEMORY_DIR", str(mem_dir))
+    monkeypatch.setattr(memory.Config, "MEMORY_FILE", str(mem_dir / "MEMORY.md"))
+    memory.reset_state()
+
+    # 2) خط إنتاج وهمي بمرحلتين مع تفعيل الذاكرة
+    pipe_file = tmp_path / "pipeline.json"
+    pipe_file.write_text('{"version": 1}', encoding="utf-8")
+    monkeypatch.setattr(Config, "PIPELINE_FILE", str(pipe_file))
+    monkeypatch.setattr(pipeline_config.Config, "PIPELINE_FILE", str(pipe_file))
+    pipeline_config.reset_cache()
+    mem_cfg = {"enabled": True, "inject_max_lines": 200, "inject_max_bytes": 25600,
+               "topics": ["coding", "family", "notes"], "context_per_topic_n": 3, "context_max_chars": 800}
+    custom_cfg = {
+        "display": {"max_parallel": 2, "live_cap_utf16": 3400, "style": "single_live"},
+        "providers": {"prov_a": {}, "prov_b": {}},
+        "stages": [
+            {"name": "proposers", "enabled": True, "calls": [{"provider": "prov_a", "label": "فلاش"}]},
+            {"name": "final", "enabled": True, "prompt": "synthesis", "inputs": ["raw", "proposers"],
+             "calls": [{"provider": "prov_b", "label": "شلبي"}]},
+        ],
+        "guards": {"dedupe_ratio": 0.98, "forbid_new_speaker_tags": True},
+        "speakers": {"enabled": False},
+        "memory": mem_cfg,
+    }
+    monkeypatch.setattr(pipeline_config, "get", lambda: custom_cfg)
+
+    def mock_run_stage(stage_name, stage_config, inputs, **kwargs):
+        return StageResult(
+            stage_name=stage_name, status="ok",
+            calls=[CallResult(call_id="c", provider="prov_a", model="m", status="ok",
+                              text="نص منظم", label="فلاش", elapsed_s=0.1)],
+            final_output="نص منظم",
+        )
+    monkeypatch.setattr(pipeline_runner, "run_stage", mock_run_stage)
+
+    # 3) التقاط كل نداء فعلي لـ inject_system_context مع تمرير النداء للأصل (لا تغيير في السلوك)
+    captured = []
+    real_inject = text_assist.inject_system_context
+
+    def spy_inject(system_prompt, context_summary=None, owner_context=None, mode="polish", max_owner_chars=None):
+        captured.append({"mode": mode, "owner_context": owner_context, "max_owner_chars": max_owner_chars})
+        return real_inject(system_prompt, context_summary=context_summary, owner_context=owner_context,
+                           mode=mode, max_owner_chars=max_owner_chars)
+    monkeypatch.setattr(text_assist, "inject_system_context", spy_inject)
+
+    class DummySender:
+        def __init__(self):
+            self._mid = 10
+        def send_text(self, text, reply_to_id=None, parse_mode=None, **kw):
+            self._mid += 1
+            return {"message_id": self._mid}
+        def edit_text(self, text, message_id, **kw):
+            return {"message_id": message_id}
+
+    th = delivery._deliver_synthesizer(
+        raw="نص أصلي", polished="مسودة مسبقة", role_id="general", gl=None, l2=None,
+        session_name="sess", sender=DummySender(), anchor=1, local_polish_fn=None,
+        t0_flow=time.monotonic(), gemini_elapsed=0.5, res_lock=threading.Lock(),
+        result={"title": "اختبار", "raw": "نص أصلي"},
+        _bg_finalize=lambda app, arch, **kw: None,
+    )
+    th.join(timeout=5.0)
+
+    # 4) التحقق السلوكي
+    assert captured, "لم يُستدعَ inject_system_context إطلاقاً — المسار لم يعمل"
+    assert all(c["max_owner_chars"] is None for c in captured), captured
+    expected_owner = memory.get_owner_context(mem_cfg, force=True)
+    assert expected_owner and "زيزو" in expected_owner
+    assert all(c["owner_context"] == expected_owner for c in captured), "سياق المالك لم يصل كما قصّته memory بالبايت"
+    assert {c["mode"] for c in captured} >= {"polish", "synthesis"}
