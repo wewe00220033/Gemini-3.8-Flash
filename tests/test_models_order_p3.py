@@ -5,8 +5,6 @@
 من لوحة الاستضافة دون لمس الكود، لإنفاذ قرار المالك (PHASE2-CLOSE §ج-4).
 """
 import importlib
-import os
-import pytest
 
 
 def test_models_order_default_without_env_var(fresh_env, monkeypatch):

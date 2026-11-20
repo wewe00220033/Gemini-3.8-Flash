@@ -9,7 +9,6 @@ tests/test_p3_03_ki04_ki05.py — اختبارات حزمة P3-03 (KI-04 و KI-0
 
 import json
 import os
-import pytest
 
 import delivery
 import pipeline_defaults
